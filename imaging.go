@@ -1,0 +1,82 @@
+package suteme
+
+import (
+	"image"
+	"image/color"
+	"image/draw"
+	"math"
+)
+
+func ConvertGray(src image.Image) *image.Gray {
+	bounds := src.Bounds()
+	gray := image.NewGray(bounds)
+	draw.Draw(gray, bounds, src, bounds.Min, draw.Src)
+	return gray
+}
+
+func Threshold(src *image.Gray, thresh uint8) *image.Gray {
+	bounds := src.Bounds()
+	dst := image.NewGray(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if src.GrayAt(x, y).Y < thresh {
+				dst.SetGray(x, y, color.Gray{Y: 255})
+			}
+		}
+	}
+	return dst
+}
+
+func BoxBlur(src *image.Gray, radius int) *image.Gray {
+	bounds := src.Bounds()
+	dst := image.NewGray(bounds)
+	size := 2*radius + 1
+	div := size * size
+
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			sum := 0
+			for dy := -radius; dy <= radius; dy++ {
+				for dx := -radius; dx <= radius; dx++ {
+					ny, nx := y+dy, x+dx
+					if ny < bounds.Min.Y {
+						ny = bounds.Min.Y
+					}
+					if ny >= bounds.Max.Y {
+						ny = bounds.Max.Y - 1
+					}
+					if nx < bounds.Min.X {
+						nx = bounds.Min.X
+					}
+					if nx >= bounds.Max.X {
+						nx = bounds.Max.X - 1
+					}
+					sum += int(src.GrayAt(nx, ny).Y)
+				}
+			}
+			dst.SetGray(x, y, color.Gray{Y: uint8(sum / div)})
+		}
+	}
+	return dst
+}
+
+func Sobel(src *image.Gray) *image.Gray {
+	bounds := src.Bounds()
+	dst := image.NewGray(bounds)
+
+	for y := bounds.Min.Y + 1; y < bounds.Max.Y-1; y++ {
+		for x := bounds.Min.X + 1; x < bounds.Max.X-1; x++ {
+			gx := -int(src.GrayAt(x-1, y-1).Y) - 2*int(src.GrayAt(x-1, y).Y) - int(src.GrayAt(x-1, y+1).Y) +
+				int(src.GrayAt(x+1, y-1).Y) + 2*int(src.GrayAt(x+1, y).Y) + int(src.GrayAt(x+1, y+1).Y)
+			gy := -int(src.GrayAt(x-1, y-1).Y) - 2*int(src.GrayAt(x, y-1).Y) - int(src.GrayAt(x+1, y-1).Y) +
+				int(src.GrayAt(x-1, y+1).Y) + 2*int(src.GrayAt(x, y+1).Y) + int(src.GrayAt(x+1, y+1).Y)
+
+			mag := math.Sqrt(float64(gx*gx + gy*gy))
+			if mag > 255 {
+				mag = 255
+			}
+			dst.SetGray(x, y, color.Gray{Y: uint8(mag)})
+		}
+	}
+	return dst
+}

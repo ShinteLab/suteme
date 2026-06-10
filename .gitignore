@@ -1,0 +1,18 @@
+# バイナリ
+*.exe
+*.dll
+*.so
+
+# デバッグ画像（自動生成）
+debug_*.png
+
+# 学習済みモデル・学習データ（大きい / 機密性あり）
+model.json
+training_data.json
+training_data.json.*
+
+# 保存済み局面データ
+data/
+
+# Go ビルドキャッシュ
+/vendor/

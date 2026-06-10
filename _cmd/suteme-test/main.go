@@ -1,0 +1,635 @@
+package main
+
+import (
+	"crypto/rand"
+	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"image"
+	_ "image/jpeg"
+	"image/png"
+	_ "image/png"
+	"io"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"suteme"
+)
+
+//go:embed static
+var static embed.FS
+
+type session struct {
+	Original image.Image
+	Result   *suteme.AnalyzeResult
+	BoardImg *image.RGBA
+	Labels   map[string]string
+}
+
+const (
+	dataDir     = "data"
+	historyFile = "data/history.json"
+)
+
+type BoardBounds struct {
+	X1, Y1, X2, Y2 int
+}
+
+type HistoryEntry struct {
+	ID          string       `json:"id"`
+	CreatedAt   string       `json:"created_at"`
+	SFEN        string       `json:"sfen"`
+	BoardBounds *BoardBounds `json:"board_bounds,omitempty"`
+}
+
+type HistoryData struct {
+	Entries []HistoryEntry `json:"entries"`
+}
+
+func loadHistory() *HistoryData {
+	f, err := os.Open(historyFile)
+	if err != nil {
+		return &HistoryData{Entries: []HistoryEntry{}}
+	}
+	defer f.Close()
+	var h HistoryData
+	json.NewDecoder(f).Decode(&h)
+	if h.Entries == nil {
+		h.Entries = []HistoryEntry{}
+	}
+	return &h
+}
+
+func saveHistoryFile(h *HistoryData) {
+	os.MkdirAll(dataDir, 0755)
+	f, err := os.Create(historyFile)
+	if err != nil {
+		log.Printf("saveHistory: %v", err)
+		return
+	}
+	defer f.Close()
+	json.NewEncoder(f).Encode(h)
+}
+
+var (
+	sessions    = make(map[string]*session)
+	mu          sync.RWMutex
+	model       *suteme.Model
+	dataFile    = "training_data.json"
+	modelFile   = "model.json"
+	modelLock   sync.RWMutex
+	historyMu   sync.RWMutex
+)
+
+func main() {
+	// 起動時に保存済みモデルを読み込む
+	if m, err := suteme.LoadModel(modelFile); err == nil {
+		model = m
+		log.Printf("Loaded model from %s", modelFile)
+	}
+
+	staticFS, _ := fs.Sub(static, "static")
+	http.Handle("/", http.FileServer(http.FS(staticFS)))
+	http.HandleFunc("/api/analyze", handleAnalyze)
+	http.HandleFunc("/api/images/", handleImage)
+	http.HandleFunc("/api/cells/", handleCell)
+	http.HandleFunc("/api/history", handleHistory)
+	http.HandleFunc("/api/history/", handleHistoryImage)
+	http.HandleFunc("/api/savesession", handleSaveSession)
+	http.HandleFunc("/api/label", handleLabel)
+	http.HandleFunc("/api/labelbulk", handleLabelBulk)
+	http.HandleFunc("/api/setboard", handleSetBoard)
+	http.HandleFunc("/api/train", handleTrain)
+	http.HandleFunc("/api/recognize", handleRecognize)
+
+	port := "8080"
+	if len(os.Args) > 1 {
+		port = os.Args[1]
+	}
+	addr := ":" + port
+	fmt.Printf("http://localhost%s\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
+}
+
+func newID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func handleAnalyze(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.ParseMultipartForm(32 << 20)
+	file, _, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	img, _, err := image.Decode(file)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	result := suteme.Analyze(img)
+	boardImg := result.DrawBoard(img)
+
+	id := newID()
+	mu.Lock()
+	sessions[id] = &session{
+		Original: img,
+		Result:   result,
+		BoardImg: boardImg,
+		Labels:   make(map[string]string),
+	}
+	mu.Unlock()
+
+	hasBoard := result.Board != nil
+	confidence := 0.0
+	if hasBoard {
+		confidence = suteme.ValidateBoard(img, result.Board)
+	}
+
+	log.Printf("session %s: board=%v confidence=%.0f%%", id, hasBoard, confidence*100)
+
+	resp := map[string]interface{}{
+		"id":         id,
+		"board":      hasBoard && confidence >= 0.5,
+		"confidence": int(confidence * 100),
+	}
+	if hasBoard && confidence >= 0.5 {
+		b := result.Board.Bounds
+		resp["bounds"] = map[string]int{
+			"x": b.Min.X, "y": b.Min.Y,
+			"w": b.Dx(), "h": b.Dy(),
+		}
+		cats := suteme.ClassifyBoard(img, result.Board)
+		catGrid := [9][9]int{}
+		for r := 0; r < 9; r++ {
+			for c := 0; c < 9; c++ {
+				catGrid[r][c] = int(cats[r][c])
+			}
+		}
+		resp["categories"] = catGrid
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func handleImage(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/images/"), "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+
+	id, typ := parts[0], parts[1]
+
+	mu.RLock()
+	s, ok := sessions[id]
+	mu.RUnlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	var img image.Image
+	switch typ {
+	case "original":
+		img = s.Original
+	case "edges":
+		img = s.Result.Edges
+	case "board":
+		img = s.BoardImg
+	default:
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	png.Encode(w, img)
+}
+
+func handleCell(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/cells/"), "/")
+	if len(parts) != 3 {
+		http.NotFound(w, r)
+		return
+	}
+
+	id := parts[0]
+	row, err1 := strconv.Atoi(parts[1])
+	col, err2 := strconv.Atoi(parts[2])
+	if err1 != nil || err2 != nil || row < 0 || row > 8 || col < 0 || col > 8 {
+		http.NotFound(w, r)
+		return
+	}
+
+	mu.RLock()
+	s, ok := sessions[id]
+	mu.RUnlock()
+	if !ok || s.Result.Board == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	cell := s.Result.Board.ExtractCell(s.Original, row, col)
+	if cell == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	png.Encode(w, cell)
+}
+
+func handleLabel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Session string `json:"session"`
+		Row     int    `json:"row"`
+		Col     int    `json:"col"`
+		Piece   string `json:"piece"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	mu.Lock()
+	s, ok := sessions[req.Session]
+	if ok {
+		key := strconv.Itoa(req.Row) + "-" + strconv.Itoa(req.Col)
+		s.Labels[key] = req.Piece
+	}
+	mu.Unlock()
+
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func handleHistory(w http.ResponseWriter, r *http.Request) {
+	historyMu.RLock()
+	h := loadHistory()
+	historyMu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h)
+}
+
+func handleHistoryImage(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/history/")
+	id = strings.TrimSuffix(id, "/image")
+	for _, ch := range id {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	f, err := os.Open(filepath.Join(dataDir, id+".png"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "max-age=86400")
+	io.Copy(w, f)
+}
+
+func handleSaveSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Session string `json:"session"`
+		SFEN    string `json:"sfen"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mu.RLock()
+	s, ok := sessions[req.Session]
+	mu.RUnlock()
+	if !ok || s.Original == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	id := newID()
+	os.MkdirAll(dataDir, 0755)
+	f, err := os.Create(filepath.Join(dataDir, id+".png"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	png.Encode(f, s.Original)
+	f.Close()
+
+	entry := HistoryEntry{
+		ID:        id,
+		CreatedAt: time.Now().Format("01/02 15:04"),
+		SFEN:      req.SFEN,
+	}
+	if s.Result != nil && s.Result.Board != nil {
+		b := s.Result.Board.Bounds
+		entry.BoardBounds = &BoardBounds{b.Min.X, b.Min.Y, b.Max.X, b.Max.Y}
+	}
+	historyMu.Lock()
+	h := loadHistory()
+	h.Entries = append([]HistoryEntry{entry}, h.Entries...)
+	if len(h.Entries) > 100 {
+		for _, old := range h.Entries[100:] {
+			os.Remove(filepath.Join(dataDir, old.ID+".png"))
+		}
+		h.Entries = h.Entries[:100]
+	}
+	saveHistoryFile(h)
+	historyMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": id})
+}
+
+// handleLabelBulk: 複数マスのラベルを一括登録する
+func handleLabelBulk(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Session string `json:"session"`
+		Labels  []struct {
+			Row   int    `json:"row"`
+			Col   int    `json:"col"`
+			Piece string `json:"piece"`
+		} `json:"labels"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mu.Lock()
+	s, ok := sessions[req.Session]
+	if ok {
+		for _, l := range req.Labels {
+			key := strconv.Itoa(l.Row) + "-" + strconv.Itoa(l.Col)
+			s.Labels[key] = l.Piece
+		}
+	}
+	mu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleSetBoard: 手動指定の矩形で盤面を再設定する
+func handleSetBoard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Session string `json:"session"`
+		X1      int    `json:"x1"`
+		Y1      int    `json:"y1"`
+		X2      int    `json:"x2"`
+		Y2      int    `json:"y2"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	mu.Lock()
+	s, ok := sessions[req.Session]
+	var cats [9][9]suteme.CellCategory
+	if ok {
+		br := suteme.BoardRegionFromRect(req.X1, req.Y1, req.X2, req.Y2)
+		s.Result.Board = br
+		s.BoardImg = s.Result.DrawBoard(s.Original)
+		s.Labels = make(map[string]string)
+		cats = suteme.ClassifyBoard(s.Original, br)
+	}
+	mu.Unlock()
+
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	catGrid := [9][9]int{}
+	for row := 0; row < 9; row++ {
+		for col := 0; col < 9; col++ {
+			catGrid[row][col] = int(cats[row][col])
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "ok",
+		"categories": catGrid,
+	})
+}
+
+// handleTrain: ラベル済みデータで学習する
+func handleTrain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("handleTrain panic: %v", rec)
+			http.Error(w, fmt.Sprintf("training failed: %v", rec), http.StatusInternalServerError)
+		}
+	}()
+
+	// 既存の学習データを読み込む
+	var data suteme.TrainingData
+	if existing, err := suteme.LoadTrainingData(dataFile); err == nil {
+		data.Samples = existing.Samples
+		log.Printf("Loaded %d existing samples from %s", len(data.Samples), dataFile)
+	}
+
+	// 全セッションの新しいラベルデータを追加
+	mu.RLock()
+	newCount := 0
+	for _, s := range sessions {
+		if s.Result.Board == nil {
+			continue
+		}
+		for key, label := range s.Labels {
+			parts := strings.Split(key, "-")
+			if len(parts) != 2 {
+				continue
+			}
+			row, _ := strconv.Atoi(parts[0])
+			col, _ := strconv.Atoi(parts[1])
+			cell := s.Result.Board.ExtractCell(s.Original, row, col)
+			if cell == nil {
+				continue
+			}
+			data.Samples = append(data.Samples, suteme.TrainingSample{
+				Input: suteme.CellToInput(cell),
+				Label: suteme.LabelToClass(label),
+			})
+			newCount++
+		}
+	}
+	mu.RUnlock()
+
+	// 入力長が合わないサンプルを除外
+	valid := data.Samples[:0]
+	for _, s := range data.Samples {
+		if len(s.Input) == suteme.InputSize {
+			valid = append(valid, s)
+		}
+	}
+	skipped := len(data.Samples) - len(valid)
+	if skipped > 0 {
+		log.Printf("Skipped %d samples with wrong input size", skipped)
+	}
+	data.Samples = valid
+
+	if len(data.Samples) == 0 {
+		http.Error(w, "No labeled data", http.StatusBadRequest)
+		return
+	}
+
+	// 学習データを保存（生データ全件）
+	suteme.SaveTrainingData(dataFile, &data)
+
+	// クラスバランス調整してから学習
+	balanced := suteme.BalanceData(data.Samples)
+	dist := suteme.ClassDistribution(balanced)
+	log.Printf("Training: %d raw → %d balanced (%d new)", len(data.Samples), len(balanced), newCount)
+
+	m := suteme.Train(&suteme.TrainingData{Samples: balanced})
+
+	// モデルを保存
+	suteme.SaveModel(modelFile, m)
+
+	modelLock.Lock()
+	model = m
+	modelLock.Unlock()
+
+	log.Printf("Training complete, model saved to %s", modelFile)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":       "ok",
+		"samples":      len(data.Samples),
+		"balanced":     len(balanced),
+		"distribution": dist,
+	})
+}
+
+// handleRecognize: 学習済みモデルで盤面を認識する
+func handleRecognize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Session string `json:"session"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	modelLock.RLock()
+	m := model
+	modelLock.RUnlock()
+
+	if m == nil {
+		http.Error(w, "Model not trained yet", http.StatusBadRequest)
+		return
+	}
+
+	mu.RLock()
+	s, ok := sessions[req.Session]
+	mu.RUnlock()
+	if !ok || s.Result.Board == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// 各マスを認識
+	cells := make([][]map[string]interface{}, 9)
+	for row := 0; row < 9; row++ {
+		cells[row] = make([]map[string]interface{}, 9)
+		for col := 0; col < 9; col++ {
+			cell := s.Result.Board.ExtractCell(s.Original, row, col)
+			if cell == nil {
+				continue
+			}
+			// 空/向きは ClassifyCell で判定
+			cat := suteme.ClassifyCell(cell)
+			if cat == suteme.CellEmpty {
+				cells[row][col] = map[string]interface{}{
+					"label": "none", "confidence": 95,
+				}
+				continue
+			}
+			// 駒種は gobrain で推論
+			class, conf := m.Predict(cell)
+			base := suteme.ClassToBaseLabel(class)
+			label := base
+			if cat == suteme.CellPieceDown {
+				if len(base) > 1 && base[0] == '+' {
+					label = "+" + strings.ToLower(base[1:])
+				} else {
+					label = strings.ToLower(base)
+				}
+			}
+			cells[row][col] = map[string]interface{}{
+				"label":      label,
+				"confidence": int(conf * 100),
+			}
+		}
+	}
+
+	sfen := suteme.RecognizeBoard(s.Original, s.Result.Board, m)
+	validation := suteme.ValidatePieces(sfen)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"sfen":       sfen,
+		"cells":      cells,
+		"validation": validation,
+	})
+}

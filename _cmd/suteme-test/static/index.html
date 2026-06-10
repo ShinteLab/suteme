@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>suteme-test</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 0.1em; }
+
+.upload-area {
+  border: 2px dashed #555; border-radius: 8px; padding: 48px;
+  text-align: center; cursor: pointer; margin: 0 auto 24px; max-width: 600px;
+  transition: border-color 0.2s, background 0.2s;
+}
+.upload-area:hover, .upload-area.dragover {
+  border-color: #4cc9f0; background: rgba(76,201,240,0.05);
+}
+.upload-area input { display: none; }
+.upload-area p { color: #888; }
+
+.stats { text-align: center; margin-bottom: 16px; color: #aaa; font-size: 14px; }
+.loading { display: none; text-align: center; padding: 24px; color: #4cc9f0; }
+.loading.active { display: block; }
+
+.pipeline {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
+  max-width: 1400px; margin: 0 auto 32px;
+}
+.card { background: #16213e; border-radius: 6px; overflow: hidden; }
+.card h3 { padding: 6px 12px; background: #0f3460; font-size: 13px; font-weight: 500; }
+.card img { width: 100%; display: block; }
+
+.cells-section { max-width: 800px; margin: 0 auto; }
+.cells-section h2 {
+  font-size: 16px; font-weight: 400; margin-bottom: 12px;
+  padding-bottom: 8px; border-bottom: 1px solid #333;
+}
+.cell-grid {
+  display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px;
+  max-width: 600px; margin: 0 auto;
+}
+.cell {
+  background: #16213e; border-radius: 4px; overflow: hidden; text-align: center;
+  cursor: pointer; border: 2px solid transparent; transition: border-color 0.1s;
+}
+.cell:hover { border-color: #4cc9f0; }
+.cell.labeled { border-color: #40916c; }
+.cell.labeled:hover { border-color: #74c69d; }
+.cell img { filter: brightness(0.55); }
+.cell.labeled img { filter: brightness(1); }
+.cell img { width: 100%; display: block; aspect-ratio: 1; object-fit: contain; pointer-events: none; }
+.gote-mark { display: inline-block; transform: rotate(180deg); }
+.cell .label {
+  font-size: 11px; padding: 2px; background: #0f3460;
+  white-space: nowrap; overflow: hidden;
+}
+
+.piece-select {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  background: #16213e; border: 1px solid #4cc9f0; border-radius: 8px;
+  padding: 16px; display: none; z-index: 100; min-width: 340px;
+}
+.piece-select.active { display: block; }
+.piece-select h3 { margin-bottom: 12px; font-size: 14px; }
+.piece-select .pieces {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px;
+}
+.overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5); display: none; z-index: 99;
+}
+.overlay.active { display: block; }
+.action-btn {
+  float: right; padding: 4px 16px; border: none; border-radius: 4px;
+  cursor: pointer; font-size: 13px; font-weight: 600; margin-left: 8px;
+  background: #4cc9f0; color: #000;
+}
+.action-btn:hover { background: #7dd8f5; }
+.action-btn:disabled { background: #555; color: #999; cursor: wait; }
+.select-row { margin-bottom: 8px; }
+.select-label { font-size: 12px; color: #aaa; display: block; margin-bottom: 4px; }
+.sel-btn {
+  border: 2px solid #333; background: #0f3460; color: #eee;
+  padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-right: 4px;
+}
+.sel-btn:hover { border-color: #4cc9f0; }
+.sel-btn.active { border-color: #4cc9f0; background: #4cc9f0; color: #000; font-weight: bold; box-shadow: 0 0 8px #4cc9f0; }
+.correct-btn {
+  background: #2d6a4f; color: #fff; border: none; padding: 8px 20px;
+  border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 14px; margin-right: 4px;
+}
+.correct-btn:hover:not(:disabled) { background: #40916c; }
+.correct-btn:disabled, .ok-btn:disabled { opacity: 0.3; cursor: default; }
+.ok-btn {
+  background: #4cc9f0; color: #000; border: none; padding: 8px 24px;
+  border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 14px;
+}
+.ok-btn:hover { background: #7dd8f5; }
+.cancel-btn {
+  background: #555; color: #eee; border: none; padding: 8px 16px;
+  border-radius: 4px; cursor: pointer; font-size: 14px; margin-left: 8px;
+}
+.cancel-btn:hover { background: #777; }
+.confidence-bad { color: #d00000; }
+.confidence-ok { color: #f0a030; }
+.confidence-good { color: #40916c; }
+.piece-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.piece-table th, .piece-table td { padding: 3px 8px; text-align: center; border: 1px solid #2a3a5e; }
+.piece-table th { background: #0f3460; color: #aaa; }
+.piece-table .row-label { color: #aaa; font-size: 11px; }
+.piece-table .row-sente td:not(.row-label) { color: #74c69d; }
+.piece-table .row-gote td:not(.row-label) { color: #e07070; }
+.piece-table .row-hand td:not(.row-label) { color: #f0a030; }
+.count-warn { color: #d00000 !important; font-weight: bold; }
+.cell-preview { width: 64px; height: 64px; object-fit: contain; border: 1px solid #333; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
+</style>
+</head>
+<body>
+
+<h1>suteme-test</h1>
+
+<div class="upload-area" id="upload">
+  <p>将棋盤の画像をドラッグ＆ドロップ、クリックしてアップロード<br>または <strong>Ctrl+V</strong> で貼り付け</p>
+  <input type="file" id="file" accept="image/*">
+</div>
+
+<div id="history-section" style="max-width:600px;margin:0 auto 20px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <span style="font-size:13px;color:#888">履歴</span>
+    <button onclick="refreshHistory()" style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer">更新</button>
+  </div>
+  <div id="history-list" style="max-height:180px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
+</div>
+
+<div class="loading" id="loading">解析中...</div>
+<div class="stats" id="stats"></div>
+
+<div class="pipeline" id="pipeline" style="display:none">
+  <div class="card">
+    <h3>元画像
+      <button id="btn-select-board" onclick="startBoardSelect()" style="float:right;font-size:11px;padding:2px 8px;background:#555;color:#eee;border:none;border-radius:3px;cursor:pointer">盤面を手動指定</button>
+    </h3>
+    <div id="img-original-wrapper" style="position:relative;cursor:default">
+      <img id="img-original" style="width:100%;display:block">
+      <canvas id="select-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></canvas>
+    </div>
+    <div id="select-hint" style="display:none;padding:4px 8px;background:#0f3460;font-size:12px;color:#4cc9f0">盤面の左上から右下へドラッグしてください</div>
+  </div>
+  <div class="card"><h3>エッジ</h3><img id="img-edges" style="width:100%;display:block"></div>
+  <div class="card"><h3>盤面検出</h3><img id="img-board" style="width:100%;display:block"></div>
+</div>
+
+<div class="cells-section" id="cells-section" style="display:none">
+  <h2>マス目 (9x9) — クリックでラベリング
+    <button class="action-btn" id="btn-train" onclick="trainModel()">学習</button>
+    <button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>
+  </h2>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+    <input type="text" id="sfen-input"
+      placeholder="SFENを貼り付け → 一括入力 (例: lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1)"
+      style="flex:1;background:#0f3460;border:1px solid #333;color:#eee;padding:6px 10px;border-radius:4px;font-family:monospace;font-size:12px">
+    <button onclick="applyFromSFEN()" style="background:#4cc9f0;color:#000;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">SFENから入力</button>
+    <button id="btn-save-session" onclick="saveSession()" disabled
+      style="background:#2d6a4f;color:#eee;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap;opacity:0.4">保存</button>
+  </div>
+  <div id="sfen-output" style="display:none;background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:4px;font-family:monospace;font-size:14px;word-break:break-all"></div>
+  <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
+  <div class="cell-grid" id="cell-grid"></div>
+</div>
+
+<div class="overlay" id="overlay"></div>
+<div class="piece-select" id="piece-select">
+  <h3 id="select-title">ラベリング</h3>
+  <div style="margin-bottom:12px">
+    <img id="dialog-preview" class="cell-preview">
+    <span id="dialog-pos"></span>
+    <button class="correct-btn" id="btn-correct" onclick="confirmCorrect()">○ 合ってる</button>
+  </div>
+  <div class="select-row">
+    <span class="select-label">分類:</span>
+    <button class="sel-btn" id="sel-empty" onclick="selCat(0)">空</button>
+    <button class="sel-btn" id="sel-up" onclick="selCat(1)">☗先手</button>
+    <button class="sel-btn" id="sel-down" onclick="selCat(2)"><span class="gote-mark">☖</span>後手</button>
+  </div>
+  <div id="piece-row" class="select-row">
+    <span class="select-label">駒種: <strong id="selected-piece-name" style="color:#4cc9f0">未選択</strong></span>
+    <div class="pieces" id="piece-buttons"></div>
+  </div>
+  <div class="select-row" style="margin-top:12px;text-align:right">
+    <button class="ok-btn" id="btn-fix" onclick="confirmSelection()">修正</button>
+    <button class="cancel-btn" onclick="closeDialog()">キャンセル</button>
+  </div>
+</div>
+
+<script>
+const PIECE_TYPES = [
+  {base: "P", label: "歩"},
+  {base: "L", label: "香"},
+  {base: "N", label: "桂"},
+  {base: "S", label: "銀"},
+  {base: "G", label: "金"},
+  {base: "B", label: "角"},
+  {base: "R", label: "飛"},
+  {base: "K", label: "玉"},
+  {base: "+P", label: "と"},
+  {base: "+L", label: "杏"},
+  {base: "+N", label: "圭"},
+  {base: "+S", label: "全"},
+  {base: "+B", label: "馬"},
+  {base: "+R", label: "龍"},
+];
+
+const PIECES = [
+  {id: "none", label: "空"},
+  {id: "P", label: "歩"}, {id: "p", label: "歩↓"},
+  {id: "L", label: "香"}, {id: "l", label: "香↓"},
+  {id: "N", label: "桂"}, {id: "n", label: "桂↓"},
+  {id: "S", label: "銀"}, {id: "s", label: "銀↓"},
+  {id: "G", label: "金"}, {id: "g", label: "金↓"},
+  {id: "B", label: "角"}, {id: "b", label: "角↓"},
+  {id: "R", label: "飛"}, {id: "r", label: "飛↓"},
+  {id: "K", label: "玉"}, {id: "k", label: "玉↓"},
+  {id: "+P", label: "と"}, {id: "+p", label: "と↓"},
+  {id: "+L", label: "杏"}, {id: "+l", label: "杏↓"},
+  {id: "+N", label: "圭"}, {id: "+n", label: "圭↓"},
+  {id: "+S", label: "全"}, {id: "+s", label: "全↓"},
+  {id: "+B", label: "馬"}, {id: "+b", label: "馬↓"},
+  {id: "+R", label: "龍"}, {id: "+r", label: "龍↓"},
+];
+
+let currentSessionId = null;
+let currentCell = null;
+let cellCategories = null;
+let selectedCat = -1;
+let selectedPiece = null;
+let originalCat = -1;
+let modified = false;
+let recognized = false; // 認識結果表示中はラベリング不可
+
+// Upload
+const uploadEl = document.getElementById('upload');
+const fileInput = document.getElementById('file');
+uploadEl.addEventListener('click', () => fileInput.click());
+uploadEl.addEventListener('dragover', e => { e.preventDefault(); uploadEl.classList.add('dragover'); });
+uploadEl.addEventListener('dragleave', () => uploadEl.classList.remove('dragover'));
+uploadEl.addEventListener('drop', e => {
+  e.preventDefault(); uploadEl.classList.remove('dragover');
+  if (e.dataTransfer.files.length) analyze(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) analyze(fileInput.files[0]); });
+
+// 盤面手動指定
+let boardSelectMode = false;
+let selectDragStart = null;
+
+function startBoardSelect() {
+  if (!currentSessionId) return;
+  boardSelectMode = true;
+  document.getElementById('select-hint').style.display = 'block';
+  document.getElementById('img-original-wrapper').style.cursor = 'crosshair';
+}
+
+function getImgCoord(img, clientX, clientY) {
+  const rect = img.getBoundingClientRect();
+  return {
+    x: Math.round((clientX - rect.left) * img.naturalWidth / rect.width),
+    y: Math.round((clientY - rect.top) * img.naturalHeight / rect.height),
+  };
+}
+
+(function() {
+  const wrapper = document.getElementById('img-original-wrapper');
+  const canvas = document.getElementById('select-canvas');
+
+  wrapper.addEventListener('mousedown', e => {
+    if (!boardSelectMode) return;
+    selectDragStart = { clientX: e.clientX, clientY: e.clientY };
+    e.preventDefault();
+  });
+
+  wrapper.addEventListener('mousemove', e => {
+    if (!boardSelectMode || !selectDragStart) return;
+    const wRect = wrapper.getBoundingClientRect();
+    canvas.width = wrapper.offsetWidth;
+    canvas.height = wrapper.offsetHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const x1 = selectDragStart.clientX - wRect.left;
+    const y1 = selectDragStart.clientY - wRect.top;
+    const x2 = e.clientX - wRect.left;
+    const y2 = e.clientY - wRect.top;
+    ctx.strokeStyle = '#4cc9f0';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 2]);
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  });
+
+  wrapper.addEventListener('mouseup', async e => {
+    if (!boardSelectMode || !selectDragStart) return;
+    boardSelectMode = false;
+    wrapper.style.cursor = 'default';
+    document.getElementById('select-hint').style.display = 'none';
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const img = document.getElementById('img-original');
+    const c1 = getImgCoord(img, selectDragStart.clientX, selectDragStart.clientY);
+    const c2 = getImgCoord(img, e.clientX, e.clientY);
+    selectDragStart = null;
+
+    const res = await fetch('/api/setboard', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: currentSessionId, x1: c1.x, y1: c1.y, x2: c2.x, y2: c2.y }),
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      const t = Date.now();
+      document.getElementById('img-board').src = '/api/images/' + currentSessionId + '/board?' + t;
+      renderCells(currentSessionId, data.categories);
+      document.getElementById('stats').textContent = '盤面を手動指定しました';
+    }
+  });
+})();
+
+// Ctrl+V ペースト対応
+document.addEventListener('paste', e => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      analyze(item.getAsFile());
+      break;
+    }
+  }
+});
+
+async function analyze(file) {
+  recognized = false;
+  document.getElementById('loading').classList.add('active');
+  document.getElementById('pipeline').style.display = 'none';
+  document.getElementById('cells-section').style.display = 'none';
+  document.getElementById('stats').textContent = '';
+
+  const form = new FormData();
+  form.append('image', file);
+
+  try {
+    const res = await fetch('/api/analyze', { method: 'POST', body: form });
+    const data = await res.json();
+    currentSessionId = data.id;
+
+    const t = Date.now();
+    document.getElementById('img-original').src = '/api/images/' + data.id + '/original?' + t;
+    document.getElementById('img-edges').src = '/api/images/' + data.id + '/edges?' + t;
+    document.getElementById('img-board').src = '/api/images/' + data.id + '/board?' + t;
+    document.getElementById('pipeline').style.display = 'grid';
+
+    const conf = data.confidence || 0;
+    const confClass = conf >= 70 ? 'confidence-good' : conf >= 50 ? 'confidence-ok' : 'confidence-bad';
+
+    if (data.board) {
+      const b = data.bounds;
+      document.getElementById('stats').innerHTML =
+        '盤面検出: ' + b.w + 'x' + b.h + 'px | 信頼度: <span class="' + confClass + '">' + conf + '%</span>';
+      renderCells(data.id, data.categories);
+    } else {
+      document.getElementById('stats').innerHTML =
+        '<span class="confidence-bad">盤面が検出できませんでした (信頼度: ' + conf + '%)</span>';
+      document.getElementById('cells-section').style.display = 'none';
+    }
+  } catch (e) { alert('エラー: ' + e.message); }
+  finally { document.getElementById('loading').classList.remove('active'); }
+}
+
+function renderCells(id, categories) {
+  cellCategories = categories;
+  const grid = document.getElementById('cell-grid');
+  grid.innerHTML = '';
+
+  for (let r = 0; r < 9; r++) {
+    for (let c = 0; c < 9; c++) {
+      const cat = categories ? categories[r][c] : -1;
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.onclick = () => openDialog(r, c);
+
+      const catColors = ['#0f3460', '#2d6a4f', '#9d0208'];
+      const labelBg = cat >= 0 ? catColors[cat] : '#0f3460';
+
+      cell.innerHTML =
+        '<img src="/api/cells/' + id + '/' + r + '/' + c + '?' + Date.now() + '">' +
+        '<div class="label" id="label-' + r + '-' + c + '" style="background:' + labelBg + '">' + catLabel(cat) + '</div>';
+      grid.appendChild(cell);
+    }
+  }
+  document.getElementById('sfen-output').style.display = 'none';
+  document.getElementById('cells-section').style.display = 'block';
+}
+
+function catLabel(cat) {
+  if (cat === 0) return '空';
+  if (cat === 1) return '☗';
+  if (cat === 2) return '<span class="gote-mark">☖</span>';
+  return '?';
+}
+
+// Dialog
+function openDialog(r, c) {
+  if (recognized) return; // 認識結果表示中は編集不可
+  currentCell = { r, c };
+  const cat = cellCategories ? cellCategories[r][c] : 0;
+  selectedCat = cat;
+  originalCat = cat;
+  selectedPiece = null;
+  modified = false;
+
+  document.getElementById('dialog-preview').src =
+    '/api/cells/' + currentSessionId + '/' + r + '/' + c + '?' + Date.now();
+  document.getElementById('dialog-pos').textContent = (9 - c) + String.fromCharCode(97 + r);
+  document.getElementById('select-title').textContent = 'ラベリング';
+
+  updateCatButtons();
+  clearPieceSelection();
+  updateModifiedState();
+
+  document.getElementById('overlay').classList.add('active');
+  document.getElementById('piece-select').classList.add('active');
+}
+
+function selCat(cat) {
+  selectedCat = cat;
+  selectedPiece = null;
+  modified = true;
+  updateCatButtons();
+  clearPieceSelection();
+  updateModifiedState();
+  // 空を選択したら即確定
+  if (cat === 0) confirmSelection();
+}
+
+function updateCatButtons() {
+  document.getElementById('sel-empty').className = 'sel-btn' + (selectedCat === 0 ? ' active' : '');
+  document.getElementById('sel-up').className = 'sel-btn' + (selectedCat === 1 ? ' active' : '');
+  document.getElementById('sel-down').className = 'sel-btn' + (selectedCat === 2 ? ' active' : '');
+}
+
+function updateModifiedState() {
+  document.getElementById('btn-correct').disabled = modified;
+  document.getElementById('btn-fix').disabled = !modified;
+}
+
+function clearPieceSelection() {
+  document.querySelectorAll('#piece-buttons .sel-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('selected-piece-name').textContent = '未選択';
+}
+
+function selectPieceBtn(pt, btn) {
+  selectedPiece = pt;
+  modified = true;
+  document.querySelectorAll('#piece-buttons .sel-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('selected-piece-name').textContent = pt.label;
+  updateModifiedState();
+  // 駒種を選択したら即確定
+  confirmSelection();
+}
+
+// 「○ 合ってる」: 自動分類がそのまま正解
+function confirmCorrect() {
+  if (!currentCell || !currentSessionId) return;
+  const { r, c } = currentCell;
+  const cat = cellCategories ? cellCategories[r][c] : 0;
+
+  if (cat === 0) {
+    applyLabel(r, c, 'none', '空○', '#2d6a4f');
+  } else {
+    // 向きのみ○の場合もラベル保存
+    applyLabel(r, c, null, catLabel(cat) + '○', '#2d6a4f');
+    // labeled クラスは applyLabel 内で付く（pieceId=nullでも）
+    const cell = document.getElementById('label-' + r + '-' + c)?.closest('.cell');
+    if (cell) cell.classList.add('labeled');
+  }
+  closeDialog();
+}
+
+// 「修正OK」: 変更した内容で確定（○なし）
+function confirmSelection() {
+  if (!currentCell || !currentSessionId) return;
+  const { r, c } = currentCell;
+
+  if (selectedCat === 0) {
+    applyLabel(r, c, 'none', '空', '#0f3460');
+    if (cellCategories) cellCategories[r][c] = 0;
+  } else if (selectedPiece) {
+    let pieceId = selectedPiece.base;
+    if (selectedCat === 2) {
+      pieceId = pieceId.startsWith('+')
+        ? '+' + pieceId.substring(1).toLowerCase()
+        : pieceId.toLowerCase();
+    }
+    const mark = selectedCat === 2
+      ? '<span class="gote-mark">☖</span>' + selectedPiece.label
+      : '☗' + selectedPiece.label;
+    applyLabel(r, c, pieceId, mark, selectedCat === 1 ? '#2d6a4f' : '#9d0208');
+    if (cellCategories) cellCategories[r][c] = selectedCat;
+  } else {
+    const catColors = ['#0f3460', '#2d6a4f', '#9d0208'];
+    applyLabel(r, c, null, catLabel(selectedCat), catColors[selectedCat]);
+    if (cellCategories) cellCategories[r][c] = selectedCat;
+  }
+  closeDialog();
+}
+
+function closeDialog() {
+  document.getElementById('overlay').classList.remove('active');
+  document.getElementById('piece-select').classList.remove('active');
+  currentCell = null;
+}
+
+document.getElementById('overlay').addEventListener('click', closeDialog);
+
+// 駒種ボタン生成
+const pieceBtns = document.getElementById('piece-buttons');
+PIECE_TYPES.forEach(pt => {
+  const btn = document.createElement('button');
+  btn.textContent = pt.label;
+  btn.className = 'sel-btn';
+  btn.addEventListener('click', () => selectPieceBtn(pt, btn));
+  pieceBtns.appendChild(btn);
+});
+
+function applyLabel(r, c, pieceId, displayHtml, bgColor) {
+  const label = document.getElementById('label-' + r + '-' + c);
+  label.innerHTML = displayHtml;
+  label.style.background = bgColor;
+
+  // セルに labeled クラスを付ける
+  const cell = label.closest('.cell');
+  if (cell) cell.classList.add('labeled');
+
+  if (pieceId !== null) {
+    fetch('/api/label', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: currentSessionId, row: r, col: c, piece: pieceId }),
+    }).catch(e => console.error('label error:', e));
+  }
+}
+
+// 履歴
+async function refreshHistory() {
+  const res = await fetch('/api/history');
+  const data = await res.json();
+  const list = document.getElementById('history-list');
+  if (!data.entries || data.entries.length === 0) {
+    list.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:10px">保存した局面はありません</div>';
+    return;
+  }
+  list.innerHTML = data.entries.map(e =>
+    `<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid #1a2a4e">
+      <span style="font-size:11px;color:#888;white-space:nowrap">${e.created_at}</span>
+      <span style="font-size:11px;color:#bbb;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
+            title="${e.sfen}">${e.sfen}</span>
+      <button class="hist-btn" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
+        data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}"
+        style="font-size:11px;background:#0f3460;border:1px solid #4cc9f0;color:#4cc9f0;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap">
+        再入力
+      </button>
+    </div>`
+  ).join('');
+}
+
+document.getElementById('history-list').addEventListener('click', async e => {
+  const btn = e.target.closest('.hist-btn');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const sfen = btn.dataset.sfen;
+  const bounds = btn.dataset.bounds ? JSON.parse(btn.dataset.bounds) : null;
+
+  const res = await fetch('/api/history/' + id + '/image');
+  if (!res.ok) { alert('画像の読み込みに失敗しました'); return; }
+  const blob = await res.blob();
+  const file = new File([blob], id + '.png', { type: 'image/png' });
+  document.getElementById('sfen-input').value = sfen;
+  await analyze(file);
+
+  // 保存した盤面座標を復元
+  if (bounds && currentSessionId) {
+    const sbRes = await fetch('/api/setboard', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: currentSessionId, ...bounds }),
+    });
+    const sbData = await sbRes.json();
+    if (sbData.status === 'ok') {
+      const t = Date.now();
+      document.getElementById('img-board').src = '/api/images/' + currentSessionId + '/board?' + t;
+      renderCells(currentSessionId, sbData.categories);
+    }
+  }
+
+  // SFEN を再適用（sfen-input は既に設定済み）
+  if (sfen) {
+    await applyFromSFEN();
+  }
+});
+
+async function saveSession() {
+  const sfen = document.getElementById('sfen-input').value.trim();
+  if (!sfen || !currentSessionId) return;
+  const btn = document.getElementById('btn-save-session');
+  btn.textContent = '保存中...';
+  const res = await fetch('/api/savesession', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session: currentSessionId, sfen }),
+  });
+  const data = await res.json();
+  if (data.status === 'ok') {
+    btn.textContent = '保存済';
+    btn.disabled = true;
+    btn.style.opacity = '0.4';
+    refreshHistory();
+  } else {
+    btn.textContent = '保存';
+  }
+}
+
+refreshHistory();
+
+// SFENパーサー
+function parseSFEN(sfenStr) {
+  const board = sfenStr.trim().split(' ')[0];
+  const rows = board.split('/');
+  const result = [];
+  for (let r = 0; r < 9; r++) {
+    const row = rows[r] || '';
+    let c = 0, i = 0;
+    while (c < 9 && i < row.length) {
+      const ch = row[i];
+      if (ch >= '1' && ch <= '9') {
+        const n = parseInt(ch);
+        for (let j = 0; j < n; j++) result.push({ row: r, col: c++, piece: 'none' });
+        i++;
+      } else if (ch === '+') {
+        const next = row[++i]; i++;
+        result.push({ row: r, col: c++, piece: '+' + next });
+      } else {
+        result.push({ row: r, col: c++, piece: ch });
+        i++;
+      }
+    }
+    while (c < 9) result.push({ row: r, col: c++, piece: 'none' });
+  }
+  return result;
+}
+
+async function applyFromSFEN() {
+  const sfen = document.getElementById('sfen-input').value.trim();
+  if (!sfen || !currentSessionId) return;
+
+  const labels = parseSFEN(sfen);
+  if (labels.length === 0) { alert('SFENの解析に失敗しました'); return; }
+
+  const res = await fetch('/api/labelbulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session: currentSessionId, labels }),
+  });
+  const data = await res.json();
+  if (data.status !== 'ok') { alert('一括入力に失敗しました'); return; }
+
+  const catColors = ['#0f3460', '#2d6a4f', '#9d0208'];
+  for (const { row, col, piece } of labels) {
+    const labelEl = document.getElementById('label-' + row + '-' + col);
+    if (!labelEl) continue;
+    const cellEl = labelEl.closest('.cell');
+
+    if (piece === 'none') {
+      labelEl.innerHTML = '空';
+      labelEl.style.background = catColors[0];
+      if (cellCategories) cellCategories[row][col] = 0;
+      if (cellEl) cellEl.classList.add('labeled');
+    } else {
+      const isPromoted = piece[0] === '+';
+      const letter = isPromoted ? piece[1] : piece[0];
+      const isGote = letter === letter.toLowerCase();
+      const base = isPromoted ? '+' + letter.toUpperCase() : letter.toUpperCase();
+      const pt = PIECE_TYPES.find(p => p.base === base);
+      const pname = pt ? pt.label : piece;
+      if (isGote) {
+        labelEl.innerHTML = '<span class="gote-mark">☖</span>' + pname;
+        labelEl.style.background = catColors[2];
+        if (cellCategories) cellCategories[row][col] = 2;
+      } else {
+        labelEl.innerHTML = '☗' + pname;
+        labelEl.style.background = catColors[1];
+        if (cellCategories) cellCategories[row][col] = 1;
+      }
+      if (cellEl) cellEl.classList.add('labeled');
+    }
+  }
+  document.getElementById('stats').textContent = 'SFEN入力完了 — ' + labels.filter(l => l.piece !== 'none').length + '駒';
+  const saveBtn = document.getElementById('btn-save-session');
+  saveBtn.disabled = false;
+  saveBtn.style.opacity = '1';
+  saveBtn.textContent = '保存';
+}
+
+async function trainModel() {
+  const btn = document.getElementById('btn-train');
+  btn.disabled = true;
+  btn.textContent = '学習中...';
+  try {
+    const res = await fetch('/api/train', { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      const names = {P:'歩',L:'香',N:'桂',S:'銀',G:'金',B:'角',R:'飛',K:'玉',
+        '+P':'と','+L':'杏','+N':'圭','+S':'全','+B':'馬','+R':'龍'};
+      const dist = data.distribution || {};
+      const distStr = Object.entries(dist)
+        .sort((a,b) => b[1]-a[1])
+        .map(([k,v]) => (names[k]||k)+':'+v).join(' ');
+      btn.textContent = '学習完了 (生' + data.samples + '→バランス' + data.balanced + '件)';
+      const statsEl = document.getElementById('stats');
+      statsEl.innerHTML = '学習データ分布: ' + distStr;
+      setTimeout(() => { btn.textContent = '学習'; btn.disabled = false; }, 5000);
+    } else {
+      btn.textContent = '学習失敗';
+      setTimeout(() => { btn.textContent = '学習'; btn.disabled = false; }, 2000);
+    }
+  } catch (e) {
+    alert('エラー: ' + e.message);
+    btn.textContent = '学習'; btn.disabled = false;
+  }
+}
+
+async function recognizeBoard() {
+  if (!currentSessionId) return;
+  try {
+    const res = await fetch('/api/recognize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: currentSessionId }),
+    });
+    const data = await res.json();
+    if (data.sfen) {
+      recognized = true;
+      document.getElementById('cells-section').querySelector('h2').innerHTML =
+        'マス目 (9x9) — <span style="color:#f0a030;font-size:13px">認識結果（読み取り専用）</span>' +
+        '<button class="action-btn" id="btn-train" onclick="trainModel()">学習</button>' +
+        '<button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>';
+      const sfenEl = document.getElementById('sfen-output');
+      sfenEl.textContent = 'SFEN: ' + data.sfen;
+      sfenEl.style.display = 'block';
+
+      if (data.cells) {
+        for (let r = 0; r < 9; r++) {
+          for (let c = 0; c < 9; c++) {
+            const cell = data.cells[r][c];
+            if (!cell) continue;
+
+            // UI更新
+            const label = document.getElementById('label-' + r + '-' + c);
+            if (label) {
+              const piece = PIECES.find(p => p.id === cell.label);
+              const dispLabel = piece ? piece.label : '空';
+              const conf = cell.confidence;
+              const bg = conf > 60 ? '#1a4a35' : '#5a1010';
+              label.innerHTML = dispLabel + '<span style="font-size:9px;color:#aaa">(' + conf + '%)</span>';
+              label.style.background = bg;
+            }
+
+            // サーバーにラベルとして保存（修正・学習に使えるよう）
+            if (cell.label !== undefined) {
+              fetch('/api/label', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  session: currentSessionId,
+                  row: r, col: c,
+                  piece: cell.label || 'none',
+                }),
+              }).catch(e => console.error('label error:', e));
+            }
+
+            // categories を認識結果で更新（ダイアログの初期値に反映）
+            if (cellCategories) {
+              if (!cell.label || cell.label === 'none') {
+                cellCategories[r][c] = 0;
+              } else if (cell.label === cell.label.toUpperCase() || cell.label.startsWith('+') && cell.label[1] === cell.label[1].toUpperCase()) {
+                cellCategories[r][c] = 1;
+              } else {
+                cellCategories[r][c] = 2;
+              }
+            }
+          }
+        }
+      }
+      // 駒数テーブル表示
+      if (data.validation) {
+        const v = data.validation;
+        const order = ['P','L','N','S','G','B','R','K'];
+        const names = {P:'歩',L:'香',N:'桂',S:'銀',G:'金',B:'角',R:'飛',K:'玉'};
+        const limits = {P:18,L:4,N:4,S:4,G:4,B:2,R:2,K:2};
+        const s = v.sente || {}, g = v.gote || {}, h = v.hand_total || {};
+
+        let tbl = '<table class="piece-table"><tr><th></th>';
+        order.forEach(p => { tbl += `<th>${names[p]}</th>`; });
+        tbl += '</tr>';
+
+        tbl += '<tr class="row-sente"><td class="row-label">先手</td>';
+        order.forEach(p => {
+          const n = s[p] || 0;
+          const warn = (n + (g[p]||0)) > limits[p] ? ' class="count-warn"' : '';
+          tbl += `<td${warn}>${n}</td>`;
+        });
+        tbl += '</tr>';
+
+        tbl += '<tr class="row-gote"><td class="row-label">後手</td>';
+        order.forEach(p => { tbl += `<td>${g[p]||0}</td>`; });
+        tbl += '</tr>';
+
+        tbl += '<tr class="row-hand"><td class="row-label">駒台計</td>';
+        order.forEach(p => { tbl += `<td>${h[p] ? h[p] : '-'}</td>`; });
+        tbl += '</tr></table>';
+
+        if (v.warnings && v.warnings.length > 0) {
+          tbl += `<div style="color:#d00000;font-size:12px;margin-top:4px">⚠ ${v.warnings.join(' / ')}</div>`;
+        }
+
+        const el = document.getElementById('piece-counts');
+        el.innerHTML = tbl;
+        el.style.display = 'block';
+      }
+    } else {
+      alert('認識失敗: モデルが学習されていません');
+    }
+  } catch (e) { alert('エラー: ' + e.message); }
+}
+</script>
+</body>
+</html>
