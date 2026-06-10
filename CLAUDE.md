@@ -1,0 +1,184 @@
+# suteme
+
+将棋盤の画像から盤面状態を解析して SFEN 形式で出力する Pure Go プロジェクト。
+
+## モジュール
+
+```
+module suteme
+go 1.20
+```
+
+依存: `github.com/goml/gobrain`（駒種認識の NN）
+
+---
+
+## ファイル構成
+
+| ファイル | 役割 |
+|---------|------|
+| `suteme.go` | 公開API: `LoadSFEN`, `ViewDebug` |
+| `analyze.go` | `Analyze()` / `AnalyzeResult` / `DrawBoard()` |
+| `detect.go` | **盤面検出**: エッジ投影 → ピーク検出 → 9x9分割 → `BoardRegion` / `BoardRegionFromRect` |
+| `classify.go` | **空/先手/後手の分類**: 画像処理のみ（学習不要）|
+| `validate.go` | 盤面検出の妥当性チェック（背景色の均一性）|
+| `recognize.go` | **駒種認識**: gobrain NN + モデル保存/読み込み + `BalanceData` |
+| `komadai.go` | **駒台推定**: `ValidatePieces` / `CountFromSFEN`（盤面 + 駒台 = 全駒 検証）|
+| `imaging.go` | グレースケール変換・二値化・BoxBlur・Sobel |
+| `draw.go` | Bresenham 線描画・PNG 保存 |
+| `core.go` | `Line` / `Rect` 型・幾何ユーティリティ |
+| `board.go` | `Board` / `BoardRow` / `BoardSquare` データモデル・SFEN出力 |
+| `piece.go` | `Piece` / `PieceType` データモデル |
+| `hough.go` | Hough 変換（現在未使用、残置）|
+| `grid.go` | グリッド検出（現在未使用、残置）|
+
+---
+
+## アーキテクチャ
+
+### 盤面検出（`detect.go`）
+
+```
+入力画像
+  ↓ グレースケール → BoxBlur(r=2) → Sobel エッジ検出
+  ↓
+Pass 1: 横方向投影（全幅）→ ピーク検出 → 等間隔8本選択（内部グリッド線）
+  ↓ hSpacing 取得（マス間隔）
+Pass 2: 行範囲内の縦方向投影 → 正方形制約でピーク境界ペア探索
+  ↓
+extendToBorders: 8本 → 上下1マス延長 → 10本（盤面外枠含む）
+  ↓
+9x9 = 81マスの Rectangle を生成 → BoardRegion
+```
+
+**正方形制約**: 将棋盤は正方形なので `hSpacing * 9 ≈ boardWidth`。
+これにより TV 中継画像のサイドバー等のノイズを排除する。
+
+**手動指定**: `BoardRegionFromRect(x1, y1, x2, y2)` で2点から直接 `BoardRegion` を生成可能。
+UI からドラッグで盤面領域を指定する場合に使用。
+
+**セルパディング**: `ExtractCell` は各マスを 15% 外側に拡張して抽出する。
+グリッド検出の誤差でグリッド線が入り込む場合でも駒全体を捉えるため。
+
+### 駒分類（`classify.go`）
+
+学習データ不要の純粋な画像処理:
+
+```
+分散 < 1500 → 空
+上1/5 と 下1/5 の「背景と異なるピクセル数」を比較
+  上 > 下 → 底辺が上 → 後手（☖）
+  下 ≥ 上 → 底辺が下 → 先手（☗）
+```
+
+### 駒種認識（`recognize.go`）
+
+gobrain の FeedForward NN を使用:
+
+- 入力: 各マスを 24×24 グレースケールにリサイズ → 576 float64
+- クラス数: **14**（駒種のみ、向きなし: 歩/香/桂/銀/金/角/飛/玉/と/杏/圭/全/馬/龍）
+- 向きは `ClassifyCell` が担当（NN 不使用）
+- モデル保存: `model.json`（JSON シリアライズ）
+- 学習データ: `training_data.json`（累積保存）
+- 訓練パラメータ: 300 epochs / lr=0.2 / momentum=0.5
+
+**クラスバランシング** (`BalanceData`): 最少クラスの3倍を上限に多数クラスをダウンサンプル。
+歩が訓練データの大半を占めると他の駒の精度が下がるため。
+
+### 駒台推定（`komadai.go`）
+
+```
+CountFromSFEN: SFEN盤面部分 → 先手/後手の駒数マップ
+ValidatePieces: 各駒種の上限 − 盤面合計 = 駒台枚数
+  超過している場合は Warnings に追加
+```
+
+駒の総数（盤面 + 駒台）は全局面で一定なので、盤面認識の誤りの検出に活用できる。
+
+### 認識フロー（ハイブリッド方式）
+
+```
+各マス画像
+  ↓ ClassifyCell
+  空 → SFEN に空カウント追加
+  先手/後手 → gobrain で駒種推論 → 向きに応じて大文字/小文字変換
+  ↓
+SFEN 文字列を生成 → ValidatePieces で駒数検証
+```
+
+---
+
+## `_cmd/suteme-test/` — Web テストツール
+
+### 起動
+
+```
+go run ./_cmd/suteme-test/ 8888
+```
+
+起動時に `model.json` があれば自動ロード。
+
+### API エンドポイント
+
+| エンドポイント | 機能 |
+|--------------|------|
+| `POST /api/analyze` | 画像アップロード → 盤面検出 + 分類 |
+| `GET /api/images/:id/:type` | `original` / `edges` / `board` 画像取得 |
+| `GET /api/cells/:id/:row/:col` | マス画像取得 |
+| `POST /api/label` | ラベル保存（`{ session, row, col, piece }`）|
+| `POST /api/train` | 学習（既存 JSON + 今回ラベルをマージ → バランシング → 訓練 → 保存）|
+| `POST /api/recognize` | 推論（空/向きは ClassifyCell、駒種は gobrain）→ 駒数検証付き |
+| `POST /api/setboard` | 手動盤面指定（`{ session, x1, y1, x2, y2 }`）|
+| `POST /api/labelbulk` | SFEN一括ラベル保存（`{ session, labels: [{row, col, piece}] }`）|
+| `GET /api/history` | 保存済み局面一覧取得 |
+| `GET /api/history/:id/image` | 保存済み局面の画像取得 |
+| `POST /api/savesession` | 現在のセッション（画像 + SFEN + 盤面座標）を保存 |
+
+### ラベリング UI の操作フロー
+
+1. 画像アップロード（またはCtrl+Vで貼り付け）→ 盤面検出（信頼度 % 表示）
+2. 各マスを自動分類（空=紺、☗先手=緑、☖後手=赤）
+3. 盤面がズレている場合: 画像上でドラッグ → 手動で盤面範囲を指定
+4. マス画像をクリック → ダイアログ
+   - **「○ 合ってる」**: 自動分類が正解 → 即確定（ラベル未変更時のみ有効）
+   - **「空」選択**: 即確定・ダイアログ閉じる
+   - **駒種選択**: 即確定・ダイアログ閉じる
+   - **「修正」**: 変更後に確定（変更後のみ有効）
+5. 確定済みマス: 緑枠 + 画像明るく表示
+6. **SFEN入力**: SFEN文字列を貼り付けて「SFENから入力」→ 81マス一括ラベル設定
+7. **「保存」**: 画像 + SFEN + 盤面座標を `data/` に保存
+8. **「学習」**: `training_data.json`（累積）+ 今回分 → バランシング → 訓練 → `model.json` 保存
+9. **「認識」**: モデルで推論 → 読み取り専用モードに切り替え → SFEN + 駒数表示
+
+### 履歴・再入力
+
+- 「保存」で局面を保存 → `data/history.json` に記録
+- 履歴から「再入力」→ 保存した画像・盤面座標・SFENを復元して再ラベリング可能
+- 手動指定した盤面座標も復元される
+
+### データの永続化
+
+- `training_data.json`: 学習データ累積（毎回マージ）
+- `model.json`: 学習済み FeedForward NN（起動時自動ロード）
+- `data/{id}.png`: 保存した局面画像
+- `data/history.json`: 保存した局面の一覧（SFEN・盤面座標含む）
+
+---
+
+## 対応画像タイプ
+
+| 画像タイプ | 盤面検出 | マス分割 | 備考 |
+|-----------|---------|---------|------|
+| ゲーム画面（真正面）| ◎ | ◎ | 推奨 |
+| TV 中継画像 | ○ | △ | 1行ズレる場合あり |
+| 写真（斜め撮影）| △ | × | 射影変換が必要（未実装）|
+
+---
+
+## 今後の課題
+
+- [ ] 写真（斜め撮影）対応 → 射影変換（Homography）
+- [ ] 学習データの重複排除（セッション ID 管理）
+- [ ] 持ち駒の認識（駒台の画像解析）
+- [ ] `LoadSFEN` の本実装（現在 `not implemented`）
+- [ ] TV 中継画像のグリッドズレ自動修正
