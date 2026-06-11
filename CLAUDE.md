@@ -22,8 +22,9 @@ go 1.20
 | `detect.go` | **盤面検出**: エッジ投影 → ピーク検出 → 9x9分割 → `BoardRegion` / `BoardRegionFromRect` |
 | `classify.go` | **空/先手/後手の分類**: 画像処理のみ（学習不要）|
 | `validate.go` | 盤面検出の妥当性チェック（背景色の均一性）|
-| `recognize.go` | **駒種認識(NN)**: gobrain NN + モデル保存/読み込み + `BalanceData` + `Predictor` IF |
-| `knn.go` | **駒種認識(k-NN)**: 学習不要・距離重み付き投票。現在の主認識器 |
+| `recognize.go` | **駒種認識(NN推論)**: gobrain `Model` 読み込み/推論・`CellToInput`・学習データ型 |
+| `knn.go` | **駒種認識(k-NN)**: 学習不要・距離重み付き投票。現在の主認識器。`Predictor` IF |
+| `training/training.go` | **学習パッケージ**: `Train` / `BalanceData` / `ClassDistribution` / `SaveModel` |
 | `komadai.go` | **駒台推定**: `ValidatePieces` / `CountFromSFEN`（盤面 + 駒台 = 全駒 検証）|
 | `imaging.go` | グレースケール変換・二値化・BoxBlur・Sobel・`Rotate180` |
 | `draw.go` | Bresenham 線描画・PNG 保存 |
@@ -73,7 +74,14 @@ UI からドラッグで盤面領域を指定する場合に使用。
   下 ≥ 上 → 底辺が下 → 先手（☗）
 ```
 
-### 駒種認識（`recognize.go`）
+### パッケージ分割の方針
+
+- **`suteme`（コア）**: 「画像データを元に棋譜データを作成する」推論側。
+  盤面検出・分類・推論（NN/k-NN）・学習データ型とJSON入出力・`LoadModel` を持つ
+- **`suteme/training`**: モデルを「作る」側。NN訓練・バランシング・`SaveModel`。
+  依存方向は training → suteme の一方向のみ
+
+### 駒種認識 NN（`recognize.go` + `training/`）
 
 gobrain の FeedForward NN を使用:
 

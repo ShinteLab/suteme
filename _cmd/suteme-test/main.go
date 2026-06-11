@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"suteme"
+	"suteme/training"
 )
 
 //go:embed static
@@ -637,14 +638,14 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// クラスバランス調整してから学習
-	balanced := suteme.BalanceData(data.Samples)
-	dist := suteme.ClassDistribution(balanced)
+	balanced := training.BalanceData(data.Samples)
+	dist := training.ClassDistribution(balanced)
 	log.Printf("Training: %d raw → %d balanced (%d new)", len(data.Samples), len(balanced), newCount)
 
-	m := suteme.Train(&suteme.TrainingData{Samples: balanced})
+	m := training.Train(&suteme.TrainingData{Samples: balanced})
 
 	// モデルを保存
-	suteme.SaveModel(modelFile, m)
+	training.SaveModel(modelFile, m)
 
 	modelLock.Lock()
 	model = m
