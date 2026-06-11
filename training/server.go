@@ -1,4 +1,4 @@
-package main
+package training
 
 import (
 	"crypto/rand"
@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"suteme"
-	"suteme/training"
 )
 
 //go:embed static
@@ -93,7 +92,9 @@ var (
 	historyMu   sync.RWMutex
 )
 
-func main() {
+// Serve はラベリング・学習用のWebサーバを起動する
+// 起動時にカレントディレクトリの model_v2.json / training_data_v2.json を自動ロードする
+func Serve(port string) error {
 	// 起動時に保存済みモデルを読み込む
 	if m, err := suteme.LoadModel(modelFile); err == nil {
 		model = m
@@ -107,27 +108,24 @@ func main() {
 		}
 	}
 
+	mux := http.NewServeMux()
 	staticFS, _ := fs.Sub(static, "static")
-	http.Handle("/", http.FileServer(http.FS(staticFS)))
-	http.HandleFunc("/api/analyze", handleAnalyze)
-	http.HandleFunc("/api/images/", handleImage)
-	http.HandleFunc("/api/cells/", handleCell)
-	http.HandleFunc("/api/history", handleHistory)
-	http.HandleFunc("/api/history/", handleHistoryImage)
-	http.HandleFunc("/api/savesession", handleSaveSession)
-	http.HandleFunc("/api/label", handleLabel)
-	http.HandleFunc("/api/labelbulk", handleLabelBulk)
-	http.HandleFunc("/api/setboard", handleSetBoard)
-	http.HandleFunc("/api/train", handleTrain)
-	http.HandleFunc("/api/recognize", handleRecognize)
+	mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	mux.HandleFunc("/api/analyze", handleAnalyze)
+	mux.HandleFunc("/api/images/", handleImage)
+	mux.HandleFunc("/api/cells/", handleCell)
+	mux.HandleFunc("/api/history", handleHistory)
+	mux.HandleFunc("/api/history/", handleHistoryImage)
+	mux.HandleFunc("/api/savesession", handleSaveSession)
+	mux.HandleFunc("/api/label", handleLabel)
+	mux.HandleFunc("/api/labelbulk", handleLabelBulk)
+	mux.HandleFunc("/api/setboard", handleSetBoard)
+	mux.HandleFunc("/api/train", handleTrain)
+	mux.HandleFunc("/api/recognize", handleRecognize)
 
-	port := "8080"
-	if len(os.Args) > 1 {
-		port = os.Args[1]
-	}
 	addr := ":" + port
 	fmt.Printf("http://localhost%s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	return http.ListenAndServe(addr, mux)
 }
 
 // currentPredictor は使用する推論器を返す（k-NN 優先、なければ gobrain NN）
@@ -638,14 +636,14 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// クラスバランス調整してから学習
-	balanced := training.BalanceData(data.Samples)
-	dist := training.ClassDistribution(balanced)
+	balanced := BalanceData(data.Samples)
+	dist := ClassDistribution(balanced)
 	log.Printf("Training: %d raw → %d balanced (%d new)", len(data.Samples), len(balanced), newCount)
 
-	m := training.Train(&suteme.TrainingData{Samples: balanced})
+	m := Train(&suteme.TrainingData{Samples: balanced})
 
 	// モデルを保存
-	training.SaveModel(modelFile, m)
+	SaveModel(modelFile, m)
 
 	modelLock.Lock()
 	model = m

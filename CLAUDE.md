@@ -25,6 +25,8 @@ go 1.20
 | `recognize.go` | **駒種認識(NN推論)**: gobrain `Model` 読み込み/推論・`CellToInput`・学習データ型 |
 | `knn.go` | **駒種認識(k-NN)**: 学習不要・距離重み付き投票。現在の主認識器。`Predictor` IF |
 | `training/training.go` | **学習パッケージ**: `Train` / `BalanceData` / `ClassDistribution` / `SaveModel` |
+| `training/server.go` | **学習用Webサーバ**: `Serve(port)`・APIハンドラ・履歴管理・UI embed |
+| `_cmd/suteme-training/` | 学習用Webサーバの起動コマンド（`training.Serve` を呼ぶだけ）|
 | `komadai.go` | **駒台推定**: `ValidatePieces` / `CountFromSFEN`（盤面 + 駒台 = 全駒 検証）|
 | `imaging.go` | グレースケール変換・二値化・BoxBlur・Sobel・`Rotate180` |
 | `draw.go` | Bresenham 線描画・PNG 保存 |
@@ -137,12 +139,16 @@ SFEN 文字列を生成 → ValidatePieces で駒数検証
 
 ---
 
-## `_cmd/suteme-test/` — Web テストツール
+## ラベリング・学習用 Web サーバ（`training/server.go` + `_cmd/suteme-training/`）
+
+サーバ本体（ハンドラ・セッション管理・履歴・静的ファイル embed）は `training` パッケージの
+`Serve(port)` として実装されている。`_cmd/suteme-training` はそれを起動するだけのコマンド。
+UI は `training/static/index.html`（embed）。
 
 ### 起動
 
 ```
-go run ./_cmd/suteme-test/ 8888
+go run ./_cmd/suteme-training/ 8888
 ```
 
 起動時に `model_v2.json` があれば自動ロード。
