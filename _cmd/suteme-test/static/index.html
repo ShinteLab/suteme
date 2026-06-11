@@ -115,23 +115,45 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .piece-table .row-hand td:not(.row-label) { color: #f0a030; }
 .count-warn { color: #d00000 !important; font-weight: bold; }
 .cell-preview { width: 64px; height: 64px; object-fit: contain; border: 1px solid #333; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
+.tab-bar { display: flex; gap: 4px; max-width: 600px; margin: 0 auto 16px; border-bottom: 2px solid #2a3a5e; }
+.tab-btn {
+  background: none; border: none; color: #888; padding: 8px 24px;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -2px;
+}
+.tab-btn.active { color: #4cc9f0; border-bottom-color: #4cc9f0; }
+.tab-btn:hover:not(.active) { color: #bbb; }
+.hist-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid #1a2a4e; cursor: pointer; }
+.hist-row:hover { background: #16213e; }
+.hist-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; border: 1px solid #2a3a5e; flex-shrink: 0; }
+.hist-check { width: 20px; text-align: center; color: #74c69d; font-weight: bold; font-size: 14px; flex-shrink: 0; }
+.ok-mark { color: #ffd60a; font-weight: bold; margin-left: 2px; }
+.sug { color: #4cc9f0; opacity: 0.85; font-weight: normal; margin-left: 2px; }
+.hist-done { opacity: 0.55; }
+.hist-done:hover { opacity: 0.8; }
 </style>
 </head>
 <body>
 
 <h1>suteme-test</h1>
 
+<div class="tab-bar">
+  <button class="tab-btn active" id="tab-btn-analyze" onclick="switchTab('analyze')">解析</button>
+  <button class="tab-btn" id="tab-btn-history" onclick="switchTab('history')">履歴</button>
+</div>
+
+<div id="tab-history" style="display:none;max-width:600px;margin:0 auto 20px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <span style="font-size:13px;color:#888">保存した局面をクリックすると解析画面で再入力できます</span>
+    <button onclick="refreshHistory()" style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer">更新</button>
+  </div>
+  <div id="history-list" style="max-height:480px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
+</div>
+
+<div id="tab-analyze">
 <div class="upload-area" id="upload">
   <p>将棋盤の画像をドラッグ＆ドロップ、クリックしてアップロード<br>または <strong>Ctrl+V</strong> で貼り付け</p>
   <input type="file" id="file" accept="image/*">
-</div>
-
-<div id="history-section" style="max-width:600px;margin:0 auto 20px">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-    <span style="font-size:13px;color:#888">履歴</span>
-    <button onclick="refreshHistory()" style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer">更新</button>
-  </div>
-  <div id="history-list" style="max-height:180px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
 </div>
 
 <div class="loading" id="loading">解析中...</div>
@@ -169,6 +191,7 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
   <div class="cell-grid" id="cell-grid"></div>
 </div>
+</div><!-- /tab-analyze -->
 
 <div class="overlay" id="overlay"></div>
 <div class="piece-select" id="piece-select">
@@ -233,6 +256,8 @@ const PIECES = [
 let currentSessionId = null;
 let currentCell = null;
 let cellCategories = null;
+let boardLabels = null; // 9x9 のラベル状態（SFEN生成用）。null=未入力, 'none'=空, それ以外=SFEN駒文字
+let cellSuggestions = null; // 9x9 のモデル推論候補 {label, confidence}。モデル未学習時は null
 let selectedCat = -1;
 let selectedPiece = null;
 let originalCat = -1;
@@ -319,6 +344,7 @@ function getImgCoord(img, clientX, clientY) {
     if (data.status === 'ok') {
       const t = Date.now();
       document.getElementById('img-board').src = '/api/images/' + currentSessionId + '/board?' + t;
+      cellSuggestions = data.suggestions || null;
       renderCells(currentSessionId, data.categories);
       document.getElementById('stats').textContent = '盤面を手動指定しました';
     }
@@ -366,6 +392,7 @@ async function analyze(file) {
       const b = data.bounds;
       document.getElementById('stats').innerHTML =
         '盤面検出: ' + b.w + 'x' + b.h + 'px | 信頼度: <span class="' + confClass + '">' + conf + '%</span>';
+      cellSuggestions = data.suggestions || null;
       renderCells(data.id, data.categories);
     } else {
       document.getElementById('stats').innerHTML =
@@ -378,6 +405,7 @@ async function analyze(file) {
 
 function renderCells(id, categories) {
   cellCategories = categories;
+  boardLabels = Array.from({ length: 9 }, () => Array(9).fill(null));
   const grid = document.getElementById('cell-grid');
   grid.innerHTML = '';
 
@@ -391,14 +419,33 @@ function renderCells(id, categories) {
       const catColors = ['#0f3460', '#2d6a4f', '#9d0208'];
       const labelBg = cat >= 0 ? catColors[cat] : '#0f3460';
 
+      // モデルの推論候補があれば「歩?」のように薄く表示（未確定）
+      let hint = '';
+      const sug = cellSuggestions && cellSuggestions[r] && cellSuggestions[r][c];
+      if (cat > 0 && sug && sug.label && sug.label !== 'none') {
+        const nm = pieceNameFromLabel(sug.label);
+        if (nm) hint = '<span class="sug">' + nm + '?</span>';
+      }
+
       cell.innerHTML =
         '<img src="/api/cells/' + id + '/' + r + '/' + c + '?' + Date.now() + '">' +
-        '<div class="label" id="label-' + r + '-' + c + '" style="background:' + labelBg + '">' + catLabel(cat) + '</div>';
+        '<div class="label" id="label-' + r + '-' + c + '" style="background:' + labelBg + '">' + catLabel(cat) + hint + '</div>';
       grid.appendChild(cell);
     }
   }
   document.getElementById('sfen-output').style.display = 'none';
   document.getElementById('cells-section').style.display = 'block';
+}
+
+// SFEN駒文字（大文字/小文字/+付き）から駒名を返す。不明なら null
+function pieceNameFromLabel(label) {
+  if (!label || label === 'none') return null;
+  const isPromoted = label[0] === '+';
+  const letter = isPromoted ? label[1] : label[0];
+  if (!letter) return null;
+  const base = isPromoted ? '+' + letter.toUpperCase() : letter.toUpperCase();
+  const pt = PIECE_TYPES.find(p => p.base === base);
+  return pt ? pt.label : null;
 }
 
 function catLabel(cat) {
@@ -425,6 +472,23 @@ function openDialog(r, c) {
 
   updateCatButtons();
   clearPieceSelection();
+
+  // モデルの推論候補があれば駒種を事前選択（modified にはしない → 「○ 合ってる」で即確定できる）
+  const sug = cellSuggestions && cellSuggestions[r] && cellSuggestions[r][c];
+  if (cat > 0 && sug && sug.label && sug.label !== 'none') {
+    const isPromoted = sug.label[0] === '+';
+    const letter = isPromoted ? sug.label[1] : sug.label[0];
+    const base = isPromoted ? '+' + letter.toUpperCase() : letter.toUpperCase();
+    const idx = PIECE_TYPES.findIndex(p => p.base === base);
+    if (idx >= 0) {
+      selectedPiece = PIECE_TYPES[idx];
+      const btns = document.querySelectorAll('#piece-buttons .sel-btn');
+      if (btns[idx]) btns[idx].classList.add('active');
+      document.getElementById('selected-piece-name').textContent =
+        PIECE_TYPES[idx].label + ' (候補 ' + (sug.confidence || 0) + '%)';
+    }
+  }
+
   updateModifiedState();
 
   document.getElementById('overlay').classList.add('active');
@@ -476,10 +540,21 @@ function confirmCorrect() {
   const cat = cellCategories ? cellCategories[r][c] : 0;
 
   if (cat === 0) {
-    applyLabel(r, c, 'none', '空○', '#2d6a4f');
+    applyLabel(r, c, 'none', '空<span class="ok-mark">○</span>', '#0f3460');
+  } else if (selectedPiece) {
+    // 推論候補が事前選択されている場合は、その駒種で確定する
+    let pieceId = selectedPiece.base;
+    if (cat === 2) {
+      pieceId = pieceId.startsWith('+')
+        ? '+' + pieceId.substring(1).toLowerCase()
+        : pieceId.toLowerCase();
+    }
+    const mark = (cat === 2 ? '<span class="gote-mark">☖</span>' : '☗')
+      + selectedPiece.label + '<span class="ok-mark">○</span>';
+    applyLabel(r, c, pieceId, mark, cat === 1 ? '#2d6a4f' : '#9d0208');
   } else {
-    // 向きのみ○の場合もラベル保存
-    applyLabel(r, c, null, catLabel(cat) + '○', '#2d6a4f');
+    // 候補なし: 向きのみ○（駒種未確定のためラベルは保存しない）
+    applyLabel(r, c, null, catLabel(cat) + '<span class="ok-mark">○</span>', cat === 1 ? '#2d6a4f' : '#9d0208');
     // labeled クラスは applyLabel 内で付く（pieceId=nullでも）
     const cell = document.getElementById('label-' + r + '-' + c)?.closest('.cell');
     if (cell) cell.classList.add('labeled');
@@ -543,6 +618,8 @@ function applyLabel(r, c, pieceId, displayHtml, bgColor) {
   if (cell) cell.classList.add('labeled');
 
   if (pieceId !== null) {
+    if (boardLabels) boardLabels[r][c] = pieceId;
+    enableSaveButton();
     fetch('/api/label', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -551,7 +628,50 @@ function applyLabel(r, c, pieceId, displayHtml, bgColor) {
   }
 }
 
+function enableSaveButton() {
+  const btn = document.getElementById('btn-save-session');
+  btn.disabled = false;
+  btn.style.opacity = '1';
+  btn.textContent = '保存';
+}
+
+// boardLabels から SFEN 盤面部分を生成する
+// 未入力マスは自動分類が「空」なら空とみなす。それ以外が残っていれば error を返す
+function buildSFEN() {
+  if (!boardLabels) return null;
+  const missing = [];
+  const rows = [];
+  for (let r = 0; r < 9; r++) {
+    let row = '', empty = 0;
+    for (let c = 0; c < 9; c++) {
+      let p = boardLabels[r][c];
+      if (p === null && cellCategories && cellCategories[r][c] === 0) p = 'none';
+      if (p === null) { missing.push((r + 1) + '行' + (c + 1) + '列'); continue; }
+      if (p === 'none') { empty++; }
+      else {
+        if (empty > 0) { row += empty; empty = 0; }
+        row += p;
+      }
+    }
+    if (empty > 0) row += empty;
+    rows.push(row);
+  }
+  if (missing.length > 0) return { error: missing };
+  return { sfen: rows.join('/') + ' b - 1' };
+}
+
+// タブ切り替え
+function switchTab(name) {
+  document.getElementById('tab-analyze').style.display = name === 'analyze' ? '' : 'none';
+  document.getElementById('tab-history').style.display = name === 'history' ? '' : 'none';
+  document.getElementById('tab-btn-analyze').className = 'tab-btn' + (name === 'analyze' ? ' active' : '');
+  document.getElementById('tab-btn-history').className = 'tab-btn' + (name === 'history' ? ' active' : '');
+  if (name === 'history') refreshHistory();
+}
+
 // 履歴
+const processedHistory = new Set(); // このセッション中に読み込んだ履歴ID（永続化しない）
+
 async function refreshHistory() {
   const res = await fetch('/api/history');
   const data = await res.json();
@@ -560,29 +680,34 @@ async function refreshHistory() {
     list.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:10px">保存した局面はありません</div>';
     return;
   }
-  list.innerHTML = data.entries.map(e =>
-    `<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid #1a2a4e">
-      <span style="font-size:11px;color:#888;white-space:nowrap">${e.created_at}</span>
-      <span style="font-size:11px;color:#bbb;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
-            title="${e.sfen}">${e.sfen}</span>
-      <button class="hist-btn" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
-        data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}"
-        style="font-size:11px;background:#0f3460;border:1px solid #4cc9f0;color:#4cc9f0;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap">
-        再入力
-      </button>
-    </div>`
-  ).join('');
+  list.innerHTML = data.entries.map(e => {
+    const done = processedHistory.has(e.id);
+    return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
+      data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}">
+      <span class="hist-check">${done ? '○' : ''}</span>
+      <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;color:#888">${e.created_at}</div>
+        <div style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
+             title="${e.sfen}">${e.sfen}</div>
+      </div>
+      <span style="font-size:11px;color:#4cc9f0;white-space:nowrap">再入力 ›</span>
+    </div>`;
+  }).join('');
 }
 
 document.getElementById('history-list').addEventListener('click', async e => {
-  const btn = e.target.closest('.hist-btn');
+  const btn = e.target.closest('.hist-row');
   if (!btn) return;
   const id = btn.dataset.id;
   const sfen = btn.dataset.sfen;
   const bounds = btn.dataset.bounds ? JSON.parse(btn.dataset.bounds) : null;
 
+  switchTab('analyze');
+
   const res = await fetch('/api/history/' + id + '/image');
   if (!res.ok) { alert('画像の読み込みに失敗しました'); return; }
+  processedHistory.add(id); // 処理済みマーク（セッション内のみ）
   const blob = await res.blob();
   const file = new File([blob], id + '.png', { type: 'image/png' });
   document.getElementById('sfen-input').value = sfen;
@@ -599,6 +724,7 @@ document.getElementById('history-list').addEventListener('click', async e => {
     if (sbData.status === 'ok') {
       const t = Date.now();
       document.getElementById('img-board').src = '/api/images/' + currentSessionId + '/board?' + t;
+      cellSuggestions = sbData.suggestions || null;
       renderCells(currentSessionId, sbData.categories);
     }
   }
@@ -610,8 +736,20 @@ document.getElementById('history-list').addEventListener('click', async e => {
 });
 
 async function saveSession() {
-  const sfen = document.getElementById('sfen-input').value.trim();
-  if (!sfen || !currentSessionId) return;
+  if (!currentSessionId) return;
+  let sfen = document.getElementById('sfen-input').value.trim();
+  if (!sfen) {
+    // SFEN欄が空ならラベル入力済みの盤面から生成する
+    const built = buildSFEN();
+    if (!built) { alert('盤面がありません'); return; }
+    if (built.error) {
+      const list = built.error.slice(0, 10).join(', ') + (built.error.length > 10 ? ' …' : '');
+      alert('駒種が未入力のマスが ' + built.error.length + ' 個あります:\n' + list);
+      return;
+    }
+    sfen = built.sfen;
+    document.getElementById('sfen-input').value = sfen;
+  }
   const btn = document.getElementById('btn-save-session');
   btn.textContent = '保存中...';
   const res = await fetch('/api/savesession', {
@@ -629,8 +767,6 @@ async function saveSession() {
     btn.textContent = '保存';
   }
 }
-
-refreshHistory();
 
 // SFENパーサー
 function parseSFEN(sfenStr) {
@@ -676,6 +812,7 @@ async function applyFromSFEN() {
 
   const catColors = ['#0f3460', '#2d6a4f', '#9d0208'];
   for (const { row, col, piece } of labels) {
+    if (boardLabels) boardLabels[row][col] = piece;
     const labelEl = document.getElementById('label-' + row + '-' + col);
     if (!labelEl) continue;
     const cellEl = labelEl.closest('.cell');

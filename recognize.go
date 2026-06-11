@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/goml/gobrain"
@@ -40,6 +41,7 @@ var BaseLabels = []string{
 }
 
 // LabelToClass はSFENラベルを駒種クラスIDに変換
+// 駒として認識できないラベル（"none" 等）は -1 を返す
 func LabelToClass(label string) int {
 	upper := strings.ToUpper(label)
 	for i, b := range BaseLabels {
@@ -47,7 +49,7 @@ func LabelToClass(label string) int {
 			return i
 		}
 	}
-	return 0
+	return -1
 }
 
 // ClassToLabel はクラスIDをSFENラベルに変換（向きなし大文字）
@@ -74,15 +76,28 @@ type TrainingSample struct {
 }
 
 // CellToInput はマス画像を入力ベクトルに変換 (24x24 グレースケール → 576 float64)
+// 画像ごとの明るさ・コントラスト差を吸収するため、平均0・分散1に標準化する
 func CellToInput(cell image.Image) []float64 {
 	resized := resizeGray(cell, cellSize, cellSize)
 	input := make([]float64, inputSize)
 	bounds := resized.Bounds()
+	var sum, sumSq float64
 	for y := 0; y < cellSize; y++ {
 		for x := 0; x < cellSize; x++ {
-			v := resized.GrayAt(x+bounds.Min.X, y+bounds.Min.Y).Y
-			input[y*cellSize+x] = float64(v) / 255.0
+			v := float64(resized.GrayAt(x+bounds.Min.X, y+bounds.Min.Y).Y)
+			input[y*cellSize+x] = v
+			sum += v
+			sumSq += v * v
 		}
+	}
+	n := float64(inputSize)
+	mean := sum / n
+	std := math.Sqrt(sumSq/n - mean*mean)
+	if std < 1 {
+		std = 1
+	}
+	for i := range input {
+		input[i] = (input[i] - mean) / std
 	}
 	return input
 }
@@ -139,7 +154,9 @@ func LoadModel(path string) (*Model, error) {
 }
 
 // BalanceData はクラス偏りを軽減する
-// 最少クラスの3倍を上限に多数クラスをダウンサンプルする
+// 中央値の3倍を上限に多数クラスをダウンサンプルし、
+// 中央値未満の少数クラスは複製で中央値までオーバーサンプルする。
+// （最少クラス基準だと、1枚しかない駒種があるだけで全データが捨てられてしまう）
 func BalanceData(samples []TrainingSample) []TrainingSample {
 	byClass := make(map[int][]TrainingSample)
 	for _, s := range samples {
@@ -148,24 +165,33 @@ func BalanceData(samples []TrainingSample) []TrainingSample {
 	if len(byClass) == 0 {
 		return samples
 	}
-	minCount := len(samples)
+
+	counts := make([]int, 0, len(byClass))
 	for _, ss := range byClass {
-		if len(ss) < minCount {
-			minCount = len(ss)
-		}
+		counts = append(counts, len(ss))
 	}
-	cap := minCount * 3
-	if cap < 10 {
-		cap = 10
+	sort.Ints(counts)
+	median := counts[len(counts)/2]
+
+	maxCount := median * 3
+	if maxCount < 20 {
+		maxCount = 20
 	}
+
 	result := make([]TrainingSample, 0, len(samples))
 	for _, ss := range byClass {
-		if len(ss) > cap {
+		switch {
+		case len(ss) > maxCount:
 			perm := rand.Perm(len(ss))
-			for i := 0; i < cap; i++ {
+			for i := 0; i < maxCount; i++ {
 				result = append(result, ss[perm[i]])
 			}
-		} else {
+		case len(ss) < median:
+			result = append(result, ss...)
+			for i := len(ss); i < median; i++ {
+				result = append(result, ss[rand.Intn(len(ss))])
+			}
+		default:
 			result = append(result, ss...)
 		}
 	}
@@ -190,8 +216,11 @@ func Train(data *TrainingData) *Model {
 	ff := &gobrain.FeedForward{}
 	ff.Init(inputSize, inputSize/4, numClasses)
 
+	// クラス順に並んだまま渡すと逐次学習が最後のクラスに引きずられるためシャッフルする
+	perm := rand.Perm(len(data.Samples))
 	patterns := make([][][]float64, len(data.Samples))
-	for i, s := range data.Samples {
+	for i, pi := range perm {
+		s := data.Samples[pi]
 		output := make([]float64, numClasses)
 		if s.Label >= 0 && s.Label < numClasses {
 			output[s.Label] = 1.0
@@ -245,8 +274,12 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m *Model) string {
 			}
 
 			if m != nil {
-				// gobrain で駒種を推論
-				class, _ := m.Predict(cell)
+				// gobrain で駒種を推論（後手は180度回転して先手向きに正規化）
+				ncell := cell
+				if cat == CellPieceDown {
+					ncell = Rotate180(cell)
+				}
+				class, _ := m.Predict(ncell)
 				base := ClassToBaseLabel(class)
 				if cat == CellPieceDown {
 					if len(base) > 0 {

@@ -27,11 +27,21 @@ func (c CellCategory) String() string {
 }
 
 // ClassifyCell はマス画像を 空/先手/後手 に分類する
+// ExtractCell は cellPadding 分外側に広げた画像を返すため、
+// パディング相当の縁を除いた内側だけで判定する
 func ClassifyCell(cell image.Image) CellCategory {
 	gray := ConvertGray(cell)
-	bounds := gray.Bounds()
+	outer := gray.Bounds()
+	// padding込みサイズに対する縁の割合: pad / (cell + 2*pad)
+	trimFrac := cellPadding / (1 + 2*cellPadding)
+	trimX := int(float64(outer.Dx()) * trimFrac)
+	trimY := int(float64(outer.Dy()) * trimFrac)
+	bounds := image.Rect(
+		outer.Min.X+trimX, outer.Min.Y+trimY,
+		outer.Max.X-trimX, outer.Max.Y-trimY,
+	)
 	w, h := bounds.Dx(), bounds.Dy()
-	if w == 0 || h == 0 {
+	if w <= 0 || h <= 0 {
 		return CellEmpty
 	}
 

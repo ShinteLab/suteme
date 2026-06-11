@@ -83,8 +83,10 @@ var (
 	sessions    = make(map[string]*session)
 	mu          sync.RWMutex
 	model       *suteme.Model
-	dataFile    = "training_data.json"
-	modelFile   = "model.json"
+	// v2: 入力の標準化・後手の回転正規化・空マス除外に対応した形式
+	// （旧 training_data.json は空マスが歩として混入しているため使用しない）
+	dataFile    = "training_data_v2.json"
+	modelFile   = "model_v2.json"
 	modelLock   sync.RWMutex
 	historyMu   sync.RWMutex
 )
@@ -117,6 +119,59 @@ func main() {
 	addr := ":" + port
 	fmt.Printf("http://localhost%s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
+}
+
+// predictCells は全マスの駒種をモデルで推論し、SFENラベルの9x9グリッドを返す
+// モデル未ロード時や盤面未検出時は nil を返す。空マスは "none"
+func predictCells(s *session) *[9][9]map[string]interface{} {
+	modelLock.RLock()
+	m := model
+	modelLock.RUnlock()
+	if m == nil || s.Result == nil || s.Result.Board == nil {
+		return nil
+	}
+	var grid [9][9]map[string]interface{}
+	for row := 0; row < 9; row++ {
+		for col := 0; col < 9; col++ {
+			cell := s.Result.Board.ExtractCell(s.Original, row, col)
+			if cell == nil {
+				continue
+			}
+			cat := suteme.ClassifyCell(cell)
+			if cat == suteme.CellEmpty {
+				grid[row][col] = map[string]interface{}{"label": "none", "confidence": 95}
+				continue
+			}
+			ncell := cell
+			if cat == suteme.CellPieceDown {
+				ncell = suteme.Rotate180(cell)
+			}
+			class, conf := m.Predict(ncell)
+			base := suteme.ClassToBaseLabel(class)
+			label := base
+			if cat == suteme.CellPieceDown {
+				if len(base) > 1 && base[0] == '+' {
+					label = "+" + strings.ToLower(base[1:])
+				} else {
+					label = strings.ToLower(base)
+				}
+			}
+			grid[row][col] = map[string]interface{}{
+				"label":      label,
+				"confidence": int(conf * 100),
+			}
+		}
+	}
+	return &grid
+}
+
+// isGoteLabel はSFENラベルが後手（小文字）かを返す
+func isGoteLabel(label string) bool {
+	s := strings.TrimPrefix(label, "+")
+	if s == "" {
+		return false
+	}
+	return s[0] >= 'a' && s[0] <= 'z'
 }
 
 func newID() string {
@@ -185,6 +240,13 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp["categories"] = catGrid
+
+		// モデルがあれば駒種の推論候補も返す（ラベリング支援用）
+		mu.RLock()
+		if sug := predictCells(sessions[id]); sug != nil {
+			resp["suggestions"] = sug
+		}
+		mu.RUnlock()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -455,11 +517,18 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":     "ok",
 		"categories": catGrid,
-	})
+	}
+	mu.RLock()
+	if sug := predictCells(s); sug != nil {
+		resp["suggestions"] = sug
+	}
+	mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleTrain: ラベル済みデータで学習する
@@ -491,6 +560,11 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for key, label := range s.Labels {
+			// 空マスは駒種学習の対象外（"none" を LabelToClass に通すと誤学習する）
+			class := suteme.LabelToClass(label)
+			if class < 0 {
+				continue
+			}
 			parts := strings.Split(key, "-")
 			if len(parts) != 2 {
 				continue
@@ -501,9 +575,13 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 			if cell == nil {
 				continue
 			}
+			// 後手（小文字ラベル）は180度回転して先手向きに正規化
+			if isGoteLabel(label) {
+				cell = suteme.Rotate180(cell)
+			}
 			data.Samples = append(data.Samples, suteme.TrainingSample{
 				Input: suteme.CellToInput(cell),
-				Label: suteme.LabelToClass(label),
+				Label: class,
 			})
 			newCount++
 		}
@@ -605,8 +683,12 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			// 駒種は gobrain で推論
-			class, conf := m.Predict(cell)
+			// 駒種は gobrain で推論（後手は180度回転して先手向きに正規化）
+			ncell := cell
+			if cat == suteme.CellPieceDown {
+				ncell = suteme.Rotate180(cell)
+			}
+			class, conf := m.Predict(ncell)
 			base := suteme.ClassToBaseLabel(class)
 			label := base
 			if cat == suteme.CellPieceDown {
