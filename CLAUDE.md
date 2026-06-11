@@ -22,7 +22,8 @@ go 1.20
 | `detect.go` | **盤面検出**: エッジ投影 → ピーク検出 → 9x9分割 → `BoardRegion` / `BoardRegionFromRect` |
 | `classify.go` | **空/先手/後手の分類**: 画像処理のみ（学習不要）|
 | `validate.go` | 盤面検出の妥当性チェック（背景色の均一性）|
-| `recognize.go` | **駒種認識**: gobrain NN + モデル保存/読み込み + `BalanceData` |
+| `recognize.go` | **駒種認識(NN)**: gobrain NN + モデル保存/読み込み + `BalanceData` + `Predictor` IF |
+| `knn.go` | **駒種認識(k-NN)**: 学習不要・距離重み付き投票。現在の主認識器 |
 | `komadai.go` | **駒台推定**: `ValidatePieces` / `CountFromSFEN`（盤面 + 駒台 = 全駒 検証）|
 | `imaging.go` | グレースケール変換・二値化・BoxBlur・Sobel・`Rotate180` |
 | `draw.go` | Bresenham 線描画・PNG 保存 |
@@ -92,6 +93,18 @@ gobrain の FeedForward NN を使用:
 学習時は class < 0 のサンプルをスキップすること。
 過去にこのチェックがなく、空マスが「歩」（class 0）として大量に混入し精度が崩壊した。
 旧 `training_data.json` / `model.json` はこの汚染と旧入力表現のため使用しない（v2 ファイルに移行済み）。
+
+### 駒種認識 k-NN（`knn.go`）— 現在の主認識器
+
+ゲーム画面の駒は毎回ほぼ同一ピクセルで描画されるため、汎化より既知パターンとの照合が
+重要であり、小データでは NN より k-NN が安定する。
+
+- `Predictor` インターフェース（`Predict(cell) (class, conf)`）で NN と差し替え可能
+- 距離: 標準化済み 576 次元ベクトルのユークリッド距離（2乗）
+- k=5（サンプル数未満なら全件）、距離の逆数で重み付き投票
+- 信頼度 = 勝者クラスの重み比率
+- **学習処理が不要**: `training_data_v2.json` から起動時に構築、/api/train 後に再構築
+- サーバは k-NN 優先で推論し、gobrain モデルもあれば /api/recognize で比較用 SFEN（`sfen_nn`）も返す
 
 ### 駒台推定（`komadai.go`）
 

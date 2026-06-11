@@ -250,8 +250,8 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 }
 
 // RecognizeBoard は盤面全体を認識してSFENを返す
-// 空/向きは ClassifyCell で判定し、駒種のみ gobrain で推論する
-func RecognizeBoard(img image.Image, br *BoardRegion, m *Model) string {
+// 空/向きは ClassifyCell で判定し、駒種のみ Predictor（NN または k-NN）で推論する
+func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 	sfen := ""
 	for r := 0; r < 9; r++ {
 		empty := 0

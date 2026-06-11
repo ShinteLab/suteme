@@ -892,7 +892,14 @@ async function recognizeBoard() {
         '<button class="action-btn" id="btn-train" onclick="trainModel()">学習</button>' +
         '<button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>';
       const sfenEl = document.getElementById('sfen-output');
-      sfenEl.textContent = 'SFEN: ' + data.sfen;
+      const engine = data.engine === 'knn' ? 'k-NN' : 'NN';
+      let html = 'SFEN (' + engine + '): ' + data.sfen;
+      if (data.sfen_nn && data.sfen_nn !== data.sfen) {
+        html += '<br><span style="color:#888;font-size:12px">NN比較: ' + data.sfen_nn + '</span>';
+      } else if (data.sfen_nn) {
+        html += '<br><span style="color:#74c69d;font-size:12px">NN も同一結果</span>';
+      }
+      sfenEl.innerHTML = html;
       sfenEl.style.display = 'block';
 
       if (data.cells) {

@@ -83,6 +83,7 @@ var (
 	sessions    = make(map[string]*session)
 	mu          sync.RWMutex
 	model       *suteme.Model
+	knn         *suteme.KNN
 	// v2: 入力の標準化・後手の回転正規化・空マス除外に対応した形式
 	// （旧 training_data.json は空マスが歩として混入しているため使用しない）
 	dataFile    = "training_data_v2.json"
@@ -96,6 +97,13 @@ func main() {
 	if m, err := suteme.LoadModel(modelFile); err == nil {
 		model = m
 		log.Printf("Loaded model from %s", modelFile)
+	}
+	// 学習データがあれば k-NN を構築（学習処理は不要）
+	if data, err := suteme.LoadTrainingData(dataFile); err == nil {
+		if kn := suteme.NewKNN(data.Samples); kn != nil {
+			knn = kn
+			log.Printf("Built k-NN from %d samples in %s", kn.Len(), dataFile)
+		}
 	}
 
 	staticFS, _ := fs.Sub(static, "static")
@@ -121,12 +129,24 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-// predictCells は全マスの駒種をモデルで推論し、SFENラベルの9x9グリッドを返す
-// モデル未ロード時や盤面未検出時は nil を返す。空マスは "none"
-func predictCells(s *session) *[9][9]map[string]interface{} {
+// currentPredictor は使用する推論器を返す（k-NN 優先、なければ gobrain NN）
+// どちらも無い場合は nil
+func currentPredictor() suteme.Predictor {
 	modelLock.RLock()
-	m := model
-	modelLock.RUnlock()
+	defer modelLock.RUnlock()
+	if knn != nil {
+		return knn
+	}
+	if model != nil {
+		return model
+	}
+	return nil
+}
+
+// predictCells は全マスの駒種を推論し、SFENラベルの9x9グリッドを返す
+// 推論器なし・盤面未検出時は nil を返す。空マスは "none"
+func predictCells(s *session) *[9][9]map[string]interface{} {
+	m := currentPredictor()
 	if m == nil || s.Result == nil || s.Result.Board == nil {
 		return nil
 	}
@@ -609,6 +629,13 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	// 学習データを保存（生データ全件）
 	suteme.SaveTrainingData(dataFile, &data)
 
+	// k-NN は生データから即再構築（学習不要）
+	if kn := suteme.NewKNN(data.Samples); kn != nil {
+		modelLock.Lock()
+		knn = kn
+		modelLock.Unlock()
+	}
+
 	// クラスバランス調整してから学習
 	balanced := suteme.BalanceData(data.Samples)
 	dist := suteme.ClassDistribution(balanced)
@@ -649,10 +676,7 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelLock.RLock()
-	m := model
-	modelLock.RUnlock()
-
+	m := currentPredictor()
 	if m == nil {
 		http.Error(w, "Model not trained yet", http.StatusBadRequest)
 		return
@@ -708,10 +732,25 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 	sfen := suteme.RecognizeBoard(s.Original, s.Result.Board, m)
 	validation := suteme.ValidatePieces(sfen)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	resp := map[string]interface{}{
 		"sfen":       sfen,
 		"cells":      cells,
 		"validation": validation,
-	})
+	}
+	// k-NN 使用時、gobrain モデルもあれば比較用に NN の結果も返す
+	modelLock.RLock()
+	usingKNN := knn != nil
+	nnModel := model
+	modelLock.RUnlock()
+	if usingKNN {
+		resp["engine"] = "knn"
+		if nnModel != nil {
+			resp["sfen_nn"] = suteme.RecognizeBoard(s.Original, s.Result.Board, nnModel)
+		}
+	} else {
+		resp["engine"] = "nn"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
