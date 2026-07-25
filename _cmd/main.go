@@ -7,7 +7,7 @@ import (
 	_ "image/png"
 	"os"
 
-	"suteme"
+	"shinte/suteme"
 )
 
 func main() {

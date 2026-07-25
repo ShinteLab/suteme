@@ -1,8 +1,8 @@
 package suteme
 
 import (
-	"fmt"
-	"strings"
+	"shinte/core/sfen"
+	"shinte/core/usi"
 )
 
 type Board struct {
@@ -22,41 +22,23 @@ func (p BoardPos) IsError() bool {
 	return false
 }
 
+// parsePosition は USI マス文字列を配列添字(Row=段0..8, Col=筋0..8)に変換する。
+// 座標変換の仕様は core/usi に集約している。内部座標(x,y in 1..9)との対応は
+// Row = 9-y, Col = 9-x。
 func parsePosition(b string) BoardPos {
-	var p BoardPos
-	p.Row = -1
-	p.Col = -1
-	p.Value = b
-	if len(b) != 2 {
-		return p
+	x, y, ok := usi.ParseSquare(b)
+	if !ok {
+		return BoardPos{Row: -1, Col: -1, Value: b}
 	}
-
-	num1 := b[0:1][0]
-	num2 := b[1:2][0]
-	// a = 97
-	// 1 == 49
-	row := 9 - (num2 - (97 - 1))
-	col := num1 - 49
-	if row < 0 || row > 9 ||
-		col < 0 || col > 9 {
-		return p
-	}
-
-	p.Row = int(row)
-	p.Col = int(col)
-
-	return p
+	return BoardPos{Row: 9 - y, Col: 9 - x, Value: b}
 }
 
+// ToSFEN は盤面を SFEN 盤面文字列に変換する。空マスの圧縮・段区切りは
+// core/sfen に委譲する。
 func (bd Board) ToSFEN() string {
-	var sb strings.Builder
-	for idx, row := range bd.Rows {
-		sb.WriteString(row.ToSFEN())
-		if idx+1 != len(bd.Rows) {
-			sb.WriteString("/")
-		}
-	}
-	return sb.String()
+	return sfen.FormatBoard(func(rank, file int) string {
+		return bd.Rows[rank].Squares[file].Piece.Mark()
+	})
 }
 
 func (bd *Board) SetPiece(r, c int, p Piece) {
@@ -69,30 +51,6 @@ func (bd Board) GetPiece(p BoardPos) Piece {
 
 type BoardRow struct {
 	Squares [9]BoardSquare
-}
-
-func (r BoardRow) ToSFEN() string {
-	var b strings.Builder
-	num := 0
-	for idx, s := range r.Squares {
-
-		m := s.Piece.Mark()
-		if m == "" {
-			num++
-		}
-
-		if m != "" || idx+1 == len(r.Squares) {
-			if num != 0 {
-				b.WriteString(fmt.Sprintf("%d", num))
-				num = 0
-			}
-
-			if m != "" {
-				b.WriteString(m)
-			}
-		}
-	}
-	return b.String()
 }
 
 type BoardSquare struct {

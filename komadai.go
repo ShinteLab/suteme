@@ -2,8 +2,8 @@ package suteme
 
 import (
 	"fmt"
-	"strings"
-	"unicode"
+
+	"shinte/core/sfen"
 )
 
 // PieceLimits は先後合計の駒数上限
@@ -15,52 +15,22 @@ var PieceLimits = map[string]int{
 // HandOrder は駒台に入りうる駒種の順序（玉は除く）
 var HandOrder = []string{"P", "L", "N", "S", "G", "B", "R"}
 
-// baseType は成駒含む駒種文字列をベース駒種に変換する
-func baseType(t string) string {
-	switch strings.ToUpper(t) {
-	case "+P":
-		return "P"
-	case "+L":
-		return "L"
-	case "+N":
-		return "N"
-	case "+S":
-		return "S"
-	case "+B":
-		return "B"
-	case "+R":
-		return "R"
-	default:
-		return strings.ToUpper(t)
-	}
-}
-
-// CountFromSFEN はSFEN盤面部分（スラッシュ区切りの9行）から先後の駒数を集計する
+// CountFromSFEN はSFEN盤面部分（スラッシュ区切りの9行）から先後の駒数を集計する。
+// 盤面文字列の走査（数字・'+'・大小文字の解釈）は core/sfen に委譲する。
+// 成駒はベース駒種にまとめて数える（例: "+P" は "P"）。
 func CountFromSFEN(sfenBoard string) (sente, gote map[string]int) {
 	sente = map[string]int{}
 	gote = map[string]int{}
-	promoted := false
-	for _, ch := range sfenBoard {
-		switch {
-		case ch == '/' || (ch >= '1' && ch <= '9'):
-			promoted = false
-		case ch == '+':
-			promoted = true
-		default:
-			var key string
-			if promoted {
-				key = baseType("+" + strings.ToUpper(string(ch)))
-				promoted = false
-			} else {
-				key = strings.ToUpper(string(ch))
-			}
-			if unicode.IsLower(ch) {
-				gote[key]++
-			} else {
-				sente[key]++
-			}
+	// 不正な盤面でも解釈できた分だけ集計する（従来同様に寛容）ため、
+	// ParseBoard のエラーは無視する。
+	_ = sfen.ParseBoard(sfenBoard, func(rank, file, base int, black, promoted bool) {
+		key := sfen.Letter(base)
+		if black {
+			sente[key]++
+		} else {
+			gote[key]++
 		}
-	}
+	})
 	return sente, gote
 }
 

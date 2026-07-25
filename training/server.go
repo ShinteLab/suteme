@@ -21,7 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"suteme"
+	shinteweb "shinte/core/web"
+	"shinte/suteme"
 )
 
 //go:embed static
@@ -111,6 +112,9 @@ func Serve(port string) error {
 	mux := http.NewServeMux()
 	staticFS, _ := fs.Sub(static, "static")
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	// 共有フロント資産(<shogi-board> と SFEN/USI ロジック)を配信する。
+	// これにより UI 側の SFEN 処理を @shinte/web (core/web) に一本化する。
+	mux.Handle("/shinte-web/", http.StripPrefix("/shinte-web/", http.FileServer(http.FS(shinteweb.Assets))))
 	mux.HandleFunc("/api/analyze", handleAnalyze)
 	mux.HandleFunc("/api/images/", handleImage)
 	mux.HandleFunc("/api/cells/", handleCell)

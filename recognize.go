@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"shinte/core/sfen"
 	"github.com/goml/gobrain"
 )
 
@@ -160,25 +161,19 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 // RecognizeBoard は盤面全体を認識してSFENを返す
 // 空/向きは ClassifyCell で判定し、駒種のみ Predictor（NN または k-NN）で推論する
 func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
-	sfen := ""
+	// 各マスの SFEN 表記("" は空マス)を組み立て、盤面文字列化(空マスの
+	// ランレングス圧縮・段区切り)は core/sfen に委譲する。
+	var grid [9][9]string
 	for r := 0; r < 9; r++ {
-		empty := 0
 		for c := 0; c < 9; c++ {
 			cell := br.ExtractCell(img, r, c)
 			if cell == nil {
-				empty++
 				continue
 			}
 
 			cat := ClassifyCell(cell)
 			if cat == CellEmpty {
-				empty++
 				continue
-			}
-
-			if empty > 0 {
-				sfen += string(rune('0' + empty))
-				empty = 0
 			}
 
 			if m != nil {
@@ -192,31 +187,21 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 				if cat == CellPieceDown {
 					if len(base) > 0 {
 						if base[0] == '+' {
-							sfen += "+" + strings.ToLower(base[1:])
+							grid[r][c] = "+" + strings.ToLower(base[1:])
 						} else {
-							sfen += strings.ToLower(base)
+							grid[r][c] = strings.ToLower(base)
 						}
 					}
 				} else {
-					sfen += base
+					grid[r][c] = base
 				}
 			} else {
-				// モデルなし: 向きだけ
-				if cat == CellPieceDown {
-					sfen += "?"
-				} else {
-					sfen += "?"
-				}
+				// モデルなし: 向き不問で駒があることだけを示す
+				grid[r][c] = "?"
 			}
 		}
-		if empty > 0 {
-			sfen += string(rune('0' + empty))
-		}
-		if r < 8 {
-			sfen += "/"
-		}
 	}
-	return sfen
+	return sfen.FormatBoard(func(rank, file int) string { return grid[rank][file] })
 }
 
 // resizeGray は画像を指定サイズのグレースケールにリサイズする（最近傍法）

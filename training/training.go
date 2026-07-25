@@ -13,7 +13,7 @@ import (
 
 	"github.com/goml/gobrain"
 
-	"suteme"
+	"shinte/suteme"
 )
 
 // Train は学習データから gobrain FeedForward モデルを訓練する

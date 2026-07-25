@@ -188,6 +188,10 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
       style="background:#2d6a4f;color:#eee;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap;opacity:0.4">保存</button>
   </div>
   <div id="sfen-output" style="display:none;background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:4px;font-family:monospace;font-size:14px;word-break:break-all"></div>
+  <!-- SFEN の盤プレビュー(共有 Web Component)。認識結果/一括入力時に表示する -->
+  <div id="board-preview-wrap" style="display:none;margin-bottom:8px;max-width:340px">
+    <shogi-board id="board-preview"></shogi-board>
+  </div>
   <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
   <div class="cell-grid" id="cell-grid"></div>
 </div>
@@ -216,6 +220,16 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     <button class="cancel-btn" onclick="closeDialog()">キャンセル</button>
   </div>
 </div>
+
+<!-- 共有フロント資産(core/web)を読み込み、SFEN/USI ロジックを window.ShinteWeb に、
+     <shogi-board> を customElements に登録する。type=module は defer 実行なので、
+     下の classic script 内の関数(呼び出しはユーザ操作時)からは利用可能。 -->
+<script type="module">
+  import * as sfen from '/shinte-web/sfen.js';
+  import * as usi from '/shinte-web/usi.js';
+  import '/shinte-web/shogi-board.js'; // <shogi-board> を登録
+  window.ShinteWeb = { sfen, usi };
+</script>
 
 <script>
 const PIECE_TYPES = [
@@ -434,6 +448,7 @@ function renderCells(id, categories) {
     }
   }
   document.getElementById('sfen-output').style.display = 'none';
+  updateBoardPreview(null); // 再分析時は盤プレビューを隠す
   document.getElementById('cells-section').style.display = 'block';
 }
 
@@ -640,24 +655,17 @@ function enableSaveButton() {
 function buildSFEN() {
   if (!boardLabels) return null;
   const missing = [];
-  const rows = [];
-  for (let r = 0; r < 9; r++) {
-    let row = '', empty = 0;
-    for (let c = 0; c < 9; c++) {
-      let p = boardLabels[r][c];
-      if (p === null && cellCategories && cellCategories[r][c] === 0) p = 'none';
-      if (p === null) { missing.push((r + 1) + '行' + (c + 1) + '列'); continue; }
-      if (p === 'none') { empty++; }
-      else {
-        if (empty > 0) { row += empty; empty = 0; }
-        row += p;
-      }
-    }
-    if (empty > 0) row += empty;
-    rows.push(row);
-  }
+  // 各マスの SFEN 表記("" は空)を返す。空マス圧縮・段区切りは共有ロジック
+  // (core/web の formatBoard)に委譲して重複を持たない。
+  const cell = (r, c) => {
+    let p = boardLabels[r][c];
+    if (p === null && cellCategories && cellCategories[r][c] === 0) p = 'none';
+    if (p === null) { missing.push((r + 1) + '行' + (c + 1) + '列'); return ''; }
+    return p === 'none' ? '' : p;
+  };
+  const board = ShinteWeb.sfen.formatBoard(cell);
   if (missing.length > 0) return { error: missing };
-  return { sfen: rows.join('/') + ' b - 1' };
+  return { sfen: board + ' b - 1' };
 }
 
 // タブ切り替え
@@ -768,31 +776,34 @@ async function saveSession() {
   }
 }
 
-// SFENパーサー
+// SFENパーサー: 盤面文字列を {row,col,piece} の配列に展開する。
+// 解析は共有ロジック(core/web の toGrid)に委譲する。piece は "none"(空) か
+// SFEN 駒文字("P"/"+p" 等)。不正な SFEN の場合は空配列を返す。
 function parseSFEN(sfenStr) {
   const board = sfenStr.trim().split(' ')[0];
-  const rows = board.split('/');
+  let grid;
+  try {
+    grid = ShinteWeb.sfen.toGrid(board);
+  } catch (e) {
+    return [];
+  }
   const result = [];
   for (let r = 0; r < 9; r++) {
-    const row = rows[r] || '';
-    let c = 0, i = 0;
-    while (c < 9 && i < row.length) {
-      const ch = row[i];
-      if (ch >= '1' && ch <= '9') {
-        const n = parseInt(ch);
-        for (let j = 0; j < n; j++) result.push({ row: r, col: c++, piece: 'none' });
-        i++;
-      } else if (ch === '+') {
-        const next = row[++i]; i++;
-        result.push({ row: r, col: c++, piece: '+' + next });
-      } else {
-        result.push({ row: r, col: c++, piece: ch });
-        i++;
-      }
+    for (let c = 0; c < 9; c++) {
+      result.push({ row: r, col: c, piece: grid[r][c] || 'none' });
     }
-    while (c < 9) result.push({ row: r, col: c++, piece: 'none' });
   }
   return result;
+}
+
+// SFEN の盤プレビュー(<shogi-board>)を更新/表示する。
+function updateBoardPreview(sfenStr) {
+  const wrap = document.getElementById('board-preview-wrap');
+  const board = document.getElementById('board-preview');
+  if (!wrap || !board) return;
+  if (!sfenStr) { wrap.style.display = 'none'; return; }
+  board.setAttribute('sfen', String(sfenStr).trim().split(' ')[0]);
+  wrap.style.display = 'block';
 }
 
 async function applyFromSFEN() {
@@ -842,6 +853,7 @@ async function applyFromSFEN() {
     }
   }
   document.getElementById('stats').textContent = 'SFEN入力完了 — ' + labels.filter(l => l.piece !== 'none').length + '駒';
+  updateBoardPreview(sfen); // 入力した SFEN を盤で表示
   const saveBtn = document.getElementById('btn-save-session');
   saveBtn.disabled = false;
   saveBtn.style.opacity = '1';
@@ -901,6 +913,7 @@ async function recognizeBoard() {
       }
       sfenEl.innerHTML = html;
       sfenEl.style.display = 'block';
+      updateBoardPreview(data.sfen); // 認識結果を盤で表示
 
       if (data.cells) {
         for (let r = 0; r < 9; r++) {
