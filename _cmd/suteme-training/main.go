@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"shinte/suteme/training"
+	"github.com/ShinteLab/suteme/training"
 )
 
 func main() {

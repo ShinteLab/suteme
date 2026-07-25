@@ -1,8 +1,8 @@
 package suteme
 
 import (
-	"shinte/core/sfen"
-	"shinte/core/usi"
+	"github.com/ShinteLab/core/sfen"
+	"github.com/ShinteLab/core/usi"
 )
 
 type Board struct {

@@ -3,7 +3,7 @@ package suteme
 import (
 	"fmt"
 
-	"shinte/core/sfen"
+	"github.com/ShinteLab/core/sfen"
 )
 
 // PieceLimits は先後合計の駒数上限

@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	shinteweb "shinte/core/web"
-	"shinte/suteme"
+	shinteweb "github.com/ShinteLab/core/web"
+	"github.com/ShinteLab/suteme"
 )
 
 //go:embed static

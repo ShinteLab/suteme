@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"shinte/core/sfen"
+	"github.com/ShinteLab/core/sfen"
 	"github.com/goml/gobrain"
 )
 

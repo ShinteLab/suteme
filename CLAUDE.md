@@ -4,16 +4,17 @@
 
 ## モジュール / 位置づけ
 
-独立したモジュールではなく、リポジトリ全体の単一モジュール `shinte` の一部
-（旧 `module suteme` は統合済み）。import パスは `shinte/suteme`, `shinte/suteme/training`。
-リポジトリ横断の方針はルートの `CLAUDE.md` を参照。
+独立した Go モジュール `github.com/ShinteLab/suteme`。
+import パスは `github.com/ShinteLab/suteme`, `github.com/ShinteLab/suteme/training`。
+`core` はタグ未発行のため `replace github.com/ShinteLab/core => ../core` の相対パス参照で引いている
+（この replace を外さないこと）。プロジェクト横断の方針は親ディレクトリの `CLAUDE.md` を参照。
 
 依存:
 
 - `github.com/goml/gobrain` — 駒種認識の NN
-- `shinte/core/sfen`, `shinte/core/usi` — **SFEN / USI の仕様。自前実装は持たない**
+- `github.com/ShinteLab/core/sfen`, `github.com/ShinteLab/core/usi` — **SFEN / USI の仕様。自前実装は持たない**
   （`board.go` / `komadai.go` / `recognize.go` から利用）
-- `shinte/core/web` — 共有フロント資産。`training/server.go` が `embed.FS` を配信（後述）
+- `github.com/ShinteLab/core/web` — 共有フロント資産。`training/server.go` が `embed.FS` を配信（後述）
 
 SFEN の駒文字マッピングや盤面文字列の組み立てを suteme 側に書き足さないこと。
 必要なら `core/sfen` に足して、Go 側テストと `core/web/test.mjs` の両方を揃える。
@@ -155,7 +156,7 @@ UI は `training/static/index.html`（embed）。
 ### 共有フロント資産（`@shinte/web`）
 
 盤の仕様（SFEN 処理・盤描画）は `core/web` に一本化している。`server.go` は
-`shinte/core/web`（`assets.go` の `embed.FS`）を `/shinte-web/` で配信し、`index.html` は
+`github.com/ShinteLab/core/web`（`assets.go` の `embed.FS`）を `/shinte-web/` で配信し、`index.html` は
 `import ... from "/shinte-web/sfen.js"` 等で利用する（バンドラ無し・ファイルのコピー不要）。
 
 - `buildSFEN()` … `ShinteWeb.sfen.formatBoard` に委譲（空マス圧縮・段区切り）
