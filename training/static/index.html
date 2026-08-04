@@ -188,8 +188,8 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 
 <div class="cells-section" id="cells-section" style="display:none">
   <h2>マス目 (9x9) — クリックでラベリング
-    <button class="action-btn" id="btn-train" onclick="trainModel()">学習</button>
     <button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>
+    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">ラベリング → 保存。学習は履歴タブから</span>
   </h2>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
     <input type="text" id="sfen-input"
@@ -653,11 +653,6 @@ function applyLabel(r, c, pieceId, displayHtml, bgColor) {
   if (pieceId !== null) {
     if (boardLabels) boardLabels[r][c] = pieceId;
     enableSaveButton();
-    fetch('/api/label', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session: currentSessionId, row: r, col: c, piece: pieceId }),
-    }).catch(e => console.error('label error:', e));
   }
 }
 
@@ -873,7 +868,8 @@ async function saveSession() {
     btn.style.opacity = '0.4';
     // 何を保存したのかを盤と文字列で確認できるようにする
     const sfenEl = document.getElementById('sfen-output');
-    sfenEl.textContent = '保存した盤面: ' + sfen;
+    sfenEl.innerHTML = '保存した盤面: ' + sfen +
+      '<br><span style="font-size:12px;color:#74c69d">履歴タブで選択すると、この局面を学習に使えます</span>';
     sfenEl.style.display = 'block';
     updateBoardPreview(sfen);
     refreshHistory();
@@ -919,14 +915,8 @@ async function applyFromSFEN() {
   const labels = parseSFEN(sfen);
   if (labels.length === 0) { alert('SFENの解析に失敗しました'); return; }
 
-  const res = await fetch('/api/labelbulk', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session: currentSessionId, labels }),
-  });
-  const data = await res.json();
-  if (data.status !== 'ok') { alert('一括入力に失敗しました'); return; }
-
+  // ラベルは画面側だけで保持する。保存(SFEN)と履歴からの学習で完結するので
+  // サーバにマスごとのラベルを持たせる必要はない
   const catColors = ['#0f3460', '#2d6a4f', '#9d0208'];
   for (const { row, col, piece } of labels) {
     if (boardLabels) boardLabels[row][col] = piece;
@@ -966,35 +956,6 @@ async function applyFromSFEN() {
   saveBtn.textContent = '保存';
 }
 
-async function trainModel() {
-  const btn = document.getElementById('btn-train');
-  btn.disabled = true;
-  btn.textContent = '学習中...';
-  try {
-    const res = await fetch('/api/train', { method: 'POST' });
-    const data = await res.json();
-    if (data.status === 'ok') {
-      const names = {P:'歩',L:'香',N:'桂',S:'銀',G:'金',B:'角',R:'飛',K:'玉',
-        '+P':'と','+L':'杏','+N':'圭','+S':'全','+B':'馬','+R':'龍'};
-      const dist = data.distribution || {};
-      const distStr = Object.entries(dist)
-        .sort((a,b) => b[1]-a[1])
-        .map(([k,v]) => (names[k]||k)+':'+v).join(' ');
-      const dup = data.duplicates ? ' 重複除去' + data.duplicates + '件' : '';
-      btn.textContent = '学習完了 (生' + data.samples + '→バランス' + data.balanced + '件' + dup + ')';
-      const statsEl = document.getElementById('stats');
-      statsEl.innerHTML = '学習データ分布: ' + distStr;
-      setTimeout(() => { btn.textContent = '学習'; btn.disabled = false; }, 5000);
-    } else {
-      btn.textContent = '学習失敗';
-      setTimeout(() => { btn.textContent = '学習'; btn.disabled = false; }, 2000);
-    }
-  } catch (e) {
-    alert('エラー: ' + e.message);
-    btn.textContent = '学習'; btn.disabled = false;
-  }
-}
-
 async function recognizeBoard() {
   if (!currentSessionId) return;
   try {
@@ -1008,7 +969,6 @@ async function recognizeBoard() {
       recognized = true;
       document.getElementById('cells-section').querySelector('h2').innerHTML =
         'マス目 (9x9) — <span style="color:#f0a030;font-size:13px">認識結果（読み取り専用）</span>' +
-        '<button class="action-btn" id="btn-train" onclick="trainModel()">学習</button>' +
         '<button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>';
       const sfenEl = document.getElementById('sfen-output');
       const engine = data.engine === 'knn' ? 'k-NN' : 'NN';
@@ -1037,19 +997,6 @@ async function recognizeBoard() {
               const bg = conf > 60 ? '#1a4a35' : '#5a1010';
               label.innerHTML = dispLabel + '<span style="font-size:9px;color:#aaa">(' + conf + '%)</span>';
               label.style.background = bg;
-            }
-
-            // サーバーにラベルとして保存（修正・学習に使えるよう）
-            if (cell.label !== undefined) {
-              fetch('/api/label', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  session: currentSessionId,
-                  row: r, col: c,
-                  piece: cell.label || 'none',
-                }),
-              }).catch(e => console.error('label error:', e));
             }
 
             // categories を認識結果で更新（ダイアログの初期値に反映）

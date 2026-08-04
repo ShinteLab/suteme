@@ -33,7 +33,6 @@ type session struct {
 	Original image.Image
 	Result   *suteme.AnalyzeResult
 	BoardImg *image.RGBA
-	Labels   map[string]string
 }
 
 const (
@@ -82,16 +81,16 @@ func saveHistoryFile(h *HistoryData) {
 }
 
 var (
-	sessions    = make(map[string]*session)
-	mu          sync.RWMutex
-	model       *suteme.Model
-	knn         *suteme.KNN
+	sessions = make(map[string]*session)
+	mu       sync.RWMutex
+	model    *suteme.Model
+	knn      *suteme.KNN
 	// v2: 入力の標準化・後手の回転正規化・空マス除外に対応した形式
 	// （旧 training_data.json は空マスが歩として混入しているため使用しない）
-	dataFile    = "training_data_v2.json"
-	modelFile   = "model_v2.json"
-	modelLock   sync.RWMutex
-	historyMu   sync.RWMutex
+	dataFile  = "training_data_v2.json"
+	modelFile = "model_v2.json"
+	modelLock sync.RWMutex
+	historyMu sync.RWMutex
 )
 
 // Serve はラベリング・学習用のWebサーバを起動する
@@ -122,10 +121,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/history", handleHistory)
 	mux.HandleFunc("/api/history/", handleHistoryImage)
 	mux.HandleFunc("/api/savesession", handleSaveSession)
-	mux.HandleFunc("/api/label", handleLabel)
-	mux.HandleFunc("/api/labelbulk", handleLabelBulk)
 	mux.HandleFunc("/api/setboard", handleSetBoard)
-	mux.HandleFunc("/api/train", handleTrain)
 	mux.HandleFunc("/api/trainhistory", handleTrainHistory)
 	mux.HandleFunc("/api/recognize", handleRecognize)
 
@@ -191,15 +187,6 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 	return &grid
 }
 
-// isGoteLabel はSFENラベルが後手（小文字）かを返す
-func isGoteLabel(label string) bool {
-	s := strings.TrimPrefix(label, "+")
-	if s == "" {
-		return false
-	}
-	return s[0] >= 'a' && s[0] <= 'z'
-}
-
 func newID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
@@ -235,7 +222,6 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		Original: img,
 		Result:   result,
 		BoardImg: boardImg,
-		Labels:   make(map[string]string),
 	}
 	mu.Unlock()
 
@@ -348,40 +334,6 @@ func handleCell(w http.ResponseWriter, r *http.Request) {
 	png.Encode(w, cell)
 }
 
-func handleLabel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Session string `json:"session"`
-		Row     int    `json:"row"`
-		Col     int    `json:"col"`
-		Piece   string `json:"piece"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	mu.Lock()
-	s, ok := sessions[req.Session]
-	if ok {
-		key := strconv.Itoa(req.Row) + "-" + strconv.Itoa(req.Col)
-		s.Labels[key] = req.Piece
-	}
-	mu.Unlock()
-
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	historyMu.RLock()
 	h := loadHistory()
@@ -466,41 +418,6 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": id})
 }
 
-// handleLabelBulk: 複数マスのラベルを一括登録する
-func handleLabelBulk(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		Session string `json:"session"`
-		Labels  []struct {
-			Row   int    `json:"row"`
-			Col   int    `json:"col"`
-			Piece string `json:"piece"`
-		} `json:"labels"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	mu.Lock()
-	s, ok := sessions[req.Session]
-	if ok {
-		for _, l := range req.Labels {
-			key := strconv.Itoa(l.Row) + "-" + strconv.Itoa(l.Col)
-			s.Labels[key] = l.Piece
-		}
-	}
-	mu.Unlock()
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
 // handleSetBoard: 手動指定の矩形で盤面を再設定する
 func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -526,7 +443,6 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 		br := suteme.BoardRegionFromRect(req.X1, req.Y1, req.X2, req.Y2)
 		s.Result.Board = br
 		s.BoardImg = s.Result.DrawBoard(s.Original)
-		s.Labels = make(map[string]string)
 		cats = suteme.ClassifyBoard(s.Original, br)
 	}
 	mu.Unlock()
@@ -555,67 +471,6 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
-}
-
-// handleTrain: ラベル済みデータで学習する
-func handleTrain(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Printf("handleTrain panic: %v", rec)
-			http.Error(w, fmt.Sprintf("training failed: %v", rec), http.StatusInternalServerError)
-		}
-	}()
-
-	// 全セッションのラベルデータを集める
-	mu.RLock()
-	var fresh []suteme.TrainingSample
-	newCount := 0
-	for _, s := range sessions {
-		if s.Result.Board == nil {
-			continue
-		}
-		for key, label := range s.Labels {
-			// 空マスは駒種学習の対象外（"none" を LabelToClass に通すと誤学習する）
-			class := suteme.LabelToClass(label)
-			if class < 0 {
-				continue
-			}
-			parts := strings.Split(key, "-")
-			if len(parts) != 2 {
-				continue
-			}
-			row, _ := strconv.Atoi(parts[0])
-			col, _ := strconv.Atoi(parts[1])
-			cell := s.Result.Board.ExtractCell(s.Original, row, col)
-			if cell == nil {
-				continue
-			}
-			// 後手（小文字ラベル）は180度回転して先手向きに正規化
-			if isGoteLabel(label) {
-				cell = suteme.Rotate180(cell)
-			}
-			fresh = append(fresh, suteme.TrainingSample{
-				Input: suteme.CellToInput(cell),
-				Label: class,
-			})
-			newCount++
-		}
-	}
-	mu.RUnlock()
-
-	log.Printf("Training from %d labels in memory", newCount)
-	res, err := trainAndSave(fresh)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
 }
 
 // handleTrainHistory: 選択した保存済み局面から学習する。
