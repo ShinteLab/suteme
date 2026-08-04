@@ -179,6 +179,25 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 <div class="loading" id="loading">解析中...</div>
 <div class="stats" id="stats"></div>
 
+<!-- 画像を登録すると自動で認識まで走らせ、読み取れた盤面をここに出す -->
+<div id="recog-section" class="cells-section" style="display:none">
+  <h2>現在の認識結果
+    <button class="action-btn" id="btn-goto-analyze" onclick="switchTab('analyze')">解析へ ›</button>
+    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">盤面がずれている場合は解析タブで指定し直せます</span>
+  </h2>
+  <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:14px;word-break:break-all"></div>
+  <div id="recog-board-wrap" style="display:none;margin-bottom:8px;max-width:340px">
+    <shogi-board id="recog-board"></shogi-board>
+  </div>
+  <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
+</div>
+</div><!-- /tab-input -->
+
+<div id="tab-analyze" style="display:none">
+<div id="analyze-empty" style="color:#888;font-size:13px;padding:32px 0;text-align:center">
+  入力タブで画像を登録してください
+</div>
+
 <div class="pipeline" id="pipeline" style="display:none">
   <div class="card">
     <h3>元画像
@@ -192,25 +211,6 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   </div>
   <div class="card"><h3>エッジ</h3><img id="img-edges" style="width:100%;display:block"></div>
   <div class="card"><h3>盤面検出</h3><img id="img-board" style="width:100%;display:block"></div>
-</div>
-
-<!-- 画像を登録すると自動で認識まで走らせ、読み取れた盤面をここに出す -->
-<div id="recog-section" class="cells-section" style="display:none">
-  <h2>自動認識の結果
-    <button class="action-btn" id="btn-goto-analyze" onclick="switchTab('analyze')">解析へ ›</button>
-    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">盤面がずれていれば「盤面を手動指定」でドラッグし直してください</span>
-  </h2>
-  <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:14px;word-break:break-all"></div>
-  <div id="recog-board-wrap" style="display:none;margin-bottom:8px;max-width:340px">
-    <shogi-board id="recog-board"></shogi-board>
-  </div>
-  <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
-</div>
-</div><!-- /tab-input -->
-
-<div id="tab-analyze" style="display:none">
-<div id="analyze-empty" style="color:#888;font-size:13px;padding:32px 0;text-align:center">
-  入力タブで画像を登録してください
 </div>
 <div class="cells-section" id="cells-section" style="display:none">
   <h2>マス目 (9x9) — クリックでラベリング
@@ -228,6 +228,7 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
       title="画面のラベル入力から SFEN を作って保存します（SFEN欄の文字列は参照しません）"
       style="background:#2d6a4f;color:#eee;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap;opacity:0.4">保存</button>
   </div>
+  <div class="stats" id="analyze-status" style="text-align:left;margin-bottom:8px"></div>
   <div id="sfen-output" style="display:none;background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:4px;font-family:monospace;font-size:14px;word-break:break-all"></div>
   <!-- SFEN の盤プレビュー(共有 Web Component)。認識結果/一括入力時に表示する -->
   <div id="board-preview-wrap" style="display:none;margin-bottom:8px;max-width:340px">
@@ -399,7 +400,7 @@ function getImgCoord(img, clientX, clientY) {
       document.getElementById('img-board').src = '/api/images/' + currentSessionId + '/board?' + t;
       cellSuggestions = data.suggestions || null;
       renderCells(currentSessionId, data.categories);
-      document.getElementById('stats').textContent = '盤面を手動指定しました';
+      document.getElementById('analyze-status').textContent = '盤面を手動指定しました';
       await runRecognition();
     }
   });
@@ -432,6 +433,7 @@ async function analyze(file) {
   document.getElementById('sfen-output').style.display = 'none';
   updateBoardPreview(null);
   document.getElementById('stats').textContent = '';
+  document.getElementById('analyze-status').textContent = '';
 
   const form = new FormData();
   form.append('image', file);
@@ -671,7 +673,7 @@ function confirmRemaining() {
   } else if (piece > 0) {
     msg += ' — 推論候補をそのまま採用しました。間違っているマスをクリックして直してください';
   }
-  document.getElementById('stats').innerHTML = msg;
+  document.getElementById('analyze-status').innerHTML = msg;
 }
 
 // 「修正OK」: 変更した内容で確定（○なし）
@@ -1035,7 +1037,7 @@ async function applyFromSFEN() {
       if (cellEl) cellEl.classList.add('labeled');
     }
   }
-  document.getElementById('stats').textContent = 'SFEN入力完了 — ' + labels.filter(l => l.piece !== 'none').length + '駒';
+  document.getElementById('analyze-status').textContent = 'SFEN入力完了 — ' + labels.filter(l => l.piece !== 'none').length + '駒';
   updateBoardPreview(sfen); // 入力した SFEN を盤で表示
   const saveBtn = document.getElementById('btn-save-session');
   saveBtn.disabled = false;
