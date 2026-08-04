@@ -183,8 +183,10 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     <input type="text" id="sfen-input"
       placeholder="SFENを貼り付け → 一括入力 (例: lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1)"
       style="flex:1;background:#0f3460;border:1px solid #333;color:#eee;padding:6px 10px;border-radius:4px;font-family:monospace;font-size:12px">
-    <button onclick="applyFromSFEN()" style="background:#4cc9f0;color:#000;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">SFENから入力</button>
+    <button onclick="applyFromSFEN()" title="SFEN欄の文字列を81マスのラベルに展開します（押すまで反映されません）"
+      style="background:#4cc9f0;color:#000;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">SFENから入力</button>
     <button id="btn-save-session" onclick="saveSession()" disabled
+      title="画面のラベル入力から SFEN を作って保存します（SFEN欄の文字列は参照しません）"
       style="background:#2d6a4f;color:#eee;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap;opacity:0.4">保存</button>
   </div>
   <div id="sfen-output" style="display:none;background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:4px;font-family:monospace;font-size:14px;word-break:break-all"></div>
@@ -380,6 +382,10 @@ document.addEventListener('paste', e => {
 
 async function analyze(file) {
   recognized = false;
+  // 前の画像の入力を持ち越さない。SFEN 欄が残っていると次の画像の
+  // ラベリング中も古い局面が画面に居座って紛らわしい
+  document.getElementById('sfen-input').value = '';
+  resetSaveButton();
   document.getElementById('loading').classList.add('active');
   document.getElementById('pipeline').style.display = 'none';
   document.getElementById('cells-section').style.display = 'none';
@@ -650,6 +656,14 @@ function enableSaveButton() {
   btn.textContent = '保存';
 }
 
+// 新しい画像を読んだときは未保存状態に戻す（「保存済」のまま居残らせない）
+function resetSaveButton() {
+  const btn = document.getElementById('btn-save-session');
+  btn.disabled = true;
+  btn.style.opacity = '0.4';
+  btn.textContent = '保存';
+}
+
 // boardLabels から SFEN 盤面部分を生成する
 // 未入力マスは自動分類が「空」なら空とみなす。それ以外が残っていれば error を返す
 function buildSFEN() {
@@ -718,7 +732,7 @@ document.getElementById('history-list').addEventListener('click', async e => {
   processedHistory.add(id); // 処理済みマーク（セッション内のみ）
   const blob = await res.blob();
   const file = new File([blob], id + '.png', { type: 'image/png' });
-  document.getElementById('sfen-input').value = sfen;
+  // analyze() が SFEN 欄をクリアするので、復元は analyze の後に行う
   await analyze(file);
 
   // 保存した盤面座標を復元
@@ -737,27 +751,28 @@ document.getElementById('history-list').addEventListener('click', async e => {
     }
   }
 
-  // SFEN を再適用（sfen-input は既に設定済み）
+  // 保存済み SFEN を欄に戻してラベルへ展開する
   if (sfen) {
+    document.getElementById('sfen-input').value = sfen;
     await applyFromSFEN();
   }
 });
 
+// 「保存」は画面のラベル入力（boardLabels）だけを保存する。
+// SFEN 欄はあくまで一括入力の手段であって保存の入力源にはしない
+// ―― 入力源にすると、貼り付けただけで「SFENから入力」を押していない場合や
+// 履歴から復元した SFEN が残っている場合に、画面と保存内容が食い違う。
 async function saveSession() {
   if (!currentSessionId) return;
-  let sfen = document.getElementById('sfen-input').value.trim();
-  if (!sfen) {
-    // SFEN欄が空ならラベル入力済みの盤面から生成する
-    const built = buildSFEN();
-    if (!built) { alert('盤面がありません'); return; }
-    if (built.error) {
-      const list = built.error.slice(0, 10).join(', ') + (built.error.length > 10 ? ' …' : '');
-      alert('駒種が未入力のマスが ' + built.error.length + ' 個あります:\n' + list);
-      return;
-    }
-    sfen = built.sfen;
-    document.getElementById('sfen-input').value = sfen;
+  const built = buildSFEN();
+  if (!built) { alert('盤面がありません'); return; }
+  if (built.error) {
+    const list = built.error.slice(0, 10).join(', ') + (built.error.length > 10 ? ' …' : '');
+    alert('駒種が未入力のマスが ' + built.error.length + ' 個あります:\n' + list);
+    return;
   }
+  const sfen = built.sfen;
+
   const btn = document.getElementById('btn-save-session');
   btn.textContent = '保存中...';
   const res = await fetch('/api/savesession', {
@@ -770,6 +785,11 @@ async function saveSession() {
     btn.textContent = '保存済';
     btn.disabled = true;
     btn.style.opacity = '0.4';
+    // 何を保存したのかを盤と文字列で確認できるようにする
+    const sfenEl = document.getElementById('sfen-output');
+    sfenEl.textContent = '保存した盤面: ' + sfen;
+    sfenEl.style.display = 'block';
+    updateBoardPreview(sfen);
     refreshHistory();
   } else {
     btn.textContent = '保存';
