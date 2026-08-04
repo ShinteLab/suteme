@@ -25,7 +25,7 @@ SFEN の駒文字マッピングや盤面文字列の組み立てを suteme 側�
 
 | ファイル | 役割 |
 |---------|------|
-| `suteme.go` | 公開API: `LoadSFEN`, `ViewDebug` |
+| `suteme.go` | 公開API: `LoadSFEN` / `LoadSFENWith` / `LoadPredictor` / `SetPredictor`・`ViewDebug` |
 | `analyze.go` | `Analyze()` / `AnalyzeResult` / `DrawBoard()` |
 | `detect.go` | **盤面検出**: エッジ投影 → ピーク検出 → 9x9分割 → `BoardRegion` / `BoardRegionFromRect` |
 | `classify.go` | **空/先手/後手の分類**: 画像処理のみ（学習不要）|
@@ -145,6 +145,36 @@ ValidatePieces: 各駒種の上限 − 盤面合計 = 駒台枚数
 SFEN 文字列を生成 → ValidatePieces で駒数検証
 ```
 
+### 公開 API（`suteme.go`）
+
+`LoadSFEN(img) (string, error)` が「画像 → SFEN 盤面文字列」の入口。
+**返すのは盤面部分（'/' 区切りの9段）だけ**で、手番・持ち駒・手数は付けない
+（suteme の責務を「画像 → 盤面」に閉じるため。持ち駒枚数が要るなら
+戻り値を `ValidatePieces` に渡す）。
+
+```
+LoadSFEN(img)
+  ↓ defaultPredictor: カレントディレクトリ → 実行ファイルのディレクトリの順に探索
+  │   training_data_v2.json → k-NN（優先）/ model_v2.json → gobrain
+  │   ※ 見つかった結果はキャッシュ。失敗はキャッシュしない（後からファイルを置けば拾う）
+  ↓ detectBoardRegion: DetectBoard → 信頼度不足なら「画像全体が盤面」で再評価
+  │   ※ ikkyoku のガイド枠のように盤だけを切り出した画像はグリッド線が
+  │      画像端に来て DetectBoard が外れるため
+  │   ValidateBoard の値が minBoardConfidence(0.5) 未満なら ErrBoardNotFound
+  ↓ RecognizeBoard
+SFEN 盤面文字列
+```
+
+- `LoadSFENWith(img, Predictor)` … 推論器を明示指定（テスト・比較用）
+- `LoadPredictor(dir)` … 指定ディレクトリから推論器を読む
+- `SetPredictor(p)` … 既定の推論器を差し替え（nil で自動探索に戻る）
+- エラーは `errors.Is` で判別する（`ErrBoardNotFound` / `ErrNoPredictor`）
+
+**認識精度は盤面検出と学習データに依存する。** 現状 `_cmd/samples/` の画像では
+`DetectBoard` の行間隔が不均一（グリッド線がマス内に入り、空マスの分散が
+閾値1500をわずかに超える）ため誤認識が出る。盤面座標が分かっているなら
+`BoardRegionFromRect` + `RecognizeBoard` を直接使うほうが確実。
+
 ---
 
 ## ラベリング・学習用 Web サーバ（`training/server.go` + `_cmd/suteme-training/`）
@@ -241,5 +271,7 @@ go run ./_cmd/suteme-training/ 8888
 - [ ] 写真（斜め撮影）対応 → 射影変換（Homography）
 - [ ] 学習データの重複排除（セッション ID 管理）
 - [ ] 持ち駒の認識（駒台の画像解析）
-- [ ] `LoadSFEN` の本実装（現在 `not implemented`）
+- [x] `LoadSFEN` の本実装（`suteme.go`。盤面文字列のみを返す）
+- [ ] `DetectBoard` の行間隔を均一化する（検出したピーク位置をそのまま使うため
+      1マスの高さが 47〜58px とばらつき、グリッド線がマス内に入り込む）
 - [ ] TV 中継画像のグリッドズレ自動修正
