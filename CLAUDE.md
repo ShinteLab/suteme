@@ -25,7 +25,9 @@ SFEN の駒文字マッピングや盤面文字列の組み立てを suteme 側�
 
 | ファイル | 役割 |
 |---------|------|
-| `suteme.go` | 公開API: `LoadSFEN` / `LoadSFENWith` / `LoadPredictor` / `SetPredictor`・`ViewDebug` |
+| `suteme.go` | 公開API: `Recognize` / `LoadSFEN` / `LoadSFENWith` / `LoadPredictor` / `SetPredictor`・`ViewDebug` |
+| `option.go` | 認識オプション（`Option` / `WithChecks` / `WithErrorOn` / `WithHandTo` ほか）|
+| `result.go` | 認識結果 `Result`（駒数・持ち駒・違反）と `BoardError` / `ErrInvalidBoard` |
 | `analyze.go` | `Analyze()` / `AnalyzeResult` / `DrawBoard()` |
 | `detect.go` | **盤面検出**: エッジ投影 → ピーク検出 → 9x9分割 → `BoardRegion` / `BoardRegionFromRect` |
 | `classify.go` | **空/先手/後手の分類**: 画像処理のみ（学習不要）・`BoardColor` |
@@ -153,15 +155,21 @@ gobrain の FeedForward NN を使用:
 - **学習処理が不要**: `training_data_v2.json` から起動時に構築、/api/train 後に再構築
 - サーバは k-NN 優先で推論し、gobrain モデルもあれば /api/recognize で比較用 SFEN（`sfen_nn`）も返す
 
-### 駒台推定（`komadai.go`）
+### 駒台推定・盤面検証（`komadai.go` → `core/sfen`）
+
+**判定そのものは `core/sfen` の `Inspect` が持つ。** `komadai.go` に残っているのは、
+その結果を学習用サーバ / ikkyoku が扱ってきた形（SFEN 大文字キーのマップ + 日本語の
+警告文字列）に組み替える層だけ。**駒数の上限表や二歩の判定を suteme に書き足さないこと。**
 
 ```
-CountFromSFEN: SFEN盤面部分 → 先手/後手の駒数マップ
-ValidatePieces: 各駒種の上限 − 盤面合計 = 駒台枚数
-  超過している場合は Warnings に追加
+CountFromSFEN: SFEN盤面部分 → 先手/後手の駒数マップ（チェックはしない）
+ValidatePieces: sfen.Inspect(board, sfen.CheckCounts) の言い換え
+  各駒種の上限 − 盤面合計 = 駒台枚数、超過や玉の異常は Warnings に追加
 ```
 
 駒の総数（盤面 + 駒台）は全局面で一定なので、盤面認識の誤りの検出に活用できる。
+二歩・行き所のない駒まで見たい場合は `Recognize` のオプション（後述）か
+`sfen.Inspect(board, sfen.CheckAll)` を直接使う。
 
 ### 認識フロー（ハイブリッド方式）
 
@@ -196,10 +204,44 @@ LoadSFEN(img)
 SFEN 盤面文字列
 ```
 
-- `LoadSFENWith(img, Predictor)` … 推論器を明示指定（テスト・比較用）
+- `Recognize(img, opts...) (*Result, error)` … 盤面 + 駒数検証 + 持ち駒推定まで返す入口（後述）
+- `LoadSFENWith(img, Predictor, opts...)` … 推論器を明示指定（テスト・比較用）
 - `LoadPredictor(dir)` … 指定ディレクトリから推論器を読む
 - `SetPredictor(p)` … 既定の推論器を差し替え（nil で自動探索に戻る）
-- エラーは `errors.Is` で判別する（`ErrBoardNotFound` / `ErrNoPredictor`）
+- エラーは `errors.Is` で判別する（`ErrBoardNotFound` / `ErrNoPredictor` / `ErrInvalidBoard`）
+
+### 認識オプション（`option.go` / `result.go`）
+
+**「盤面がおかしいときどうするか」はアプリごとに違う**ので、関数オプションで渡す。
+既定は **「全部調べるが、エラーにはしない」**（中継が盤を映していない・認識器が外す、は
+異常ではないという ikkyoku の設計原則に合わせてある）。判定は `core/sfen` に委譲する。
+
+| オプション | 内容 |
+|---|---|
+| `WithPredictor(p)` | 駒種推論器を指定（既定はファイル探索） |
+| `WithRegion(br)` / `WithRect(x1,y1,x2,y2)` | 盤面領域を明示指定（検出を挟まない。座標が分かっているならこちらが確実） |
+| `WithChecks(sfen.Check)` | 実施するチェック（既定 `sfen.CheckAll`）。外したチェックの違反は結果にも載らない |
+| `WithErrorOn(sfen.Check)` | 違反をエラーとして返すチェック（既定は無し）。指定したチェックは自動的に実施される |
+| `WithStrict()` / `WithLenient()` | 全部エラーにする / 一切エラーにしない |
+| `WithHandTo(HandNone/HandBlack/HandWhite)` | 盤上に無い駒をどちらの持ち駒として扱うか（既定 `HandNone`） |
+| `WithTurn(black)` / `WithMoveNumber(n)` | `Result.SFEN()` が出力する手番・手数（既定 先手・1手目） |
+
+```go
+r, err := suteme.Recognize(img,
+    suteme.WithErrorOn(sfen.CheckPieceCount|sfen.CheckKing), // 駒数が合わなければエラー
+    suteme.WithHandTo(suteme.HandBlack))                     // 足りない駒は先手の駒台へ
+// err != nil でも r は返る。r.Warnings() に「歩が19枚あります(上限 18枚)」等
+fmt.Println(r.SFEN()) // "lnsg... b 2R2B4G4S4N4L18P 1"
+```
+
+- **エラーを返すときも `Result` は返す。** 「エラー扱いにしたうえで、どこがおかしいかも
+  画面に出す」ができるように。`errors.Is(err, ErrInvalidBoard)` で判別し、
+  `errors.As` で `*BoardError`（違反一覧）や個々の `sfen.Violation` を取り出す。
+- `Result.SFEN()` は完全な SFEN を返す。**手番も持ち駒の割り振りも盤面からは決まらない**ので、
+  オプションで与えた値をそのまま書くだけ（既定の `HandNone` なら持ち駒欄は `-`）。
+  `LoadSFEN` が盤面部分だけを返す方針は変えていない。
+- 駒台の画像認識は未実装。`WithHandTo` は「駒数の逆算で出た不足分を、便宜的に
+  どちらかに寄せる」ための逃げ道であって、正しい持ち駒が分かるわけではない。
 
 **認識精度は盤面検出と学習データに依存する。** `DetectBoard` の行間隔が不均一で
 グリッド線がマス内に入り込むため誤認識が出る。盤面座標が分かっているなら
