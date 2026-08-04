@@ -127,7 +127,14 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .hist-row:hover { background: #16213e; }
 .hist-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; border: 1px solid #2a3a5e; flex-shrink: 0; }
 .hist-check { width: 20px; text-align: center; color: #74c69d; font-weight: bold; font-size: 14px; flex-shrink: 0; }
-.hist-sel { flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; accent-color: #2d6a4f; }
+/* チェック欄。当たり判定が小さいと行選択(解析タブへの遷移)を誤爆するので、
+   行の高さいっぱい・左端までを当たり判定にする */
+.hist-sel-cell {
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  align-self: stretch; padding: 0 10px; margin: -8px 0 -8px -10px; cursor: pointer;
+}
+.hist-sel-cell:hover { background: rgba(76,201,240,0.12); }
+.hist-sel { width: 18px; height: 18px; cursor: pointer; accent-color: #2d6a4f; }
 .ok-mark { color: #ffd60a; font-weight: bold; margin-left: 2px; }
 .sug { color: #4cc9f0; opacity: 0.85; font-weight: normal; margin-left: 2px; }
 .hist-done { opacity: 0.55; }
@@ -763,7 +770,7 @@ async function refreshHistory() {
     const done = processedHistory.has(e.id);
     return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
       data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}">
-      <input type="checkbox" class="hist-sel" data-id="${e.id}" title="学習に使う">
+      <div class="hist-sel-cell" title="学習に使う"><input type="checkbox" class="hist-sel" data-id="${e.id}"></div>
       <span class="hist-check">${done ? '○' : ''}</span>
       <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
       <div style="flex:1;min-width:0">
@@ -843,8 +850,13 @@ async function trainFromHistory() {
 }
 
 document.getElementById('history-list').addEventListener('click', async e => {
-  // チェックボックスは「学習に使う」選択。行を開く操作とは別
-  if (e.target.classList.contains('hist-sel')) {
+  // チェックは「学習に使う」選択。行を開く操作とは別なので、
+  // チェックボックス本体だけでなく欄全体のクリックをここで止める
+  const selCell = e.target.closest('.hist-sel-cell');
+  if (selCell) {
+    const box = selCell.querySelector('.hist-sel');
+    // 欄の余白を押した場合はこちらでトグルする
+    if (box && e.target !== box) box.checked = !box.checked;
     document.getElementById('hist-select-all').checked =
       document.querySelectorAll('.hist-sel').length === historySelection().length;
     updateTrainHistoryButton();
