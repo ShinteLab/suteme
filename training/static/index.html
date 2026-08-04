@@ -189,6 +189,8 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 <div class="cells-section" id="cells-section" style="display:none">
   <h2>マス目 (9x9) — クリックでラベリング
     <button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>
+    <button class="action-btn" id="btn-fill-rest" onclick="confirmRemaining()"
+      title="未入力のマスを自動分類＋推論候補でまとめて確定します。間違っているマスだけ後から直してください">残りを確定</button>
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">ラベリング → 保存。学習は履歴タブから</span>
   </h2>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
@@ -593,6 +595,54 @@ function confirmCorrect() {
     if (cell) cell.classList.add('labeled');
   }
   closeDialog();
+}
+
+// 「残りを確定」: 未入力のマスを自動分類＋推論候補でまとめて確定する。
+//
+// 空マスの確定自体は保存される SFEN を変えない（buildSFEN は未入力でも
+// 自動分類が空なら空として扱う）。手数が減るのは駒のマスのほうで、
+// 推論候補をいったん全部受け入れて、間違っているマスだけ直す流れにする。
+function confirmRemaining() {
+  if (!currentSessionId || !boardLabels) return;
+  let empty = 0, piece = 0, unknown = 0;
+
+  for (let r = 0; r < 9; r++) {
+    for (let c = 0; c < 9; c++) {
+      if (boardLabels[r][c] !== null) continue; // 入力済みは触らない
+
+      const cat = cellCategories ? cellCategories[r][c] : 0;
+      const sug = cellSuggestions && cellSuggestions[r] && cellSuggestions[r][c];
+      // 推論候補があればそれを使う。候補の大文字/小文字は cellCategories と
+      // 同じ分類から決まっているので、向きを付け直す必要はない
+      const label = sug && sug.label ? sug.label : (cat === 0 ? 'none' : null);
+
+      if (label === 'none') {
+        applyLabel(r, c, 'none', '空<span class="ok-mark">○</span>', '#0f3460');
+        empty++;
+        continue;
+      }
+      const name = label ? pieceNameFromLabel(label) : null;
+      if (!name) {
+        // 駒には見えるが駒種が決まらない（モデル未学習など）。
+        // ここで確定すると誤ったラベルになるので触らない
+        unknown++;
+        continue;
+      }
+      const mark = (cat === 2 ? '<span class="gote-mark">☖</span>' : '☗') +
+        name + '<span class="ok-mark">○</span>';
+      applyLabel(r, c, label, mark, cat === 2 ? '#9d0208' : '#2d6a4f');
+      piece++;
+    }
+  }
+
+  let msg = '残りを確定: 空 ' + empty + 'マス / 駒 ' + piece + 'マス';
+  if (unknown > 0) {
+    msg += ' — <span class="confidence-bad">駒種が決まらないマスが ' + unknown +
+      ' 個あります。クリックして入力してください</span>';
+  } else if (piece > 0) {
+    msg += ' — 推論候補をそのまま採用しました。間違っているマスをクリックして直してください';
+  }
+  document.getElementById('stats').innerHTML = msg;
 }
 
 // 「修正OK」: 変更した内容で確定（○なし）
