@@ -24,8 +24,8 @@ const (
 	testPieceV = 30  // 駒（暗いブロブ）の明るさ
 )
 
-// testPiece は合成画像に置く駒。gote=true なら駒をマスの上端側に置く
-// （ClassifyCell は「盤面と異なるピクセルが多い側 = 駒の底辺」で向きを決める）
+// testPiece は合成画像に置く駒。gote=true なら駒を180度回転して置く
+// （ClassifyCell は駒の幅プロファイルの重心が底辺側に寄ることで向きを決める）
 type testPiece struct {
 	row, col int
 	gote     bool
@@ -42,17 +42,24 @@ func makeBoardImage(pieces []testPiece) *image.Gray {
 			img.SetGray(x, y, color.Gray{Y: testBoardV})
 		}
 	}
-	// マス面積の約8%を占めるブロブ。これより大きいと平均が引っ張られ、
-	// 盤面色まで「異なるピクセル」に数えられて向き判定が壊れる
-	const blobW, blobH = 16, 8
+	// 駒を模した台形。尖り側(apex)が狭く底辺側(base)が広い五角形の代用で、
+	// この上下の幅の差が向き判定の手がかりになる
+	const (
+		pieceH    = 26
+		apexW     = 8
+		baseW     = 26
+		pieceTopY = (testCell - pieceH) / 2
+	)
 	for _, p := range pieces {
-		x0 := p.col*testCell + (testCell-blobW)/2
-		y0 := p.row*testCell + testCell - blobH // 先手: 下端
-		if p.gote {
-			y0 = p.row * testCell // 後手: 上端
-		}
-		for y := y0; y < y0+blobH; y++ {
-			for x := x0; x < x0+blobW; x++ {
+		for i := 0; i < pieceH; i++ {
+			w := apexW + (baseW-apexW)*i/(pieceH-1)
+			y := p.row*testCell + pieceTopY + i
+			if p.gote {
+				// 後手: 底辺が上
+				y = p.row*testCell + pieceTopY + (pieceH - 1 - i)
+			}
+			x0 := p.col*testCell + (testCell-w)/2
+			for x := x0; x < x0+w; x++ {
 				img.SetGray(x, y, color.Gray{Y: testPieceV})
 			}
 		}

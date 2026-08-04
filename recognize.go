@@ -159,11 +159,12 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 }
 
 // RecognizeBoard は盤面全体を認識してSFENを返す
-// 空/向きは ClassifyCell で判定し、駒種のみ Predictor（NN または k-NN）で推論する
+// 空/向きは ClassifyCellWith で判定し、駒種のみ Predictor（NN または k-NN）で推論する
 func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 	// 各マスの SFEN 表記("" は空マス)を組み立て、盤面文字列化(空マスの
 	// ランレングス圧縮・段区切り)は core/sfen に委譲する。
 	var grid [9][9]string
+	bc := BoardColor(img, br)
 	for r := 0; r < 9; r++ {
 		for c := 0; c < 9; c++ {
 			cell := br.ExtractCell(img, r, c)
@@ -171,7 +172,7 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 				continue
 			}
 
-			cat := ClassifyCell(cell)
+			cat := ClassifyCellWith(cell, bc)
 			if cat == CellEmpty {
 				continue
 			}

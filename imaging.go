@@ -14,6 +14,12 @@ func ConvertGray(src image.Image) *image.Gray {
 	return gray
 }
 
+// grayValue は色を ITU-R BT.601 の輝度に変換する
+func grayValue(c color.Color) uint8 {
+	r, g, b, _ := c.RGBA()
+	return uint8((19595*r + 38470*g + 7471*b + 1<<15) >> 24)
+}
+
 func Threshold(src *image.Gray, thresh uint8) *image.Gray {
 	bounds := src.Bounds()
 	dst := image.NewGray(bounds)

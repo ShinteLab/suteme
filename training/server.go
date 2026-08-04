@@ -154,13 +154,14 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 		return nil
 	}
 	var grid [9][9]map[string]interface{}
+	bc := suteme.BoardColor(s.Original, s.Result.Board)
 	for row := 0; row < 9; row++ {
 		for col := 0; col < 9; col++ {
 			cell := s.Result.Board.ExtractCell(s.Original, row, col)
 			if cell == nil {
 				continue
 			}
-			cat := suteme.ClassifyCell(cell)
+			cat := suteme.ClassifyCellWith(cell, bc)
 			if cat == suteme.CellEmpty {
 				grid[row][col] = map[string]interface{}{"label": "none", "confidence": 95}
 				continue
@@ -694,6 +695,7 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 各マスを認識
+	bc := suteme.BoardColor(s.Original, s.Result.Board)
 	cells := make([][]map[string]interface{}, 9)
 	for row := 0; row < 9; row++ {
 		cells[row] = make([]map[string]interface{}, 9)
@@ -702,8 +704,8 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 			if cell == nil {
 				continue
 			}
-			// 空/向きは ClassifyCell で判定
-			cat := suteme.ClassifyCell(cell)
+			// 空/向きは盤の地色を基準に判定
+			cat := suteme.ClassifyCellWith(cell, bc)
 			if cat == suteme.CellEmpty {
 				cells[row][col] = map[string]interface{}{
 					"label": "none", "confidence": 95,

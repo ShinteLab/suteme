@@ -54,9 +54,7 @@ func medianBrightness(img image.Image) uint8 {
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			r, g, b, _ := img.At(x, y).RGBA()
-			gray := (19595*r + 38470*g + 7471*b + 1<<15) >> 24
-			pixels = append(pixels, int(gray))
+			pixels = append(pixels, int(grayValue(img.At(x, y))))
 		}
 	}
 
