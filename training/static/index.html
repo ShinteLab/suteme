@@ -213,28 +213,35 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <div class="card"><h3>盤面検出</h3><img id="img-board" style="width:100%;display:block"></div>
 </div>
 <div class="cells-section" id="cells-section" style="display:none">
-  <h2>マス目 (9x9) — クリックでラベリング
-    <button class="action-btn" id="btn-fill-rest" onclick="confirmRemaining()"
-      title="未入力のマスを自動分類＋推論候補でまとめて確定します。間違っているマスだけ後から直してください">残りを確定</button>
-    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">ラベリング → 保存。学習は履歴タブから</span>
+  <!-- 上から「SFENで入力するなら入力」→「盤面で修正」→「保存」の順に並べる -->
+  <h2>1. SFENで入力する場合
+    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">貼り付けて「SFENから入力」。手で直すだけならここは不要です</span>
   </h2>
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
     <input type="text" id="sfen-input"
-      placeholder="SFENを貼り付け → 一括入力 (例: lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1)"
+      placeholder="SFENを貼り付け (例: lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1)"
       style="flex:1;background:#0f3460;border:1px solid #333;color:#eee;padding:6px 10px;border-radius:4px;font-family:monospace;font-size:12px">
     <button onclick="applyFromSFEN()" title="SFEN欄の文字列を81マスのラベルに展開します（押すまで反映されません）"
       style="background:#4cc9f0;color:#000;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">SFENから入力</button>
-    <button id="btn-save-session" onclick="saveSession()" disabled
-      title="画面のラベル入力から SFEN を作って保存します（SFEN欄の文字列は参照しません）"
-      style="background:#2d6a4f;color:#eee;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap;opacity:0.4">保存</button>
   </div>
+
+  <h2>2. 盤面で修正
+    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">水色の「歩?」は推論候補（未確定）。違うマスをクリックして直してください</span>
+  </h2>
   <div class="stats" id="analyze-status" style="text-align:left;margin-bottom:8px"></div>
-  <div id="sfen-output" style="display:none;background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:4px;font-family:monospace;font-size:14px;word-break:break-all"></div>
-  <!-- SFEN の盤プレビュー(共有 Web Component)。認識結果/一括入力時に表示する -->
+  <div class="cell-grid" id="cell-grid"></div>
+
+  <h2 style="margin-top:20px">3. 保存
+    <button id="btn-save-session" class="action-btn" onclick="saveSession()" disabled
+      title="画面の入力から SFEN を作って保存します。未入力のマスは推論候補で埋めます"
+      style="background:#2d6a4f;color:#eee">保存</button>
+    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">未入力のマスは推論候補で埋めます。学習は履歴タブから</span>
+  </h2>
+  <div id="sfen-output" style="display:none;background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:14px;word-break:break-all"></div>
+  <!-- 保存/SFEN一括入力した内容の確認用プレビュー -->
   <div id="board-preview-wrap" style="display:none;margin-bottom:8px;max-width:340px">
     <shogi-board id="board-preview"></shogi-board>
   </div>
-  <div class="cell-grid" id="cell-grid"></div>
 </div>
 </div><!-- /tab-analyze -->
 
@@ -502,6 +509,7 @@ function renderCells(id, categories) {
   updateBoardPreview(null); // 再分析時は盤プレビューを隠す
   document.getElementById('analyze-empty').style.display = 'none';
   document.getElementById('cells-section').style.display = 'block';
+  enableSaveButton(); // 未入力のマスは保存時に推論候補で埋めるので、常に押せる
 }
 
 // SFEN駒文字（大文字/小文字/+付き）から駒名を返す。不明なら null
@@ -628,13 +636,13 @@ function confirmCorrect() {
   closeDialog();
 }
 
-// 「残りを確定」: 未入力のマスを自動分類＋推論候補でまとめて確定する。
+// 未入力のマスを自動分類＋推論候補で埋める。保存の一部として呼ぶ。
 //
-// 空マスの確定自体は保存される SFEN を変えない（buildSFEN は未入力でも
-// 自動分類が空なら空として扱う）。手数が減るのは駒のマスのほうで、
-// 推論候補をいったん全部受け入れて、間違っているマスだけ直す流れにする。
-function confirmRemaining() {
-  if (!currentSessionId || !boardLabels) return;
+// 以前は「残りを確定」という独立したボタンだったが、押さないと保存が
+// 「駒種が未入力のマスがあります」で止まるだけで、実質は保存の前提条件
+// でしかなかったので統合した。埋めた件数を返す。
+function fillUnlabeledCells() {
+  if (!currentSessionId || !boardLabels) return { empty: 0, piece: 0, unknown: 0 };
   let empty = 0, piece = 0, unknown = 0;
 
   for (let r = 0; r < 9; r++) {
@@ -666,14 +674,7 @@ function confirmRemaining() {
     }
   }
 
-  let msg = '残りを確定: 空 ' + empty + 'マス / 駒 ' + piece + 'マス';
-  if (unknown > 0) {
-    msg += ' — <span class="confidence-bad">駒種が決まらないマスが ' + unknown +
-      ' 個あります。クリックして入力してください</span>';
-  } else if (piece > 0) {
-    msg += ' — 推論候補をそのまま採用しました。間違っているマスをクリックして直してください';
-  }
-  document.getElementById('analyze-status').innerHTML = msg;
+  return { empty, piece, unknown };
 }
 
 // 「修正OK」: 変更した内容で確定（○なし）
@@ -934,11 +935,14 @@ document.getElementById('history-list').addEventListener('click', async e => {
 // 履歴から復元した SFEN が残っている場合に、画面と保存内容が食い違う。
 async function saveSession() {
   if (!currentSessionId) return;
+  // 触っていないマスは推論候補で埋める（何マス埋めたかは保存後に出す）
+  const filled = fillUnlabeledCells();
   const built = buildSFEN();
   if (!built) { alert('盤面がありません'); return; }
   if (built.error) {
     const list = built.error.slice(0, 10).join(', ') + (built.error.length > 10 ? ' …' : '');
-    alert('駒種が未入力のマスが ' + built.error.length + ' 個あります:\n' + list);
+    alert('駒種が決まらないマスが ' + built.error.length + ' 個あります。\n' +
+      'クリックして入力してから保存してください:\n' + list);
     return;
   }
   const sfen = built.sfen;
@@ -957,8 +961,12 @@ async function saveSession() {
     btn.style.opacity = '0.4';
     // 何を保存したのかを盤と文字列で確認できるようにする
     const sfenEl = document.getElementById('sfen-output');
-    sfenEl.innerHTML = '保存した盤面: ' + sfen +
-      '<br><span style="font-size:12px;color:#74c69d">履歴タブで選択すると、この局面を学習に使えます</span>';
+    let note = '<span style="font-size:12px;color:#74c69d">履歴タブで選択すると、この局面を学習に使えます</span>';
+    if (filled.piece > 0) {
+      note = '<span style="font-size:12px;color:#f0a030">未入力だった駒 ' + filled.piece +
+        'マスは推論候補で埋めました</span><br>' + note;
+    }
+    sfenEl.innerHTML = '保存した盤面: ' + sfen + '<br>' + note;
     sfenEl.style.display = 'block';
     updateBoardPreview(sfen);
     refreshHistory();
