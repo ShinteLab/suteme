@@ -123,6 +123,9 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 }
 .tab-btn.active { color: #4cc9f0; border-bottom-color: #4cc9f0; }
 .tab-btn:hover:not(.active) { color: #bbb; }
+.recog-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+@media (max-width: 700px) { .recog-cols { grid-template-columns: 1fr; } }
+.recog-label { font-size: 12px; color: #888; margin-bottom: 4px; }
 .hist-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid #1a2a4e; cursor: pointer; }
 .hist-row:hover { background: #16213e; }
 .hist-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; border: 1px solid #2a3a5e; flex-shrink: 0; }
@@ -185,11 +188,21 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     <button class="action-btn" id="btn-goto-analyze" onclick="switchTab('analyze')">解析へ ›</button>
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">盤面がずれている場合は解析タブで指定し直せます</span>
   </h2>
-  <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:14px;word-break:break-all"></div>
-  <div id="recog-board-wrap" style="display:none;margin-bottom:8px;max-width:340px">
-    <shogi-board id="recog-board"></shogi-board>
+  <!-- 左に入力画像、右に認識結果。見比べられるよう横半分ずつにする -->
+  <div class="recog-cols">
+    <div>
+      <div class="recog-label">入力画像</div>
+      <img id="input-image" style="width:100%;display:block;border-radius:4px">
+    </div>
+    <div>
+      <div class="recog-label">読み取った盤面</div>
+      <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:13px;word-break:break-all"></div>
+      <div id="recog-board-wrap" style="display:none;margin-bottom:8px">
+        <shogi-board id="recog-board"></shogi-board>
+      </div>
+      <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
+    </div>
   </div>
-  <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
 </div>
 </div><!-- /tab-input -->
 
@@ -452,6 +465,7 @@ async function analyze(file) {
 
     const t = Date.now();
     document.getElementById('img-original').src = '/api/images/' + data.id + '/original?' + t;
+    document.getElementById('input-image').src = '/api/images/' + data.id + '/original?' + t;
     document.getElementById('img-edges').src = '/api/images/' + data.id + '/edges?' + t;
     document.getElementById('img-board').src = '/api/images/' + data.id + '/board?' + t;
     document.getElementById('pipeline').style.display = 'grid';
