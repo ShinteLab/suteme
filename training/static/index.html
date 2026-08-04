@@ -146,7 +146,8 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 <h1>suteme-test</h1>
 
 <div class="tab-bar">
-  <button class="tab-btn active" id="tab-btn-analyze" onclick="switchTab('analyze')">解析</button>
+  <button class="tab-btn active" id="tab-btn-input" onclick="switchTab('input')">入力</button>
+  <button class="tab-btn" id="tab-btn-analyze" onclick="switchTab('analyze')">解析</button>
   <button class="tab-btn" id="tab-btn-history" onclick="switchTab('history')">履歴</button>
 </div>
 
@@ -163,13 +164,13 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     </div>
   </div>
   <div style="font-size:12px;color:#888;margin-bottom:6px">
-    学習するだけならチェックを付けて「選択した局面で学習」。行をクリックすると解析画面で再入力できます。
+    学習するだけならチェックを付けて「選択した局面で学習」。行をクリックすると解析タブで再入力できます。
   </div>
   <div id="history-list" style="max-height:480px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
   <div id="hist-train-result" style="display:none;margin-top:8px;padding:8px 12px;background:#0f3460;border-radius:4px;font-size:12px;line-height:1.7"></div>
 </div>
 
-<div id="tab-analyze">
+<div id="tab-input">
 <div class="upload-area" id="upload">
   <p>将棋盤の画像をドラッグ＆ドロップ、クリックしてアップロード<br>または <strong>Ctrl+V</strong> で貼り付け</p>
   <input type="file" id="file" accept="image/*">
@@ -193,9 +194,26 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <div class="card"><h3>盤面検出</h3><img id="img-board" style="width:100%;display:block"></div>
 </div>
 
+<!-- 画像を登録すると自動で認識まで走らせ、読み取れた盤面をここに出す -->
+<div id="recog-section" class="cells-section" style="display:none">
+  <h2>自動認識の結果
+    <button class="action-btn" id="btn-goto-analyze" onclick="switchTab('analyze')">解析へ ›</button>
+    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">盤面がずれていれば「盤面を手動指定」でドラッグし直してください</span>
+  </h2>
+  <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:14px;word-break:break-all"></div>
+  <div id="recog-board-wrap" style="display:none;margin-bottom:8px;max-width:340px">
+    <shogi-board id="recog-board"></shogi-board>
+  </div>
+  <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
+</div>
+</div><!-- /tab-input -->
+
+<div id="tab-analyze" style="display:none">
+<div id="analyze-empty" style="color:#888;font-size:13px;padding:32px 0;text-align:center">
+  入力タブで画像を登録してください
+</div>
 <div class="cells-section" id="cells-section" style="display:none">
   <h2>マス目 (9x9) — クリックでラベリング
-    <button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>
     <button class="action-btn" id="btn-fill-rest" onclick="confirmRemaining()"
       title="未入力のマスを自動分類＋推論候補でまとめて確定します。間違っているマスだけ後から直してください">残りを確定</button>
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">ラベリング → 保存。学習は履歴タブから</span>
@@ -215,7 +233,6 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <div id="board-preview-wrap" style="display:none;margin-bottom:8px;max-width:340px">
     <shogi-board id="board-preview"></shogi-board>
   </div>
-  <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
   <div class="cell-grid" id="cell-grid"></div>
 </div>
 </div><!-- /tab-analyze -->
@@ -299,7 +316,6 @@ let selectedCat = -1;
 let selectedPiece = null;
 let originalCat = -1;
 let modified = false;
-let recognized = false; // 認識結果表示中はラベリング不可
 
 // Upload
 const uploadEl = document.getElementById('upload');
@@ -384,6 +400,7 @@ function getImgCoord(img, clientX, clientY) {
       cellSuggestions = data.suggestions || null;
       renderCells(currentSessionId, data.categories);
       document.getElementById('stats').textContent = '盤面を手動指定しました';
+      await runRecognition();
     }
   });
 })();
@@ -402,7 +419,7 @@ document.addEventListener('paste', e => {
 });
 
 async function analyze(file) {
-  recognized = false;
+  switchTab('input'); // 結果は入力タブに出るので、どこから貼っても移動する
   // 前の画像の入力を持ち越さない。SFEN 欄が残っていると次の画像の
   // ラベリング中も古い局面が画面に居座って紛らわしい
   document.getElementById('sfen-input').value = '';
@@ -410,6 +427,10 @@ async function analyze(file) {
   document.getElementById('loading').classList.add('active');
   document.getElementById('pipeline').style.display = 'none';
   document.getElementById('cells-section').style.display = 'none';
+  document.getElementById('analyze-empty').style.display = '';
+  document.getElementById('recog-section').style.display = 'none';
+  document.getElementById('sfen-output').style.display = 'none';
+  updateBoardPreview(null);
   document.getElementById('stats').textContent = '';
 
   const form = new FormData();
@@ -435,6 +456,7 @@ async function analyze(file) {
         '盤面検出: ' + b.w + 'x' + b.h + 'px | 信頼度: <span class="' + confClass + '">' + conf + '%</span>';
       cellSuggestions = data.suggestions || null;
       renderCells(data.id, data.categories);
+      await runRecognition();
     } else {
       document.getElementById('stats').innerHTML =
         '<span class="confidence-bad">盤面が検出できませんでした (信頼度: ' + conf + '%)</span>';
@@ -476,6 +498,7 @@ function renderCells(id, categories) {
   }
   document.getElementById('sfen-output').style.display = 'none';
   updateBoardPreview(null); // 再分析時は盤プレビューを隠す
+  document.getElementById('analyze-empty').style.display = 'none';
   document.getElementById('cells-section').style.display = 'block';
 }
 
@@ -499,7 +522,6 @@ function catLabel(cat) {
 
 // Dialog
 function openDialog(r, c) {
-  if (recognized) return; // 認識結果表示中は編集不可
   currentCell = { r, c };
   const cat = cellCategories ? cellCategories[r][c] : 0;
   selectedCat = cat;
@@ -747,11 +769,14 @@ function buildSFEN() {
 }
 
 // タブ切り替え
+//   入力 = 画像を登録して自動認識の結果を見る
+//   解析 = マス目をラベリングして保存する
+//   履歴 = 保存済み局面を選んで学習する
 function switchTab(name) {
-  document.getElementById('tab-analyze').style.display = name === 'analyze' ? '' : 'none';
-  document.getElementById('tab-history').style.display = name === 'history' ? '' : 'none';
-  document.getElementById('tab-btn-analyze').className = 'tab-btn' + (name === 'analyze' ? ' active' : '');
-  document.getElementById('tab-btn-history').className = 'tab-btn' + (name === 'history' ? ' active' : '');
+  for (const t of ['input', 'analyze', 'history']) {
+    document.getElementById('tab-' + t).style.display = name === t ? '' : 'none';
+    document.getElementById('tab-btn-' + t).className = 'tab-btn' + (name === t ? ' active' : '');
+  }
   if (name === 'history') refreshHistory();
 }
 
@@ -868,8 +893,6 @@ document.getElementById('history-list').addEventListener('click', async e => {
   const sfen = btn.dataset.sfen;
   const bounds = btn.dataset.bounds ? JSON.parse(btn.dataset.bounds) : null;
 
-  switchTab('analyze');
-
   const res = await fetch('/api/history/' + id + '/image');
   if (!res.ok) { alert('画像の読み込みに失敗しました'); return; }
   processedHistory.add(id); // 処理済みマーク（セッション内のみ）
@@ -899,6 +922,8 @@ document.getElementById('history-list').addEventListener('click', async e => {
     document.getElementById('sfen-input').value = sfen;
     await applyFromSFEN();
   }
+  // 再入力が目的なので、復元し終えてから解析タブに移る
+  switchTab('analyze');
 });
 
 // 「保存」は画面のラベル入力（boardLabels）だけを保存する。
@@ -1018,103 +1043,89 @@ async function applyFromSFEN() {
   saveBtn.textContent = '保存';
 }
 
-async function recognizeBoard() {
+// 画像を登録したら自動で走る認識。入力タブに読み取れた盤面を出すだけで、
+// マス目のラベルには触らない（確定は解析タブの操作で行う）
+async function runRecognition() {
   if (!currentSessionId) return;
+  const sec = document.getElementById('recog-section');
+  const out = document.getElementById('recog-sfen');
+  sec.style.display = 'block';
+  out.innerHTML = '<span style="color:#888">認識中…</span>';
+  document.getElementById('recog-board-wrap').style.display = 'none';
+  document.getElementById('piece-counts').style.display = 'none';
+
+  let data;
   try {
     const res = await fetch('/api/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session: currentSessionId }),
     });
-    const data = await res.json();
-    if (data.sfen) {
-      recognized = true;
-      document.getElementById('cells-section').querySelector('h2').innerHTML =
-        'マス目 (9x9) — <span style="color:#f0a030;font-size:13px">認識結果（読み取り専用）</span>' +
-        '<button class="action-btn" id="btn-recognize" onclick="recognizeBoard()">認識</button>';
-      const sfenEl = document.getElementById('sfen-output');
-      const engine = data.engine === 'knn' ? 'k-NN' : 'NN';
-      let html = 'SFEN (' + engine + '): ' + data.sfen;
-      if (data.sfen_nn && data.sfen_nn !== data.sfen) {
-        html += '<br><span style="color:#888;font-size:12px">NN比較: ' + data.sfen_nn + '</span>';
-      } else if (data.sfen_nn) {
-        html += '<br><span style="color:#74c69d;font-size:12px">NN も同一結果</span>';
-      }
-      sfenEl.innerHTML = html;
-      sfenEl.style.display = 'block';
-      updateBoardPreview(data.sfen); // 認識結果を盤で表示
+    data = await res.json();
+  } catch (e) {
+    out.innerHTML = '<span class="confidence-bad">認識に失敗しました: ' + e.message + '</span>';
+    return;
+  }
 
-      if (data.cells) {
-        for (let r = 0; r < 9; r++) {
-          for (let c = 0; c < 9; c++) {
-            const cell = data.cells[r][c];
-            if (!cell) continue;
+  if (!data || !data.sfen) {
+    // 学習データが無いと駒種を出せない。空/先手/後手の分類は出ているので
+    // 解析タブでのラベリング自体は続けられる
+    out.innerHTML = '<span style="color:#f0a030">学習データが無いため駒種は推論できません。' +
+      '解析タブで駒種を入力してください</span>';
+    return;
+  }
 
-            // UI更新
-            const label = document.getElementById('label-' + r + '-' + c);
-            if (label) {
-              const piece = PIECES.find(p => p.id === cell.label);
-              const dispLabel = piece ? piece.label : '空';
-              const conf = cell.confidence;
-              const bg = conf > 60 ? '#1a4a35' : '#5a1010';
-              label.innerHTML = dispLabel + '<span style="font-size:9px;color:#aaa">(' + conf + '%)</span>';
-              label.style.background = bg;
-            }
+  const engine = data.engine === 'knn' ? 'k-NN' : 'NN';
+  let html = 'SFEN (' + engine + '): ' + data.sfen;
+  if (data.sfen_nn && data.sfen_nn !== data.sfen) {
+    html += '<br><span style="color:#888;font-size:12px">NN比較: ' + data.sfen_nn + '</span>';
+  } else if (data.sfen_nn) {
+    html += '<br><span style="color:#74c69d;font-size:12px">NN も同一結果</span>';
+  }
+  out.innerHTML = html;
 
-            // categories を認識結果で更新（ダイアログの初期値に反映）
-            if (cellCategories) {
-              if (!cell.label || cell.label === 'none') {
-                cellCategories[r][c] = 0;
-              } else if (cell.label === cell.label.toUpperCase() || cell.label.startsWith('+') && cell.label[1] === cell.label[1].toUpperCase()) {
-                cellCategories[r][c] = 1;
-              } else {
-                cellCategories[r][c] = 2;
-              }
-            }
-          }
-        }
-      }
-      // 駒数テーブル表示
-      if (data.validation) {
-        const v = data.validation;
-        const order = ['P','L','N','S','G','B','R','K'];
-        const names = {P:'歩',L:'香',N:'桂',S:'銀',G:'金',B:'角',R:'飛',K:'玉'};
-        const limits = {P:18,L:4,N:4,S:4,G:4,B:2,R:2,K:2};
-        const s = v.sente || {}, g = v.gote || {}, h = v.hand_total || {};
+  const wrap = document.getElementById('recog-board-wrap');
+  document.getElementById('recog-board').setAttribute('sfen', String(data.sfen).trim().split(' ')[0]);
+  wrap.style.display = 'block';
 
-        let tbl = '<table class="piece-table"><tr><th></th>';
-        order.forEach(p => { tbl += `<th>${names[p]}</th>`; });
-        tbl += '</tr>';
-
-        tbl += '<tr class="row-sente"><td class="row-label">先手</td>';
-        order.forEach(p => {
-          const n = s[p] || 0;
-          const warn = (n + (g[p]||0)) > limits[p] ? ' class="count-warn"' : '';
-          tbl += `<td${warn}>${n}</td>`;
-        });
-        tbl += '</tr>';
-
-        tbl += '<tr class="row-gote"><td class="row-label">後手</td>';
-        order.forEach(p => { tbl += `<td>${g[p]||0}</td>`; });
-        tbl += '</tr>';
-
-        tbl += '<tr class="row-hand"><td class="row-label">駒台計</td>';
-        order.forEach(p => { tbl += `<td>${h[p] ? h[p] : '-'}</td>`; });
-        tbl += '</tr></table>';
-
-        if (v.warnings && v.warnings.length > 0) {
-          tbl += `<div style="color:#d00000;font-size:12px;margin-top:4px">⚠ ${v.warnings.join(' / ')}</div>`;
-        }
-
-        const el = document.getElementById('piece-counts');
-        el.innerHTML = tbl;
-        el.style.display = 'block';
-      }
-    } else {
-      alert('認識失敗: モデルが学習されていません');
-    }
-  } catch (e) { alert('エラー: ' + e.message); }
+  if (data.validation) renderPieceCounts(data.validation);
 }
+
+// 駒数テーブル（盤面 + 駒台 = 全駒 の検証結果）
+function renderPieceCounts(v) {
+  const order = ['P','L','N','S','G','B','R','K'];
+  const names = {P:'歩',L:'香',N:'桂',S:'銀',G:'金',B:'角',R:'飛',K:'玉'};
+  const limits = {P:18,L:4,N:4,S:4,G:4,B:2,R:2,K:2};
+  const s = v.sente || {}, g = v.gote || {}, h = v.hand_total || {};
+
+  let tbl = '<table class="piece-table"><tr><th></th>';
+  order.forEach(p => { tbl += `<th>${names[p]}</th>`; });
+  tbl += '</tr>';
+
+  tbl += '<tr class="row-sente"><td class="row-label">先手</td>';
+  order.forEach(p => {
+    const n = s[p] || 0;
+    const warn = (n + (g[p]||0)) > limits[p] ? ' class="count-warn"' : '';
+    tbl += `<td${warn}>${n}</td>`;
+  });
+  tbl += '</tr>';
+
+  tbl += '<tr class="row-gote"><td class="row-label">後手</td>';
+  order.forEach(p => { tbl += `<td>${g[p]||0}</td>`; });
+  tbl += '</tr>';
+
+  tbl += '<tr class="row-hand"><td class="row-label">駒台計</td>';
+  order.forEach(p => { tbl += `<td>${h[p] ? h[p] : '-'}</td>`; });
+  tbl += '</tr></table>';
+
+  if (v.warnings && v.warnings.length > 0) {
+    tbl += `<div style="color:#d00000;font-size:12px;margin-top:4px">⚠ ${v.warnings.join(' / ')}</div>`;
+  }
+  const el = document.getElementById('piece-counts');
+  el.innerHTML = tbl;
+  el.style.display = 'block';
+}
+
 </script>
 </body>
 </html>
