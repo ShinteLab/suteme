@@ -123,8 +123,12 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 }
 .tab-btn.active { color: #4cc9f0; border-bottom-color: #4cc9f0; }
 .tab-btn:hover:not(.active) { color: #bbb; }
-.recog-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+/* 入力画像と読み取った盤面。縦の長さが違う（横長の画像だと短い）ので、
+   ラベルは上で揃えたまま、画像は列の中で縦中央に置く */
+.recog-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 700px) { .recog-cols { grid-template-columns: 1fr; } }
+.recog-col { display: flex; flex-direction: column; }
+.recog-col-body { flex: 1; display: flex; align-items: center; min-width: 0; }
 .recog-label { font-size: 12px; color: #888; margin-bottom: 4px; }
 .hist-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid #1a2a4e; cursor: pointer; }
 .hist-row:hover { background: #16213e; }
@@ -191,13 +195,13 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:12px;font-family:monospace;font-size:14px;word-break:break-all"></div>
   <!-- 入力画像と読み取った盤面だけを横半分ずつ並べて見比べる -->
   <div class="recog-cols">
-    <div>
+    <div class="recog-col">
       <div class="recog-label">入力画像</div>
-      <img id="input-image" style="width:100%;display:block;border-radius:4px">
+      <div class="recog-col-body"><img id="input-image" style="width:100%;display:block;border-radius:4px"></div>
     </div>
-    <div id="recog-board-wrap" style="display:none">
+    <div class="recog-col" id="recog-board-wrap" style="display:none">
       <div class="recog-label">読み取った盤面</div>
-      <shogi-board id="recog-board"></shogi-board>
+      <div class="recog-col-body"><shogi-board id="recog-board" style="width:100%"></shogi-board></div>
     </div>
   </div>
   <div id="piece-counts" style="display:none;margin-top:12px"></div>
@@ -1106,9 +1110,8 @@ async function runRecognition() {
   }
   out.innerHTML = html;
 
-  const wrap = document.getElementById('recog-board-wrap');
   document.getElementById('recog-board').setAttribute('sfen', String(data.sfen).trim().split(' ')[0]);
-  wrap.style.display = 'block';
+  document.getElementById('recog-board-wrap').style.display = ''; // CSS の flex に戻す
 
   if (data.validation) renderPieceCounts(data.validation);
 }
