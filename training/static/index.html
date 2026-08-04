@@ -127,6 +127,7 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .hist-row:hover { background: #16213e; }
 .hist-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; border: 1px solid #2a3a5e; flex-shrink: 0; }
 .hist-check { width: 20px; text-align: center; color: #74c69d; font-weight: bold; font-size: 14px; flex-shrink: 0; }
+.hist-sel { flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; accent-color: #2d6a4f; }
 .ok-mark { color: #ffd60a; font-weight: bold; margin-left: 2px; }
 .sug { color: #4cc9f0; opacity: 0.85; font-weight: normal; margin-left: 2px; }
 .hist-done { opacity: 0.55; }
@@ -143,11 +144,22 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 </div>
 
 <div id="tab-history" style="display:none;max-width:600px;margin:0 auto 20px">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-    <span style="font-size:13px;color:#888">保存した局面をクリックすると解析画面で再入力できます</span>
-    <button onclick="refreshHistory()" style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer">更新</button>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+    <label style="font-size:12px;color:#bbb;display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap">
+      <input type="checkbox" id="hist-select-all" onchange="toggleAllHistory(this.checked)"> 全選択
+    </label>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button id="btn-train-history" onclick="trainFromHistory()" disabled
+        title="選択した局面の画像と保存済みSFENから直接学習します（解析画面に読み込む必要はありません）"
+        style="font-size:12px;background:#2d6a4f;color:#eee;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap;opacity:0.4">選択した局面で学習</button>
+      <button onclick="refreshHistory()" style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer">更新</button>
+    </div>
+  </div>
+  <div style="font-size:12px;color:#888;margin-bottom:6px">
+    学習するだけならチェックを付けて「選択した局面で学習」。行をクリックすると解析画面で再入力できます。
   </div>
   <div id="history-list" style="max-height:480px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
+  <div id="hist-train-result" style="display:none;margin-top:8px;padding:8px 12px;background:#0f3460;border-radius:4px;font-size:12px;line-height:1.7"></div>
 </div>
 
 <div id="tab-analyze">
@@ -706,6 +718,7 @@ async function refreshHistory() {
     const done = processedHistory.has(e.id);
     return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
       data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}">
+      <input type="checkbox" class="hist-sel" data-id="${e.id}" title="学習に使う">
       <span class="hist-check">${done ? '○' : ''}</span>
       <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
       <div style="flex:1;min-width:0">
@@ -716,9 +729,82 @@ async function refreshHistory() {
       <span style="font-size:11px;color:#4cc9f0;white-space:nowrap">再入力 ›</span>
     </div>`;
   }).join('');
+  document.getElementById('hist-select-all').checked = false;
+  updateTrainHistoryButton();
+}
+
+// 履歴の選択（学習の対象）
+function historySelection() {
+  return [...document.querySelectorAll('.hist-sel:checked')].map(c => c.dataset.id);
+}
+
+function updateTrainHistoryButton() {
+  const n = historySelection().length;
+  const btn = document.getElementById('btn-train-history');
+  btn.disabled = n === 0;
+  btn.style.opacity = n === 0 ? '0.4' : '1';
+  btn.textContent = n === 0 ? '選択した局面で学習' : '選択した ' + n + ' 件で学習';
+}
+
+function toggleAllHistory(on) {
+  document.querySelectorAll('.hist-sel').forEach(c => { c.checked = on; });
+  updateTrainHistoryButton();
+}
+
+// 選択した局面から直接学習する。画像・盤面座標・正解SFENは履歴に揃っているので
+// 解析画面に読み込む操作は要らない
+async function trainFromHistory() {
+  const ids = historySelection();
+  if (ids.length === 0) return;
+  const btn = document.getElementById('btn-train-history');
+  const box = document.getElementById('hist-train-result');
+  btn.disabled = true;
+  btn.textContent = ids.length + ' 件を学習中...';
+  box.style.display = 'block';
+  box.innerHTML = '<span style="color:#888">学習中です。局面数によっては数十秒かかります…</span>';
+
+  try {
+    const res = await fetch('/api/trainhistory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
+      box.innerHTML = '<span style="color:#ff8080">学習に失敗しました: ' + (await res.text()) + '</span>';
+      return;
+    }
+    const data = await res.json();
+    const entries = data.entries || [];
+    const okList = entries.filter(e => !e.error);
+    const ngList = entries.filter(e => e.error);
+    okList.forEach(e => processedHistory.add(e.id)); // 学習済みの印（○）
+
+    const pieces = okList.reduce((a, e) => a + e.pieces, 0);
+    let html = '<b style="color:#74c69d">学習完了</b> — ' +
+      okList.length + ' 局面 / 駒 ' + pieces + '枚 → ' +
+      '学習データ ' + data.samples + '件（バランス後 ' + data.balanced + '件' +
+      (data.duplicates ? ' / 重複除去 ' + data.duplicates + '件' : '') + '）';
+    if (ngList.length > 0) {
+      html += '<br><span style="color:#ff8080">失敗 ' + ngList.length + '件: ' +
+        ngList.map(e => e.id.slice(0, 8) + ' — ' + e.error).join(' / ') + '</span>';
+    }
+    box.innerHTML = html;
+    refreshHistory();
+  } catch (e) {
+    box.innerHTML = '<span style="color:#ff8080">エラー: ' + e.message + '</span>';
+  } finally {
+    updateTrainHistoryButton();
+  }
 }
 
 document.getElementById('history-list').addEventListener('click', async e => {
+  // チェックボックスは「学習に使う」選択。行を開く操作とは別
+  if (e.target.classList.contains('hist-sel')) {
+    document.getElementById('hist-select-all').checked =
+      document.querySelectorAll('.hist-sel').length === historySelection().length;
+    updateTrainHistoryButton();
+    return;
+  }
   const btn = e.target.closest('.hist-row');
   if (!btn) return;
   const id = btn.dataset.id;

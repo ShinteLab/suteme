@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ShinteLab/core/sfen"
 	shinteweb "github.com/ShinteLab/core/web"
 	"github.com/ShinteLab/suteme"
 )
@@ -125,6 +126,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/labelbulk", handleLabelBulk)
 	mux.HandleFunc("/api/setboard", handleSetBoard)
 	mux.HandleFunc("/api/train", handleTrain)
+	mux.HandleFunc("/api/trainhistory", handleTrainHistory)
 	mux.HandleFunc("/api/recognize", handleRecognize)
 
 	addr := ":" + port
@@ -569,13 +571,6 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 既存の学習データを読み込む
-	var existing []suteme.TrainingSample
-	if e, err := suteme.LoadTrainingData(dataFile); err == nil {
-		existing = e.Samples
-		log.Printf("Loaded %d existing samples from %s", len(existing), dataFile)
-	}
-
 	// 全セッションのラベルデータを集める
 	mu.RLock()
 	var fresh []suteme.TrainingSample
@@ -613,6 +608,164 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.RUnlock()
 
+	log.Printf("Training from %d labels in memory", newCount)
+	res, err := trainAndSave(fresh)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+// handleTrainHistory: 選択した保存済み局面から学習する。
+// 履歴には画像・盤面座標・正解SFENが揃っているので、解析タブに読み込む操作を
+// 挟まずにサーバ側だけで学習データを組み立てられる。
+func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("handleTrainHistory panic: %v", rec)
+			http.Error(w, fmt.Sprintf("training failed: %v", rec), http.StatusInternalServerError)
+		}
+	}()
+
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.IDs) == 0 {
+		http.Error(w, "局面が選択されていません", http.StatusBadRequest)
+		return
+	}
+
+	historyMu.RLock()
+	h := loadHistory()
+	historyMu.RUnlock()
+	byID := make(map[string]HistoryEntry, len(h.Entries))
+	for _, e := range h.Entries {
+		byID[e.ID] = e
+	}
+
+	// 局面ごとの結果（どれが何枚取れたか・失敗したか）を返す
+	type entryResult struct {
+		ID     string `json:"id"`
+		Pieces int    `json:"pieces"`
+		Error  string `json:"error,omitempty"`
+	}
+	results := make([]entryResult, 0, len(req.IDs))
+
+	var fresh []suteme.TrainingSample
+	for _, id := range req.IDs {
+		e, ok := byID[id]
+		if !ok {
+			results = append(results, entryResult{ID: id, Error: "履歴にありません"})
+			continue
+		}
+		samples, err := samplesFromHistory(e)
+		if err != nil {
+			results = append(results, entryResult{ID: id, Error: err.Error()})
+			continue
+		}
+		fresh = append(fresh, samples...)
+		results = append(results, entryResult{ID: id, Pieces: len(samples)})
+	}
+
+	log.Printf("Training from %d history entries (%d pieces)", len(req.IDs), len(fresh))
+	res, err := trainAndSave(fresh)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	res["entries"] = results
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+// samplesFromHistory は保存済み局面（画像 + 盤面座標 + 正解SFEN）から
+// 駒マスの学習サンプルを作る。空マスは駒種学習の対象外なので含めない。
+func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
+	f, err := os.Open(filepath.Join(dataDir, e.ID+".png"))
+	if err != nil {
+		return nil, fmt.Errorf("画像が読めません")
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		return nil, fmt.Errorf("画像のデコードに失敗しました")
+	}
+
+	var br *suteme.BoardRegion
+	if e.BoardBounds != nil {
+		b := e.BoardBounds
+		br = suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2)
+	} else {
+		// 盤面座標を持たない古いエントリは自動検出に頼る
+		br = suteme.DetectBoard(img)
+		if br == nil || suteme.ValidateBoard(img, br) < 0.5 {
+			return nil, fmt.Errorf("盤面座標が保存されておらず、自動検出もできません")
+		}
+	}
+
+	fields := strings.Fields(e.SFEN)
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("SFEN が空です")
+	}
+
+	// SFEN の解析は core/sfen に委譲する（駒文字の対応表を持たない）
+	var samples []suteme.TrainingSample
+	err = sfen.ParseBoard(fields[0], func(rank, file, base int, black, promoted bool) {
+		label := sfen.Letter(base)
+		if label == "None" {
+			return
+		}
+		if promoted {
+			label = "+" + label
+		}
+		class := suteme.LabelToClass(label)
+		if class < 0 {
+			return
+		}
+		cell := br.ExtractCell(img, rank, file)
+		if cell == nil {
+			return
+		}
+		// 後手は180度回転して先手向きに正規化する（推論時と揃える）
+		if !black {
+			cell = suteme.Rotate180(cell)
+		}
+		samples = append(samples, suteme.TrainingSample{
+			Input: suteme.CellToInput(cell),
+			Label: class,
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("SFEN の解析に失敗しました")
+	}
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("駒が1枚も取れませんでした")
+	}
+	return samples, nil
+}
+
+// trainAndSave は既存の学習データに fresh をマージして学習し、
+// 学習データ・k-NN・モデルを更新する。戻り値はそのまま JSON で返せる形。
+func trainAndSave(fresh []suteme.TrainingSample) (map[string]interface{}, error) {
+	// 既存の学習データを読み込む
+	var existing []suteme.TrainingSample
+	if e, err := suteme.LoadTrainingData(dataFile); err == nil {
+		existing = e.Samples
+		log.Printf("Loaded %d existing samples from %s", len(existing), dataFile)
+	}
+
 	// 入力長が合わないサンプルを除外
 	existing, skippedOld := filterByInputSize(existing)
 	fresh, skippedNew := filterByInputSize(fresh)
@@ -622,7 +775,7 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 
 	// 既存分と今回分を入力の内容でマージして重複を除く。
 	// これが無いと「学習」を押すたびに同じサンプルが二重に積まれる
-	// （毎回「既存ファイルの全件 + 全セッションのラベル」を保存し直すため）。
+	// （毎回「既存ファイルの全件 + 今回分」を保存し直すため）。
 	beforeMerge := len(existing) + len(fresh)
 	var data suteme.TrainingData
 	data.Samples = MergeSamples(existing, fresh)
@@ -632,8 +785,7 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(data.Samples) == 0 {
-		http.Error(w, "No labeled data", http.StatusBadRequest)
-		return
+		return nil, fmt.Errorf("学習データがありません")
 	}
 
 	// 学習データを保存（生データ全件）
@@ -649,11 +801,9 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	// クラスバランス調整してから学習
 	balanced := BalanceData(data.Samples)
 	dist := ClassDistribution(balanced)
-	log.Printf("Training: %d raw → %d balanced (%d labeled this run)", len(data.Samples), len(balanced), newCount)
+	log.Printf("Training: %d raw → %d balanced", len(data.Samples), len(balanced))
 
 	m := Train(&suteme.TrainingData{Samples: balanced})
-
-	// モデルを保存
 	SaveModel(modelFile, m)
 
 	modelLock.Lock()
@@ -662,14 +812,13 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Training complete, model saved to %s", modelFile)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	return map[string]interface{}{
 		"status":       "ok",
 		"samples":      len(data.Samples),
 		"balanced":     len(balanced),
 		"duplicates":   duplicates,
 		"distribution": dist,
-	})
+	}, nil
 }
 
 // filterByInputSize は入力長が合わないサンプルを取り除き、除いた件数を返す
