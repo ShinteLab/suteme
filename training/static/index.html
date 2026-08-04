@@ -188,21 +188,19 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     <button class="action-btn" id="btn-goto-analyze" onclick="switchTab('analyze')">解析へ ›</button>
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">盤面がずれている場合は解析タブで指定し直せます</span>
   </h2>
-  <!-- 左に入力画像、右に認識結果。見比べられるよう横半分ずつにする -->
+  <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:12px;font-family:monospace;font-size:14px;word-break:break-all"></div>
+  <!-- 入力画像と読み取った盤面だけを横半分ずつ並べて見比べる -->
   <div class="recog-cols">
     <div>
       <div class="recog-label">入力画像</div>
       <img id="input-image" style="width:100%;display:block;border-radius:4px">
     </div>
-    <div>
+    <div id="recog-board-wrap" style="display:none">
       <div class="recog-label">読み取った盤面</div>
-      <div id="recog-sfen" style="background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:13px;word-break:break-all"></div>
-      <div id="recog-board-wrap" style="display:none;margin-bottom:8px">
-        <shogi-board id="recog-board"></shogi-board>
-      </div>
-      <div id="piece-counts" style="display:none;margin-bottom:12px"></div>
+      <shogi-board id="recog-board"></shogi-board>
     </div>
   </div>
+  <div id="piece-counts" style="display:none;margin-top:12px"></div>
 </div>
 </div><!-- /tab-input -->
 
