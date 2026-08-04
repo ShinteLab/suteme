@@ -894,7 +894,8 @@ async function trainModel() {
       const distStr = Object.entries(dist)
         .sort((a,b) => b[1]-a[1])
         .map(([k,v]) => (names[k]||k)+':'+v).join(' ');
-      btn.textContent = '学習完了 (生' + data.samples + '→バランス' + data.balanced + '件)';
+      const dup = data.duplicates ? ' 重複除去' + data.duplicates + '件' : '';
+      btn.textContent = '学習完了 (生' + data.samples + '→バランス' + data.balanced + '件' + dup + ')';
       const statsEl = document.getElementById('stats');
       statsEl.innerHTML = '学習データ分布: ' + distStr;
       setTimeout(() => { btn.textContent = '学習'; btn.disabled = false; }, 5000);

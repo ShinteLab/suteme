@@ -570,14 +570,15 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// 既存の学習データを読み込む
-	var data suteme.TrainingData
-	if existing, err := suteme.LoadTrainingData(dataFile); err == nil {
-		data.Samples = existing.Samples
-		log.Printf("Loaded %d existing samples from %s", len(data.Samples), dataFile)
+	var existing []suteme.TrainingSample
+	if e, err := suteme.LoadTrainingData(dataFile); err == nil {
+		existing = e.Samples
+		log.Printf("Loaded %d existing samples from %s", len(existing), dataFile)
 	}
 
-	// 全セッションの新しいラベルデータを追加
+	// 全セッションのラベルデータを集める
 	mu.RLock()
+	var fresh []suteme.TrainingSample
 	newCount := 0
 	for _, s := range sessions {
 		if s.Result.Board == nil {
@@ -603,7 +604,7 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 			if isGoteLabel(label) {
 				cell = suteme.Rotate180(cell)
 			}
-			data.Samples = append(data.Samples, suteme.TrainingSample{
+			fresh = append(fresh, suteme.TrainingSample{
 				Input: suteme.CellToInput(cell),
 				Label: class,
 			})
@@ -613,17 +614,22 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	mu.RUnlock()
 
 	// 入力長が合わないサンプルを除外
-	valid := data.Samples[:0]
-	for _, s := range data.Samples {
-		if len(s.Input) == suteme.InputSize {
-			valid = append(valid, s)
-		}
-	}
-	skipped := len(data.Samples) - len(valid)
-	if skipped > 0 {
+	existing, skippedOld := filterByInputSize(existing)
+	fresh, skippedNew := filterByInputSize(fresh)
+	if skipped := skippedOld + skippedNew; skipped > 0 {
 		log.Printf("Skipped %d samples with wrong input size", skipped)
 	}
-	data.Samples = valid
+
+	// 既存分と今回分を入力の内容でマージして重複を除く。
+	// これが無いと「学習」を押すたびに同じサンプルが二重に積まれる
+	// （毎回「既存ファイルの全件 + 全セッションのラベル」を保存し直すため）。
+	beforeMerge := len(existing) + len(fresh)
+	var data suteme.TrainingData
+	data.Samples = MergeSamples(existing, fresh)
+	duplicates := beforeMerge - len(data.Samples)
+	if duplicates > 0 {
+		log.Printf("Merged %d samples → %d (%d duplicates removed)", beforeMerge, len(data.Samples), duplicates)
+	}
 
 	if len(data.Samples) == 0 {
 		http.Error(w, "No labeled data", http.StatusBadRequest)
@@ -643,7 +649,7 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 	// クラスバランス調整してから学習
 	balanced := BalanceData(data.Samples)
 	dist := ClassDistribution(balanced)
-	log.Printf("Training: %d raw → %d balanced (%d new)", len(data.Samples), len(balanced), newCount)
+	log.Printf("Training: %d raw → %d balanced (%d labeled this run)", len(data.Samples), len(balanced), newCount)
 
 	m := Train(&suteme.TrainingData{Samples: balanced})
 
@@ -661,8 +667,20 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 		"status":       "ok",
 		"samples":      len(data.Samples),
 		"balanced":     len(balanced),
+		"duplicates":   duplicates,
 		"distribution": dist,
 	})
+}
+
+// filterByInputSize は入力長が合わないサンプルを取り除き、除いた件数を返す
+func filterByInputSize(samples []suteme.TrainingSample) ([]suteme.TrainingSample, int) {
+	valid := samples[:0]
+	for _, s := range samples {
+		if len(s.Input) == suteme.InputSize {
+			valid = append(valid, s)
+		}
+	}
+	return valid, len(samples) - len(valid)
 }
 
 // handleRecognize: 学習済みモデルで盤面を認識する

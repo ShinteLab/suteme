@@ -6,7 +6,9 @@
 package training
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -87,6 +89,73 @@ func BalanceData(samples []suteme.TrainingSample) []suteme.TrainingSample {
 		}
 	}
 	return result
+}
+
+// MergeSamples は入力ベクトルの内容をキーにサンプルをマージし、重複を取り除く。
+// 後から渡したものが勝つので、同じマスにラベルを付け直した場合は訂正が反映される。
+// 並びは最初に現れた位置を保つ。
+//
+// /api/train は毎回「既存ファイルの全件 + メモリ上の全セッションのラベル」を
+// 保存し直すため、これを通さないと学習を押すたびに同じサンプルが積み上がる。
+// 同じ画像の同じマスからは同じ入力ベクトルが得られるので、内容が重複判定になる。
+func MergeSamples(groups ...[]suteme.TrainingSample) []suteme.TrainingSample {
+	total := 0
+	for _, g := range groups {
+		total += len(g)
+	}
+	buckets := make(map[uint64][]int, total)
+	result := make([]suteme.TrainingSample, 0, total)
+
+	for _, g := range groups {
+		for _, s := range g {
+			key := sampleKey(s.Input)
+			found := -1
+			// ハッシュ衝突で別サンプルを取り違えないよう中身も突き合わせる
+			for _, i := range buckets[key] {
+				if equalInput(result[i].Input, s.Input) {
+					found = i
+					break
+				}
+			}
+			if found >= 0 {
+				result[found] = s // 後勝ち
+				continue
+			}
+			buckets[key] = append(buckets[key], len(result))
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// sampleKey は入力ベクトルの内容ハッシュ（FNV-1a 64bit）
+func sampleKey(input []float64) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	var buf [8]byte
+	for _, v := range input {
+		binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
+		for _, b := range buf {
+			h ^= uint64(b)
+			h *= prime64
+		}
+	}
+	return h
+}
+
+func equalInput(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ClassDistribution はクラスごとのサンプル数を返す
