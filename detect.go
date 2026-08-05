@@ -10,6 +10,13 @@ type BoardRegion struct {
 	Cells  [9][9]image.Rectangle
 }
 
+// boardAspect は将棋盤のマスの縦横比（高さ / 幅）。
+//
+// **将棋盤は正方形ではない。** 規格は 3.03寸 x 3.33寸 で 1.099、
+// 保存済み局面の手動指定座標での実測は 1.045〜1.138（平均 1.09）。
+// 正方形とみなすと横方向に 8〜9% 広い盤を探すことになる。
+const boardAspect = 1.09
+
 func DetectBoard(img image.Image) *BoardRegion {
 	gray := ConvertGray(img)
 	blurred := BoxBlur(gray, 2)
@@ -23,7 +30,14 @@ func DetectBoard(img image.Image) *BoardRegion {
 		minDist = 3
 	}
 
-	// Pass 1: 横方向の投影で行を検出
+	// Pass 1: 横方向の投影で水平線10本（外枠2本 + 内部8本）を検出。
+	//
+	// **上限は min(w,h)/9 ではなく h/9。** 行の間隔はマスの「高さ」なので
+	// 縦の長さで抑えるのが正しい。マスは縦長（boardAspect）なうえ、盤だけを
+	// 切り出した画像は縦長になるので min(w,h)=幅 とすると
+	// 上限 < 真のマス高 となり、**正しい間隔が必ず弾かれていた**
+	// （保存済み 11 件中 9 件が該当。ピーク自体は全て拾えているのに
+	// 偽の並びが選ばれていた）。
 	rowProj := make([]int, h)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
@@ -31,29 +45,61 @@ func DetectBoard(img image.Image) *BoardRegion {
 		}
 	}
 	rowPeaks := findPeaks(rowProj, minDist)
-	maxSpacing := float64(minInt(w, h)) / 9.0
-	hInner, hSpacing := pickWithSpacing(rowPeaks, rowProj, 8, 0, maxSpacing)
-	if hInner == nil {
-		hInner, hSpacing = pickWithSpacing(rowPeaks, rowProj, 6, 0, maxSpacing)
+	hPos, hSpacing := pickWithSpacing(rowPeaks, rowProj, 10, 0, float64(h)/9)
+	if hPos == nil {
+		// 外枠が写っていない画像向け: 内部8本を拾って上下に1マス延長する
+		var hInner []int
+		hInner, hSpacing = pickWithSpacing(rowPeaks, rowProj, 8, 0, float64(h)/9)
 		if hInner == nil {
 			return nil
 		}
+		hPos = extendToBorders(hInner, 0, h, rowProj)
 	}
 
-	// Pass 2: 行範囲内の縦投影を計算
-	yTop := hInner[0]
-	yBot := hInner[len(hInner)-1]
+	// Pass 2: 行範囲内の縦投影から垂直線10本を検出。
+	// 期待するマス幅は hSpacing/boardAspect（正方形ではない）
+	yTop := hPos[0]
+	yBot := hPos[len(hPos)-1]
 	colProj := make([]int, w)
 	for x := 0; x < w; x++ {
-		for y := yTop; y <= yBot; y++ {
+		for y := maxInt(yTop, 0); y <= minInt(yBot, h-1); y++ {
 			colProj[x] += int(edges.GrayAt(x+bounds.Min.X, y+bounds.Min.Y).Y)
 		}
 	}
 
-	// 盤面左右の境界ペアを探す（正方形制約付き）
 	colPeaks := findPeaks(colProj, minDist)
-	expectedW := int(hSpacing * 9)
-	tolerance := int(hSpacing * 2)
+	cellW := hSpacing / boardAspect
+	vPos, _ := pickWithSpacing(colPeaks, colProj, 10, cellW, float64(w)/9)
+	if vPos == nil {
+		vPos = findBoardColumns(colProj, colPeaks, cellW, w)
+		if vPos == nil {
+			return nil
+		}
+	}
+
+	// **検出したピーク位置をそのままマスの境界に使わない。** 外枠だけを採り、
+	// 内側は等分する。ピークは線の太さやボケで数px 揺れるので、そのまま使うと
+	// 1マスの高さが 47〜58px のようにばらつき、グリッド線がマス内に入り込む。
+	// 手動指定（BoardRegionFromRect）と同じ割り方になるので、
+	// 「手動座標なら合うのに検出だと合わない」の切り分けもしやすい。
+	// 実測での改善は誤認識マス 266 → 258（保存済み10局面・810マス）と小さい。
+	return BoardRegionFromRect(
+		vPos[0]+bounds.Min.X,
+		hPos[0]+bounds.Min.Y,
+		vPos[9]+bounds.Min.X,
+		hPos[9]+bounds.Min.Y,
+	)
+}
+
+// findBoardColumns は等間隔10本を取れなかったときのフォールバック。
+// 期待幅 cellW*9 に収まる左右の境界ペアを探し、見つからなければ
+// スライディングウィンドウで最もエッジ密度の高い位置を採る
+func findBoardColumns(colProj []int, colPeaks []int, cellW float64, w int) []int {
+	expectedW := int(cellW * 9)
+	if expectedW <= 0 || expectedW > w {
+		return nil
+	}
+	tolerance := int(cellW)
 
 	bestScore := 0
 	bestLeft, bestRight := 0, 0
@@ -63,26 +109,20 @@ func DetectBoard(img image.Image) *BoardRegion {
 			if span < expectedW-tolerance || span > expectedW+tolerance {
 				continue
 			}
-			score := colProj[l] + colProj[r]
-			if score > bestScore {
-				bestScore = score
-				bestLeft = l
-				bestRight = r
+			if score := colProj[l] + colProj[r]; score > bestScore {
+				bestScore, bestLeft, bestRight = score, l, r
 			}
 		}
 	}
 
 	if bestRight <= bestLeft {
-		// フォールバック: スライディングウィンドウで密度最大の位置を使う
 		for x := 0; x <= w-expectedW; x++ {
 			sum := 0
 			for dx := 0; dx < expectedW; dx++ {
 				sum += colProj[x+dx]
 			}
 			if sum > bestScore {
-				bestScore = sum
-				bestLeft = x
-				bestRight = x + expectedW
+				bestScore, bestLeft, bestRight = sum, x, x+expectedW
 			}
 		}
 		if bestRight <= bestLeft {
@@ -90,37 +130,21 @@ func DetectBoard(img image.Image) *BoardRegion {
 		}
 	}
 
-	hPos := extendToBorders(hInner, 0, h, rowProj)
-
-	// 縦は検出した左右境界から9等分
 	boardW := bestRight - bestLeft
 	vPos := make([]int, 10)
 	for i := 0; i < 10; i++ {
 		vPos[i] = bestLeft + boardW*i/9
 	}
-
-	boardRect := image.Rect(
-		vPos[0]+bounds.Min.X,
-		hPos[0]+bounds.Min.Y,
-		vPos[9]+bounds.Min.X,
-		hPos[9]+bounds.Min.Y,
-	)
-
-	br := &BoardRegion{Bounds: boardRect}
-	for r := 0; r < 9; r++ {
-		for c := 0; c < 9; c++ {
-			br.Cells[r][c] = image.Rect(
-				vPos[c]+bounds.Min.X,
-				hPos[r]+bounds.Min.Y,
-				vPos[c+1]+bounds.Min.X,
-				hPos[r+1]+bounds.Min.Y,
-			)
-		}
-	}
-
-	return br
+	return vPos
 }
 
+// findPeaks は投影の局所最大を返す。
+//
+// **端も走査対象にする（比較窓を配列内に切り詰める）。** かつては
+// `for i := minDist; i < len(signal)-minDist` として端を捨てていたが、
+// 盤だけを切り出した画像では盤の外枠線が画像端（実測で x=2 / y=4 など）に
+// 来るため、外枠が原理的にピークになれなかった。保存済み局面は 11 件中 9 件が
+// この形（盤が画像の 92〜98% を占める）で、横方向が常に1マスずれる原因だった。
 func findPeaks(signal []int, minDist int) []int {
 	maxVal := 0
 	for _, v := range signal {
@@ -131,15 +155,17 @@ func findPeaks(signal []int, minDist int) []int {
 	thresh := maxVal / 5
 
 	peaks := make([]int, 0)
-	for i := minDist; i < len(signal)-minDist; i++ {
+	for i := 0; i < len(signal); i++ {
 		if signal[i] < thresh {
 			continue
 		}
 		isPeak := true
-		for d := 1; d <= minDist; d++ {
-			if signal[i] < signal[i-d] || signal[i] < signal[i+d] {
+		for d := 1; d <= minDist && isPeak; d++ {
+			if i-d >= 0 && signal[i] < signal[i-d] {
 				isPeak = false
-				break
+			}
+			if i+d < len(signal) && signal[i] < signal[i+d] {
+				isPeak = false
 			}
 		}
 		if isPeak {
@@ -322,6 +348,13 @@ func (br *BoardRegion) ExtractCell(src image.Image, row, col int) image.Image {
 
 func minInt(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
