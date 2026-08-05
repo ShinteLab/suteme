@@ -147,6 +147,13 @@ func LoadTrainingData(path string) (*TrainingData, error) {
 // Model は駒認識モデル
 type Model struct {
 	NN *gobrain.FeedForward
+
+	source string // 読み込み元のファイルパス（LoadPredictor が設定。デバッグ表示用）
+}
+
+// Debug は認識結果に載せる推論器の素性を返す（DebugPredictor）。
+func (m *Model) Debug() PredictorDebug {
+	return PredictorDebug{Kind: "nn", Source: m.source}
 }
 
 // LoadModel はモデルをJSONファイルから読み込み
@@ -187,18 +194,33 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 // 画素の並びは既知の空マスと一致するため、学習済みの空パターンのほうが確かなため。
 // 逆方向（分類が空・推論が駒）は向きが決まらないので覆さない。
 func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
+	board, _, _ := recognizeBoardDetail(img, br, m)
+	return board
+}
+
+// recognizeBoardDetail は RecognizeBoard の本体で、盤面文字列に加えて
+// マスごとの認識過程（Result.Debug 用）と盤の地色を返す。
+func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string, []CellDebug, uint8) {
 	// 各マスの SFEN 表記("" は空マス)を組み立て、盤面文字列化(空マスの
 	// ランレングス圧縮・段区切り)は core/sfen に委譲する。
 	var grid [9][9]string
 	bc := BoardColor(img, br)
+	cells := make([]CellDebug, 0, 81)
 	for r := 0; r < 9; r++ {
 		for c := 0; c < 9; c++ {
+			d := CellDebug{Row: r, Col: c, Rect: br.Cells[r][c], Class: -1}
+			// 先に登録して、以降は d を書き換えつつ continue できるようにする
+			// （マスごとの記録を取りこぼさないため）。
+			cells = append(cells, d)
+			cur := &cells[len(cells)-1]
+
 			cell := br.ExtractCell(img, r, c)
 			if cell == nil {
 				continue
 			}
 
 			cat := ClassifyCellWith(cell, bc)
+			cur.Category = cat
 			if cat == CellEmpty {
 				continue
 			}
@@ -209,7 +231,8 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 				if cat == CellPieceDown {
 					ncell = Rotate180(cell)
 				}
-				class, _ := m.Predict(ncell)
+				class, conf := m.Predict(ncell)
+				cur.Class, cur.Confidence = class, conf
 				if class == ClassEmpty {
 					continue
 				}
@@ -229,9 +252,11 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 				// モデルなし: 向き不問で駒があることだけを示す
 				grid[r][c] = "?"
 			}
+			cur.Piece = grid[r][c]
 		}
 	}
-	return sfen.FormatBoard(func(rank, file int) string { return grid[rank][file] })
+	board := sfen.FormatBoard(func(rank, file int) string { return grid[rank][file] })
+	return board, cells, bc
 }
 
 // resizeGray は画像を指定サイズのグレースケールにリサイズする（面積平均）。

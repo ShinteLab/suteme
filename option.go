@@ -127,10 +127,10 @@ func WithMoveNumber(n int) Option {
 	return func(cfg *config) { cfg.move = n }
 }
 
-// boardRegion は設定に従って盤面領域と信頼度を返す。
-func (c *config) boardRegion(img image.Image) (*BoardRegion, float64) {
+// boardRegion は設定に従って盤面領域・信頼度・領域の決め方を返す。
+func (c *config) boardRegion(img image.Image) (*BoardRegion, float64, RegionSource) {
 	if c.region != nil {
-		return c.region, ValidateBoard(img, c.region)
+		return c.region, ValidateBoard(img, c.region), RegionFromOption
 	}
 	return detectBoardRegion(img)
 }

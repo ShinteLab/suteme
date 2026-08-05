@@ -50,12 +50,16 @@ func SetPredictor(p Predictor) {
 // サンプルを足した瞬間に反映されるため）。無ければ model_v2.json の
 // gobrain モデルを使う。
 func LoadPredictor(dir string) (Predictor, error) {
-	if data, err := LoadTrainingData(filepath.Join(dir, DefaultDataFile)); err == nil {
+	dataPath := filepath.Join(dir, DefaultDataFile)
+	if data, err := LoadTrainingData(dataPath); err == nil {
 		if kn := NewKNN(data.Samples); kn != nil {
+			kn.source = dataPath
 			return kn, nil
 		}
 	}
-	if m, err := LoadModel(filepath.Join(dir, DefaultModelFile)); err == nil {
+	modelPath := filepath.Join(dir, DefaultModelFile)
+	if m, err := LoadModel(modelPath); err == nil {
+		m.source = modelPath
 		return m, nil
 	}
 	return nil, fmt.Errorf("%w: %s に %s / %s がありません",
@@ -148,14 +152,23 @@ func Recognize(img image.Image, opts ...Option) (*Result, error) {
 			return nil, err
 		}
 	}
-	br, conf := cfg.boardRegion(img)
+	br, conf, src := cfg.boardRegion(img)
 	if br == nil {
 		return nil, fmt.Errorf("%w（信頼度 %.0f%%）", ErrBoardNotFound, conf*100)
 	}
 
-	board := RecognizeBoard(img, br, p)
+	board, cells, bc := recognizeBoardDetail(img, br, p)
 	info := sfen.Inspect(board, cfg.checks)
 	r := newResult(board, conf, info, cfg)
+	r.Debug = &Debug{
+		ImageBounds:  img.Bounds(),
+		Region:       br.Bounds,
+		RegionSource: src,
+		Confidence:   conf,
+		BoardColor:   bc,
+		Predictor:    predictorDebug(p),
+		Cells:        cells,
+	}
 
 	if fatal := info.Filter(cfg.fatal); len(fatal) > 0 {
 		return r, &BoardError{Board: board, Violations: fatal}
@@ -163,27 +176,28 @@ func Recognize(img image.Image, opts ...Option) (*Result, error) {
 	return r, nil
 }
 
-// detectBoardRegion は認識に使う盤面領域とその信頼度を返す。
+// detectBoardRegion は認識に使う盤面領域・信頼度・領域の決め方を返す。
 // グリッド検出（DetectBoard）を第一候補とし、信頼度が足りない場合のみ
 // 「画像全体が盤面」の候補を試す。ikkyoku のガイド枠のように盤だけを
 // 切り出した画像はグリッド線が画像端に来て検出が外れるため。
 // どちらも minBoardConfidence に届かなければ nil を返す。
-func detectBoardRegion(img image.Image) (*BoardRegion, float64) {
+func detectBoardRegion(img image.Image) (*BoardRegion, float64, RegionSource) {
 	best := DetectBoard(img)
 	conf := ValidateBoard(img, best) // br が nil なら 0
+	src := RegionFromDetect
 
 	if conf < minBoardConfidence {
 		b := img.Bounds()
 		whole := BoardRegionFromRect(b.Min.X, b.Min.Y, b.Max.X, b.Max.Y)
 		if c := ValidateBoard(img, whole); c > conf {
-			best, conf = whole, c
+			best, conf, src = whole, c, RegionFromWholeImage
 		}
 	}
 
 	if conf < minBoardConfidence {
-		return nil, conf
+		return nil, conf, src
 	}
-	return best, conf
+	return best, conf, src
 }
 
 func ViewDebug(img image.Image) error {

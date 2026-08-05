@@ -57,6 +57,10 @@ type Result struct {
 	WhiteHand map[string]int `json:"white_hand"`
 	// Violations は実施したチェックで見つかった違反（エラーにしたかは別）。
 	Violations []sfen.Violation `json:"violations"`
+	// Debug は「その答えをどう出したか」の観測情報（盤面と判定した矩形・
+	// その決め方・使った推論器・マスごとの分類と確信度）。
+	// 認識が外れたときの切り分け用で、判断には使わない。Recognize が常に埋める。
+	Debug *Debug `json:"debug,omitempty"`
 
 	turn string // "b" / "w"
 	move int

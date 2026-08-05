@@ -1,6 +1,7 @@
 package suteme
 
 import (
+	"fmt"
 	"image"
 	"math"
 	"sort"
@@ -18,6 +19,7 @@ type Predictor interface {
 type KNN struct {
 	samples []TrainingSample
 	k       int
+	source  string // 読み込み元のファイルパス（LoadPredictor が設定。デバッグ表示用）
 }
 
 // NewKNN はサンプルから k-NN 認識器を作る。サンプルが空なら nil
@@ -41,6 +43,15 @@ func NewKNN(samples []TrainingSample) *KNN {
 // Len は保持しているサンプル数を返す
 func (kn *KNN) Len() int {
 	return len(kn.samples)
+}
+
+// Debug は認識結果に載せる推論器の素性を返す（DebugPredictor）。
+func (kn *KNN) Debug() PredictorDebug {
+	return PredictorDebug{
+		Kind:   "knn",
+		Source: kn.source,
+		Detail: fmt.Sprintf("k=%d, samples=%d", kn.k, len(kn.samples)),
+	}
 }
 
 // emptyMatchMax は空マスと判定する最近傍距離の上限（emptyDistNorm で正規化後）。

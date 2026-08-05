@@ -28,6 +28,7 @@ SFEN の駒文字マッピングや盤面文字列の組み立てを suteme 側�
 | `suteme.go` | 公開API: `Recognize` / `LoadSFEN` / `LoadSFENWith` / `LoadPredictor` / `SetPredictor`・`ViewDebug` |
 | `option.go` | 認識オプション（`Option` / `WithChecks` / `WithErrorOn` / `WithHandTo` ほか）|
 | `result.go` | 認識結果 `Result`（駒数・持ち駒・違反）と `BoardError` / `ErrInvalidBoard` |
+| `debug.go` | 認識過程の観測情報 `Debug`（盤面矩形・その決め方・推論器・マスごとの結果）|
 | `analyze.go` | `Analyze()` / `AnalyzeResult` / `DrawBoard()` |
 | `detect.go` | **盤面検出**: エッジ投影 → ピーク検出 → 9x9分割 → `BoardRegion` / `BoardRegionFromRect` |
 | `classify.go` | **空/先手/後手の分類**: 画像処理のみ（学習不要）・`BoardColor` |
@@ -418,6 +419,40 @@ fmt.Println(r.SFEN()) // "lnsg... b 2R2B4G4S4N4L18P 1"
   `LoadSFEN` が盤面部分だけを返す方針は変えていない。
 - 駒台の画像認識は未実装。`WithHandTo` は「駒数の逆算で出た不足分を、便宜的に
   どちらかに寄せる」ための逃げ道であって、正しい持ち駒が分かるわけではない。
+
+### 認識過程の観測（`debug.go` / `Result.Debug`）
+
+**認識が外れたとき、呼び出し側が持っているのは画像と SFEN だけ**で、
+盤面をどこだと思ったのか・どの推論器を使ったのかが分からず、
+座標の問題なのか認識器の問題なのかを切り分けられなかった。
+`Recognize` は `Result.Debug` にその材料を必ず載せる（`nil` にはならない）。
+**観測用であって認識の判断には使わない。**
+
+| フィールド | 内容 |
+|---|---|
+| `ImageBounds` / `Region` | 入力画像の範囲 / 盤面と判定した外枠。マス割りはこれを9等分したもの |
+| `RegionSource` | 領域の決め方。`option`（`WithRegion`/`WithRect`）/ `detect`（`DetectBoard`）/ `whole`（画像全体フォールバック）|
+| `Confidence` | `ValidateBoard` の値（`Result.Confidence` と同じ）|
+| `BoardColor` | 分類の基準にした盤の地色 |
+| `Predictor` | 種別（`knn` / `nn` / 型名）・読み込み元ファイル・`k=5, samples=4455` |
+| `Cells` | 81マス分の `CellDebug`（矩形・`ClassifyCellWith` の分類・推論クラス・確信度・採用した表記）|
+
+```go
+r, _ := suteme.Recognize(img)
+// region=(4,1)-(637,703) cell=70x78 src=detect conf=1.00 predictor=knn(k=5, samples=5265) <- ./training_data_v3.json
+log.Println(r.Debug)
+fmt.Print(r.Debug.Dump())       // 盤の形に並べた表記と確信度（" l  100% n   91% +p  43% ..."）
+r.Debug.LowConfidenceCells(0.6) // 怪しいマスだけ絞り込む
+```
+
+- **`RegionSource` が `option` のときの `Confidence` はゲートに使っていない。**
+  手動指定は検証せずそのまま使う仕様（実盤の中継画像は正しい座標でも 0.12 までしか
+  上がらない）なので、低い値が出ていても領域はその座標のまま。
+- `CellDebug.Class` が `ClassEmpty` なら、`Category` の駒判定を推論が覆して空にしたということ。
+  `-1` は推論を呼んでいない（空と分類された / 推論器が nil）。
+- 推論器の素性は `DebugPredictor`（`Debug() PredictorDebug`）で取る。`*KNN` と `*Model` が
+  実装していて、読み込み元のパスは `LoadPredictor` が入れる。`WithPredictor` で
+  直接渡した独自の推論器は型名だけが載る。
 
 **認識精度のボトルネックは検出ではなく k-NN のシフト不変性にある。**
 `DetectBoard` は手動指定座標に対して 11 件中 10 件が 0.5マス以内（多くは 0.1マス以内）
