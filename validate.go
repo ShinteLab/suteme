@@ -90,10 +90,20 @@ func gridConfidence(img image.Image, br *BoardRegion) float64 {
 // -1.0〜1.0 で返す。1 に近いほど正しく乗っている。
 //
 // 盤面領域内のエッジ投影について、10本の境界線位置のピーク値（on）と、
-// 半マスずらしたマス中央のピーク値（off）を比べ、(on-off)/(on+off) とする。
+// 線が無いはずの位置のピーク値（off）を比べ、(on-off)/(on+off) とする。
 // **同じ画像の同じ領域どうしの比なので自己校正になる**（絶対量で測ると
 // 駒の多い局面・ボケた画像・解像度で桁が変わり、しきい値が置けない）。
-// 縦横で別々に求め、悪いほうを採用する（片方だけ合っていても意味がないため）。
+//
+// **縦横は平均ではなく悪いほうを採る。** 半マスずらすと、ずらした軸だけが
+// 壊れてもう一方は正解のまま高い値を出す。平均にすると横半マスずれが
+// +0.05〜+0.13、縦半マスずれが -0.03〜+0.16 まで上がり、しきい値 0.10 を
+// 超えるものが出て弁別できなくなる（実測）。min なら -0.04〜-0.38 に落ちる。
+//
+// 実物の盤を撮った画像では、片方の軸の格子線が投影にほとんど出ないことがある
+// （木目・照明・駒の重なり）。その場合この値は 0 近辺までしか上がらず、
+// 手動指定の正しい領域でも低く出る。**手動指定はこの値でゲートしていない**
+// （Recognize の WithRegion も /api/setboard も検証せずそのまま使う）ので
+// 実害は「信頼度の表示が低い」ことに留まる。
 func gridAlignment(img image.Image, br *BoardRegion) float64 {
 	b := br.Bounds.Intersect(img.Bounds())
 	// 1マスが数pxしかない領域では投影に意味が無い
@@ -132,8 +142,17 @@ func gridAlignment(img image.Image, br *BoardRegion) float64 {
 // BoxBlur(r=2) とグリッド線自体の太さで数px はずれる
 const gridPeakTol = 3
 
+// offFractions は「線が無いはずの位置」を取る、マス内の相対位置。
+//
+// **マス中央（0.5）だけで測ってはいけない。** 駒の漢字の画はマスの中央に
+// 集中するので、中央だけを off にすると駒のある盤で off が過大になり、
+// 整合度が不当に下がる。実物の盤を撮った画像では列方向がこれで潰れていた。
+// 1/4・1/2・3/4 に散らすと、正解の値が上がり歪みの値は 0 に寄る
+// （実測: 正解 +0.13〜+0.54 → +0.16〜+0.51、縮小 +0.17 → +0.04 など）。
+var offFractions = []float64{0.25, 0.5, 0.75}
+
 // axisAlignment は 1 軸分の整合度を返す。
-// origin から span 間隔で並ぶ10本の境界線と、その中間9点を比べる
+// origin から span 間隔で並ぶ10本の境界線と、線が無いはずの位置を比べる
 func axisAlignment(proj []float64, origin, span float64) float64 {
 	peak := func(pos float64) float64 {
 		best := 0.0
@@ -151,10 +170,12 @@ func axisAlignment(proj []float64, origin, span float64) float64 {
 		on += peak(origin + span*float64(i))
 	}
 	for i := 0; i < 9; i++ {
-		off += peak(origin + span*(float64(i)+0.5))
+		for _, fr := range offFractions {
+			off += peak(origin + span*(float64(i)+fr))
+		}
 	}
 	on /= 10
-	off /= 9
+	off /= float64(9 * len(offFractions))
 	if on+off == 0 {
 		return 0
 	}
