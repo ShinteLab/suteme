@@ -24,7 +24,7 @@ func Train(data *suteme.TrainingData) *suteme.Model {
 		return nil
 	}
 
-	numClasses := len(suteme.BaseLabels)
+	numClasses := suteme.NumClasses
 
 	ff := &gobrain.FeedForward{}
 	ff.Init(suteme.InputSize, suteme.InputSize/4, numClasses)

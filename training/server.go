@@ -161,7 +161,7 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 			}
 			cat := suteme.ClassifyCellWith(cell, bc)
 			if cat == suteme.CellEmpty {
-				grid[row][col] = map[string]interface{}{"label": "none", "confidence": 95}
+				grid[row][col] = map[string]interface{}{"label": suteme.EmptyLabel, "confidence": 95}
 				continue
 			}
 			ncell := cell
@@ -169,6 +169,14 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 				ncell = suteme.Rotate180(cell)
 			}
 			class, conf := m.Predict(ncell)
+			// 推論器が空と言うなら分類より優先する（RecognizeBoard と同じ判断）
+			if class == suteme.ClassEmpty {
+				grid[row][col] = map[string]interface{}{
+					"label":      suteme.EmptyLabel,
+					"confidence": int(conf * 100),
+				}
+				continue
+			}
 			base := suteme.ClassToBaseLabel(class)
 			label := base
 			if cat == suteme.CellPieceDown {
@@ -513,6 +521,7 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 	type entryResult struct {
 		ID     string `json:"id"`
 		Pieces int    `json:"pieces"`
+		Empty  int    `json:"empty"`
 		Error  string `json:"error,omitempty"`
 	}
 	results := make([]entryResult, 0, len(req.IDs))
@@ -530,10 +539,12 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		fresh = append(fresh, samples...)
-		results = append(results, entryResult{ID: id, Pieces: len(samples)})
+		empty := countEmpty(samples)
+		results = append(results, entryResult{ID: id, Pieces: len(samples) - empty, Empty: empty})
 	}
 
-	log.Printf("Training from %d history entries (%d pieces)", len(req.IDs), len(fresh))
+	log.Printf("Training from %d history entries (%d pieces, %d empty)",
+		len(req.IDs), len(fresh)-countEmpty(fresh), countEmpty(fresh))
 	res, err := trainAndSave(fresh)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -545,8 +556,20 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
+// countEmpty は空マスのサンプル数を数える
+func countEmpty(samples []suteme.TrainingSample) int {
+	n := 0
+	for _, s := range samples {
+		if s.Label == suteme.ClassEmpty {
+			n++
+		}
+	}
+	return n
+}
+
 // samplesFromHistory は保存済み局面（画像 + 盤面座標 + 正解SFEN）から
-// 駒マスの学習サンプルを作る。空マスは駒種学習の対象外なので含めない。
+// 学習サンプルを作る。空マスも ClassEmpty として含める
+// （グリッド線・木目で駒に見える空マスを被覆率では分離できないため）。
 func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 	f, err := os.Open(filepath.Join(dataDir, e.ID+".png"))
 	if err != nil {
@@ -575,9 +598,15 @@ func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 		return nil, fmt.Errorf("SFEN が空です")
 	}
 
-	// SFEN の解析は core/sfen に委譲する（駒文字の対応表を持たない）
+	// SFEN の解析は core/sfen に委譲する（駒文字の対応表を持たない）。
+	// ParseBoard は駒のあるマスだけを呼ぶので、埋まったマスを記録しておき
+	// 残りを空マスとして補う
 	var samples []suteme.TrainingSample
+	var occupied [9][9]bool
 	err = sfen.ParseBoard(fields[0], func(rank, file, base int, black, promoted bool) {
+		if rank < 0 || rank >= 9 || file < 0 || file >= 9 {
+			return
+		}
 		label := sfen.Letter(base)
 		if label == "None" {
 			return
@@ -586,13 +615,14 @@ func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 			label = "+" + label
 		}
 		class := suteme.LabelToClass(label)
-		if class < 0 {
+		if class < 0 || class == suteme.ClassEmpty {
 			return
 		}
 		cell := br.ExtractCell(img, rank, file)
 		if cell == nil {
 			return
 		}
+		occupied[rank][file] = true
 		// 後手は180度回転して先手向きに正規化する（推論時と揃える）
 		if !black {
 			cell = suteme.Rotate180(cell)
@@ -607,6 +637,23 @@ func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 	}
 	if len(samples) == 0 {
 		return nil, fmt.Errorf("駒が1枚も取れませんでした")
+	}
+
+	// 空マス。向きが無いので回転はしない
+	for rank := 0; rank < 9; rank++ {
+		for file := 0; file < 9; file++ {
+			if occupied[rank][file] {
+				continue
+			}
+			cell := br.ExtractCell(img, rank, file)
+			if cell == nil {
+				continue
+			}
+			samples = append(samples, suteme.TrainingSample{
+				Input: suteme.CellToInput(cell),
+				Label: suteme.ClassEmpty,
+			})
+		}
 	}
 	return samples, nil
 }
