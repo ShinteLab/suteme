@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/ShinteLab/core/sfen"
 )
 
 // 既定の認識器ファイル名（training パッケージが書き出すものと同じ）
@@ -91,32 +93,69 @@ func defaultPredictor() (Predictor, error) {
 
 // LoadSFEN は画像から盤面を認識し、SFEN の盤面部分（'/' 区切りの9段）を返す。
 // 手番・持ち駒・手数は付けない（suteme の責務は「画像 → 盤面」に閉じる）。
-// 持ち駒の枚数が要るなら、戻り値を ValidatePieces に渡すこと。
+// 持ち駒や検証結果も要るなら Recognize を使う。
 //
 // 駒種の推論器はカレントディレクトリ、次に実行ファイルのディレクトリから
 // 自動で読み込む（training_data_v2.json → k-NN 優先、無ければ model_v2.json）。
-// 明示的に指定する場合は SetPredictor / LoadSFENWith を使う。
-func LoadSFEN(img image.Image) (string, error) {
-	p, err := defaultPredictor()
-	if err != nil {
+// 明示的に指定する場合は SetPredictor / WithPredictor を使う。
+//
+// 既定では盤面の検証は行うがエラーにはしない。おかしい盤面をエラーにしたい場合は
+// WithErrorOn / WithStrict を渡す（違反の内容は BoardError から取れる）。
+func LoadSFEN(img image.Image, opts ...Option) (string, error) {
+	r, err := Recognize(img, opts...)
+	if r == nil {
 		return "", err
 	}
-	return LoadSFENWith(img, p)
+	return r.Board, err
 }
 
 // LoadSFENWith は推論器を指定して画像から SFEN 盤面文字列を認識する。
-func LoadSFENWith(img image.Image, p Predictor) (string, error) {
-	if img == nil {
-		return "", errors.New("画像がありません")
-	}
+// LoadSFEN(img, WithPredictor(p), ...) と同じだが、こちらは推論器の指定が必須
+// （nil なら ErrNoPredictor）。
+func LoadSFENWith(img image.Image, p Predictor, opts ...Option) (string, error) {
 	if p == nil {
 		return "", ErrNoPredictor
 	}
-	br, conf := detectBoardRegion(img)
-	if br == nil {
-		return "", fmt.Errorf("%w（信頼度 %.0f%%）", ErrBoardNotFound, conf*100)
+	return LoadSFEN(img, append([]Option{WithPredictor(p)}, opts...)...)
+}
+
+// Recognize は画像から盤面を認識し、駒数の検証結果と持ち駒の推定まで含めて返す。
+//
+// 検証で違反が見つかっても既定ではエラーにしない（画像から出てきた盤面が
+// おかしいこと自体は異常ではないため）。WithErrorOn / WithStrict を指定した
+// 場合は ErrInvalidBoard を包んだ *BoardError を返すが、**そのときも Result は
+// 返す**ので、呼び出し側は「どこがおかしいか」を UI に出せる。
+//
+//	// 駒数がおかしければエラー。足りない駒は先手の駒台に置く
+//	r, err := suteme.Recognize(img,
+//	    suteme.WithErrorOn(sfen.CheckPieceCount|sfen.CheckKing),
+//	    suteme.WithHandTo(suteme.HandBlack))
+func Recognize(img image.Image, opts ...Option) (*Result, error) {
+	cfg := defaultConfig().apply(opts)
+
+	if img == nil {
+		return nil, errors.New("画像がありません")
 	}
-	return RecognizeBoard(img, br, p), nil
+	p := cfg.predictor
+	if p == nil {
+		var err error
+		if p, err = defaultPredictor(); err != nil {
+			return nil, err
+		}
+	}
+	br, conf := cfg.boardRegion(img)
+	if br == nil {
+		return nil, fmt.Errorf("%w（信頼度 %.0f%%）", ErrBoardNotFound, conf*100)
+	}
+
+	board := RecognizeBoard(img, br, p)
+	info := sfen.Inspect(board, cfg.checks)
+	r := newResult(board, conf, info, cfg)
+
+	if fatal := info.Filter(cfg.fatal); len(fatal) > 0 {
+		return r, &BoardError{Board: board, Violations: fatal}
+	}
+	return r, nil
 }
 
 // detectBoardRegion は認識に使う盤面領域とその信頼度を返す。
