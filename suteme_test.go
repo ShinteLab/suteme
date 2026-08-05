@@ -22,6 +22,7 @@ const (
 	testCell   = 40  // 1マスの辺
 	testBoardV = 200 // 盤面の明るさ
 	testPieceV = 30  // 駒（暗いブロブ）の明るさ
+	testLineV  = 90  // グリッド線の明るさ
 )
 
 // testPiece は合成画像に置く駒。gote=true なら駒を180度回転して置く
@@ -31,15 +32,29 @@ type testPiece struct {
 	gote     bool
 }
 
-// makeBoardImage は 9x9 の合成盤面画像を作る。
-// 盤面は一様なので DetectBoard は失敗し、detectBoardRegion の
-// 「画像全体が盤面」フォールバックが使われる。
+// makeBoardImage は 9x9 の合成盤面画像を作る。画像全体がちょうど盤面で、
+// 外枠も含めた 10x10 のグリッド線を引く。
+//
+// **グリッド線は省略できない。** ValidateBoard はマス割りが実際の格子線に
+// 乗っているかで信頼度を出すので、線の無い一様な板は「盤面ではない」と
+// 判定されて detectBoardRegion が nil を返す。実盤の画像には必ず線がある。
 func makeBoardImage(pieces []testPiece) *image.Gray {
 	size := testCell * 9
 	img := image.NewGray(image.Rect(0, 0, size, size))
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
 			img.SetGray(x, y, color.Gray{Y: testBoardV})
+		}
+	}
+	// グリッド線。右端・下端の線は画像内に収まるよう 1px 内側に引く
+	for i := 0; i <= 9; i++ {
+		p := i * testCell
+		if p >= size {
+			p = size - 1
+		}
+		for j := 0; j < size; j++ {
+			img.SetGray(p, j, color.Gray{Y: testLineV})
+			img.SetGray(j, p, color.Gray{Y: testLineV})
 		}
 	}
 	// 駒を模した台形。尖り側(apex)が狭く底辺側(base)が広い五角形の代用で、
