@@ -85,10 +85,13 @@ var (
 	mu       sync.RWMutex
 	model    *suteme.Model
 	knn      *suteme.KNN
-	// v2: 入力の標準化・後手の回転正規化・空マス除外に対応した形式
-	// （旧 training_data.json は空マスが歩として混入しているため使用しない）
-	dataFile  = "training_data_v2.json"
-	modelFile = "model_v2.json"
+	// v3: リサイズを最近傍法から面積平均に変えたため入力ベクトルの表現が
+	// v2 と食い違う。MergeSamples は入力の内容でマージするので、同じファイルに
+	// 混ぜると古い表現のサンプルが消えずに残り続ける。
+	// （v2 は入力の標準化・後手の回転正規化・空マス除外に対応した形式。
+	//   旧 training_data.json は空マスが歩として混入しているため使用しない）
+	dataFile  = suteme.DefaultDataFile
+	modelFile = suteme.DefaultModelFile
 	modelLock sync.RWMutex
 	historyMu sync.RWMutex
 )
@@ -567,9 +570,22 @@ func countEmpty(samples []suteme.TrainingSample) int {
 	return n
 }
 
+// shiftAugment は学習サンプルを作るときに盤面座標をずらす量(px)の組。
+//
+// **手でラベル付けした座標「ちょうど」でしか学習しないと k-NN がその
+// クロップを丸暗記する。** DetectBoard は手動座標に対して 0.1〜0.5マス
+// （実測で数px）ずれるので、推論時のクロップは学習時と必ず食い違う。
+// 実測では、盤面座標を 1px ずらすだけで誤認識マスが 891 中 22 → 57 に増えた。
+// ずらしたクロップも学習に入れることで、その食い違いを吸収する。
+//
+// 縦横の全組み合わせ（9通り）ではなく上下左右+原点の5通りにしてある。
+// k-NN の推論コストはサンプル数に比例するため。
+var shiftAugment = [][2]int{{0, 0}, {-2, -2}, {2, -2}, {-2, 2}, {2, 2}}
+
 // samplesFromHistory は保存済み局面（画像 + 盤面座標 + 正解SFEN）から
 // 学習サンプルを作る。空マスも ClassEmpty として含める
 // （グリッド線・木目で駒に見える空マスを被覆率では分離できないため）。
+// 盤面座標を shiftAugment の分だけずらしたクロップも一緒に作る。
 func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 	f, err := os.Open(filepath.Join(dataDir, e.ID+".png"))
 	if err != nil {
@@ -581,16 +597,22 @@ func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 		return nil, fmt.Errorf("画像のデコードに失敗しました")
 	}
 
-	var br *suteme.BoardRegion
+	// 盤面座標。shiftAugment でずらした版も作る
+	var regions []*suteme.BoardRegion
 	if e.BoardBounds != nil {
 		b := e.BoardBounds
-		br = suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2)
+		for _, s := range shiftAugment {
+			regions = append(regions, suteme.BoardRegionFromRect(
+				b.X1+s[0], b.Y1+s[1], b.X2+s[0], b.Y2+s[1]))
+		}
 	} else {
-		// 盤面座標を持たない古いエントリは自動検出に頼る
-		br = suteme.DetectBoard(img)
+		// 盤面座標を持たない古いエントリは自動検出に頼る。
+		// 検出座標自体が信用しきれないのでずらした版は作らない
+		br := suteme.DetectBoard(img)
 		if br == nil || suteme.ValidateBoard(img, br) < 0.5 {
 			return nil, fmt.Errorf("盤面座標が保存されておらず、自動検出もできません")
 		}
+		regions = []*suteme.BoardRegion{br}
 	}
 
 	fields := strings.Fields(e.SFEN)
@@ -598,12 +620,28 @@ func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 		return nil, fmt.Errorf("SFEN が空です")
 	}
 
+	var samples []suteme.TrainingSample
+	for _, br := range regions {
+		s, err := samplesFromRegion(img, br, fields[0])
+		if err != nil {
+			return nil, err
+		}
+		samples = append(samples, s...)
+	}
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("駒が1枚も取れませんでした")
+	}
+	return samples, nil
+}
+
+// samplesFromRegion は1つの盤面座標から81マス分の学習サンプルを作る
+func samplesFromRegion(img image.Image, br *suteme.BoardRegion, board string) ([]suteme.TrainingSample, error) {
 	// SFEN の解析は core/sfen に委譲する（駒文字の対応表を持たない）。
 	// ParseBoard は駒のあるマスだけを呼ぶので、埋まったマスを記録しておき
 	// 残りを空マスとして補う
 	var samples []suteme.TrainingSample
 	var occupied [9][9]bool
-	err = sfen.ParseBoard(fields[0], func(rank, file, base int, black, promoted bool) {
+	err := sfen.ParseBoard(board, func(rank, file, base int, black, promoted bool) {
 		if rank < 0 || rank >= 9 || file < 0 || file >= 9 {
 			return
 		}
@@ -634,9 +672,6 @@ func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("SFEN の解析に失敗しました")
-	}
-	if len(samples) == 0 {
-		return nil, fmt.Errorf("駒が1枚も取れませんでした")
 	}
 
 	// 空マス。向きが無いので回転はしない

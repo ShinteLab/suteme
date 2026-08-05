@@ -11,10 +11,15 @@ import (
 	"github.com/ShinteLab/core/sfen"
 )
 
-// 既定の認識器ファイル名（training パッケージが書き出すものと同じ）
+// 既定の認識器ファイル名（training パッケージが書き出すものと同じ）。
+//
+// **入力ベクトルの作り方（CellToInput / resizeGray）を変えたら版を上げること。**
+// MergeSamples は入力の内容でマージするので、表現の違うサンプルを同じファイルに
+// 混ぜると古いものが消えずに残り続ける。
+// v3: リサイズを最近傍法から面積平均に変更（v2 は標準化・回転正規化・空クラス対応）
 const (
-	DefaultDataFile  = "training_data_v2.json"
-	DefaultModelFile = "model_v2.json"
+	DefaultDataFile  = "training_data_v3.json"
+	DefaultModelFile = "model_v3.json"
 )
 
 // minBoardConfidence は盤面領域を採用する最低信頼度（ValidateBoard の値）。

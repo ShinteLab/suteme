@@ -234,26 +234,46 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 	return sfen.FormatBoard(func(rank, file int) string { return grid[rank][file] })
 }
 
-// resizeGray は画像を指定サイズのグレースケールにリサイズする（最近傍法）
+// resizeGray は画像を指定サイズのグレースケールにリサイズする（面積平均）。
+//
+// **最近傍法にしてはいけない。** 1マスは 40〜115px あり、これを 24x24 に
+// 落とすので最近傍だと 3〜5px おきの点をつまむ形になる。盤面座標が 1px ずれると
+// つまむ点が総入れ替えになり、576次元ベクトルが別物になってしまう。
+// 実測で、盤面座標を 1px ずらすだけで誤認識マスが 22 → 112（全891マス）に
+// 増えていた。面積平均なら 1px のずれは各画素の重みがわずかに動くだけになる。
 func resizeGray(src image.Image, w, h int) *image.Gray {
 	srcBounds := src.Bounds()
 	srcW := srcBounds.Dx()
 	srcH := srcBounds.Dy()
 
 	dst := image.NewGray(image.Rect(0, 0, w, h))
+	if srcW <= 0 || srcH <= 0 {
+		return dst
+	}
 	for y := 0; y < h; y++ {
+		y0 := srcBounds.Min.Y + y*srcH/h
+		y1 := srcBounds.Min.Y + (y+1)*srcH/h
+		if y1 <= y0 {
+			y1 = y0 + 1
+		}
 		for x := 0; x < w; x++ {
-			srcX := srcBounds.Min.X + int(math.Round(float64(x)*float64(srcW)/float64(w)))
-			srcY := srcBounds.Min.Y + int(math.Round(float64(y)*float64(srcH)/float64(h)))
-			if srcX >= srcBounds.Max.X {
-				srcX = srcBounds.Max.X - 1
+			x0 := srcBounds.Min.X + x*srcW/w
+			x1 := srcBounds.Min.X + (x+1)*srcW/w
+			if x1 <= x0 {
+				x1 = x0 + 1
 			}
-			if srcY >= srcBounds.Max.Y {
-				srcY = srcBounds.Max.Y - 1
+			sum, n := 0, 0
+			for sy := y0; sy < y1; sy++ {
+				for sx := x0; sx < x1; sx++ {
+					r, g, b, _ := src.At(sx, sy).RGBA()
+					sum += int((19595*r + 38470*g + 7471*b + 1<<15) >> 24)
+					n++
+				}
 			}
-			r, g, b, _ := src.At(srcX, srcY).RGBA()
-			gray := uint8((19595*r + 38470*g + 7471*b + 1<<15) >> 24)
-			dst.SetGray(x, y, color.Gray{Y: gray})
+			if n == 0 {
+				continue
+			}
+			dst.SetGray(x, y, color.Gray{Y: uint8(sum / n)})
 		}
 	}
 	return dst
