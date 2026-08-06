@@ -51,22 +51,18 @@ const (
 // 外接範囲を基準にするので、盤面領域が数 px ずれてマスと駒の位置が
 // 合っていなくても結果が変わらない。
 //
-// **空判定はマスごとの局所地色、向き判定は渡された盤全体の地色を使う。**
-// 理由は下の boardColorFor / cellMask の注記を参照。
+// **基準色はマスごとの局所地色（`cellBoardColor`）、許容幅は引数の盤全体の
+// 地色から決める**（`newCellMaskSign`）。向き判定のマスクはさらに
+// 「地色より暗い画素だけ」「明るい画素だけ」の 2 通りを作り、
+// 被覆率の大きいほうを採る（`pieceSideOf`）。
 func ClassifyCellWith(cell image.Image, boardColor uint8) CellCategory {
 	local := cellBoardColor(cell)
-	m := newCellMask(cell, local)
+	m := newCellMaskSign(cell, local, boardColor, signBoth)
 	if m == nil || m.cover < emptyCoverMax {
 		return CellEmpty
 	}
-	if local != boardColor {
-		// 向きは盤全体の地色で取り直す。局所地色だと駒が広く覆うマスで
-		// 中央値が駒の色に引っ張られ、駒の一部が「地色と同じ」に落ちて
-		// 幅プロファイルが壊れる
-		m = newCellMask(cell, boardColor)
-		if m == nil {
-			return CellEmpty
-		}
+	if m = pieceSideOf(cell, local, boardColor); m == nil {
+		return CellEmpty
 	}
 	top, bottom, ok := m.span()
 	if !ok {
@@ -78,6 +74,31 @@ func ClassifyCellWith(cell image.Image, boardColor uint8) CellCategory {
 		return CellPieceUp
 	}
 	return CellPieceDown
+}
+
+// pieceSideOf は向き判定に使うマスクを返す。
+//
+// **駒の五角形の輪郭がどちら側に出るかは盤によって逆になる。**
+// 木目の明るい盤（普通のゲーム画面）では駒のほうが地色より明るく、
+// 背景に絵や光源を敷いた盤では駒のほうが暗い。両側をまとめてマスク化すると
+// 五角形の輪郭に、反対側にしか出ないもの（墨の字画・駒の影・盤の模様）が
+// 重なって幅プロファイルが濁る。
+//
+// どちら側かは「被覆率の大きいほう＝駒の本体が写っているほう」で決まる。
+// 反対側は字画と影だけなので被覆率がはっきり小さい（実測で盤ごとに
+// 0.30〜0.37 対 0.04〜0.16 と 2 倍以上開く）。
+func pieceSideOf(cell image.Image, center, diffBase uint8) *cellMask {
+	dark := newCellMaskSign(cell, center, diffBase, signDark)
+	bright := newCellMaskSign(cell, center, diffBase, signBright)
+	switch {
+	case dark == nil:
+		return bright
+	case bright == nil:
+		return dark
+	case dark.cover > bright.cover:
+		return dark
+	}
+	return bright
 }
 
 // ClassifyCell はマス画像を 空/先手/後手 に分類する。
@@ -160,8 +181,23 @@ type cellMask struct {
 	cover  float64 // 有効領域に対する被覆率
 }
 
-// newCellMask は分類用のマスクを作る。判定できない小さすぎるマスでは nil
-func newCellMask(cell image.Image, boardColor uint8) *cellMask {
+// maskSign はマスクに含める画素の向き（地色より暗い/明るい）
+type maskSign int
+
+const (
+	signBoth   maskSign = 0 // 地色と異なる画素すべて
+	signDark   maskSign = 1 // 地色より暗い画素だけ
+	signBright maskSign = 2 // 地色より明るい画素だけ
+)
+
+// newCellMaskSign は center を基準色、diffBase を許容幅の基準にして
+// 分類用のマスクを作る。判定できない小さすぎるマスでは nil。
+//
+// **中心は局所地色、幅は盤全体の地色から決める。** グラデーションのある盤では
+// マスごとに基準色が動くが、許容幅までマスごとに動かすと暗いマスだけ帯が狭くなり
+// 木目を拾う。幅は盤の性質なので盤全体の地色から一度決めるほうが素直
+// （実測でも局所から決めるより良い。CLAUDE.md の「駒分類」の節）。
+func newCellMaskSign(cell image.Image, center, diffBase uint8, sign maskSign) *cellMask {
 	if cell == nil {
 		return nil
 	}
@@ -172,19 +208,28 @@ func newCellMask(cell image.Image, boardColor uint8) *cellMask {
 		return nil
 	}
 
-	diff := float64(boardColor) * pieceDiffFrac
+	diff := float64(diffBase) * pieceDiffFrac
 	if diff < pieceDiffMin {
 		diff = pieceDiffMin
 	}
-	lo := float64(boardColor) - diff
-	hi := float64(boardColor) + diff
+	lo := float64(center) - diff
+	hi := float64(center) + diff
 
 	marked := make([]bool, w*h)
 	colCount := make([]int, w)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			v := float64(gray.GrayAt(b.Min.X+x, b.Min.Y+y).Y)
-			if v < lo || v > hi {
+			var on bool
+			switch sign {
+			case signDark:
+				on = v < lo
+			case signBright:
+				on = v > hi
+			default:
+				on = v < lo || v > hi
+			}
+			if on {
 				marked[y*w+x] = true
 				colCount[x]++
 			}
