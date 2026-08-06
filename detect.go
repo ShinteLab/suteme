@@ -295,6 +295,37 @@ func findPeaks(signal []int, minDist int) []int {
 	return peaks
 }
 
+// pickWithSpacing は投影のピーク列から等間隔 count 本の並びを選ぶ。
+//
+// **候補の順位は「何本合ったか」ではなく「どれだけぴったり合ったか」で決める。**
+// 許容ずれは間隔の 30% と広いので、ピークが密な画像では**でたらめな間隔でも
+// 10本すべてが何かに当たる**。本数を先に見ると、この水増しした並びが
+// 「9本だが誤差ほぼ 0」の本物の格子に勝ってしまう。実測（`70f42d2474d2c171`）:
+// 本物は間隔 75.0・平均ずれ 0.04マス・強度合計 519771 なのに、
+// 間隔 60.2（平均ずれ 0.14マス・合計 500913）に本数で負けて、
+// **盤の 1/4 が信頼度 1.00 で返っていた**。
+//
+// そこで各ピークの強度に「ずれ」で決まる重み（`pickTaper`）を掛けて足す。
+// ぴったり合ったピークほど満額に近くなるので、**本数を稼ぐだけの並びは自然に沈む**。
+// pickTaper はピークの強度を「期待位置からのずれ」で割り引く強さ。
+// 重みは 1 - pickTaper*(ずれ/許容) で、0 なら割り引かない（＝強度の合計そのまま）、
+// 1 なら許容の端で 0 になる。
+//
+// 実測（保存済み33局面・手動座標との比較）:
+//
+//	taper   0.5マス以内   黙って通した誤検出
+//	0.00     31/33          1
+//	**0.25**  **32/33**      **0**
+//	0.50     31/33          2
+//	1.00     29/33          4
+//
+// **強くしすぎると1マスずれが増える。** 盤が画像いっぱいに写っていると、
+// 端の1本を捨てて9本にぴったり合わせた並びのほうが 10本の並びより高くなり、
+// 格子の周期は正しいまま窓が1マス横に滑る。この滑りは周期が正しいので
+// `axisAlignment` でも見分けられず（格子線には乗っている）、
+// **信頼度 1.00 のまま間違える**という半周期より質の悪い壊れ方になる。
+const pickTaper = 0.25
+
 func pickWithSpacing(peaks []int, signal []int, count int, targetSpacing float64, maxSpacing float64) ([]int, float64) {
 	n := len(peaks)
 	minFound := count * 6 / 10
@@ -305,8 +336,7 @@ func pickWithSpacing(peaks []int, signal []int, count int, targetSpacing float64
 		return nil, 0
 	}
 
-	bestFound := 0
-	bestScore := 0
+	bestScore := 0.0
 	bestSpacing := 0.0
 	bestOrigin := 0.0
 	bestSlots := make([]int, count)
@@ -333,7 +363,7 @@ func pickWithSpacing(peaks []int, signal []int, count int, targetSpacing float64
 				tolerance := spacing * 0.3
 				origin := float64(peaks[i])
 				found := 0
-				score := 0
+				score := 0.0
 				slots := make([]int, count)
 
 				for k := 0; k < count; k++ {
@@ -350,7 +380,7 @@ func pickWithSpacing(peaks []int, signal []int, count int, targetSpacing float64
 					if bestIdx >= 0 {
 						slots[k] = peaks[bestIdx]
 						found++
-						score += signal[peaks[bestIdx]]
+						score += float64(signal[peaks[bestIdx]]) * (1 - pickTaper*bestDist/tolerance)
 					} else {
 						slots[k] = -1
 					}
@@ -359,8 +389,7 @@ func pickWithSpacing(peaks []int, signal []int, count int, targetSpacing float64
 				if found < minFound {
 					continue
 				}
-				if found > bestFound || (found == bestFound && score > bestScore) {
-					bestFound = found
+				if score > bestScore {
 					bestScore = score
 					bestSpacing = spacing
 					bestOrigin = origin
@@ -370,7 +399,7 @@ func pickWithSpacing(peaks []int, signal []int, count int, targetSpacing float64
 		}
 	}
 
-	if bestFound < minFound {
+	if bestSpacing == 0 {
 		return nil, 0
 	}
 

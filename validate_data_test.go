@@ -62,6 +62,13 @@ func TestValidateBoardDiscriminates(t *testing.T) {
 			{"横半マスずれ", BoardRegionFromRect(x1+cw/2, y1, x2+cw/2, y2)},
 			{"縦半マスずれ", BoardRegionFromRect(x1, y1+ch/2, x2, y2+ch/2)},
 			{"上下左右半マス縮小", BoardRegionFromRect(x1+cw/2, y1+ch/2, x2-cw/2, y2-ch/2)},
+			// 周期が半分（マス2つぶんを1マスとみなす）。格子線に1本おきに
+			// 乗るので**内側の色の均一性では区別が付かず**、盤の 1/4 が
+			// 信頼度 1.00 で返っていた。ikkyoku のガイド枠の自動フィットが
+			// これを掴んで枠を潰す（axisAlignment のパリティ参照）
+			{"半周期(左上)", BoardRegionFromRect(x1, y1, x1+cw*9/2, y1+ch*9/2)},
+			{"半周期(中央)", BoardRegionFromRect(x1+cw*9/4, y1+ch*9/4, x1+cw*27/4, y1+ch*27/4)},
+			{"半周期(右下)", BoardRegionFromRect(x2-cw*9/2, y2-ch*9/2, x2, y2)},
 		}
 		got := make([]float64, len(bad))
 		for i, b := range bad {
@@ -71,14 +78,18 @@ func TestValidateBoardDiscriminates(t *testing.T) {
 			}
 		}
 
-		// 正解が採用される画像では、半マスずれは棄却されなければならない。
+		// 正解が採用される画像では、歪めた領域は棄却されなければならない。
 		// 正解自体が閾値に届かない画像（後述）では比較する意味が無い
-		if want >= minBoardConfidence && got[0] >= minBoardConfidence {
-			t.Errorf("%s: 横半マスずれが棄却されない conf=%.2f", e.ID, got[0])
+		if want >= minBoardConfidence {
+			for i, b := range bad {
+				if got[i] >= minBoardConfidence {
+					t.Errorf("%s: %s が棄却されない conf=%.2f", e.ID, b.name, got[i])
+				}
+			}
 		}
 
-		t.Logf("%s: 正解=%.2f 横半マス=%.2f 縦半マス=%.2f 縮小=%.2f",
-			e.ID, want, got[0], got[1], got[2])
+		t.Logf("%s: 正解=%.2f 横半マス=%.2f 縦半マス=%.2f 縮小=%.2f 半周期=%.2f/%.2f/%.2f",
+			e.ID, want, got[0], got[1], got[2], got[3], got[4], got[5])
 	}
 	if n == 0 {
 		t.Skip("画像が無いのでスキップ")

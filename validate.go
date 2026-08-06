@@ -2,6 +2,7 @@ package suteme
 
 import (
 	"image"
+	"math"
 	"sort"
 )
 
@@ -67,15 +68,16 @@ func cellUniformity(img image.Image, br *BoardRegion) float64 {
 
 // gridAlignFull は gridAlignment の値をこれ以上なら整合度 1.0 とみなす基準。
 //
-// 実測（保存済み15局面・悪いほうの軸）: 正解座標 +0.38〜+0.97 に対し、
-// 半マスずらすと -1.00〜-0.41、周期を 8/9 に縮めると -0.26〜+0.19。
-// 0.60 を上限に線形にすると、既定の棄却しきい値 minBoardConfidence(0.5) が
-// gridAlignment = 0.30 に対応する。歪みの最大 +0.19 と正解の最小 +0.38 の
-// ちょうど間なので、正解を全件通しつつ壊れた検出を落とせる。
+// 実測（保存済み33局面・悪いほうの軸）: 正解座標 +0.31〜+0.97 に対し、
+// 半マスずらすと -1.00〜-0.41、周期を半分にすると -0.99〜+0.01。
+// 0.50 を上限に線形にすると、既定の棄却しきい値 minBoardConfidence(0.5) が
+// gridAlignment = 0.25 に対応する。歪みの最大 +0.01 と正解の最小 +0.31 の
+// 間なので、正解を全件通しつつ壊れた検出を落とせる。
 //
-// **lineProjections を変えたらこの値も測り直すこと。** 合計投影だった頃は
-// 正解が +0.13〜+0.56 で、0.20 が上限として妥当だった。
-const gridAlignFull = 0.60
+// **lineProjections や axisAlignment を変えたらこの値も測り直すこと。**
+// 合計投影だった頃は正解が +0.13〜+0.56 で 0.20 が妥当、
+// on をパリティで割る前（10本の平均）は正解 +0.38〜 で 0.60 が妥当だった。
+const gridAlignFull = 0.50
 
 // gridConfidence は gridAlignment を 0.0-1.0 に写す
 func gridConfidence(img image.Image, br *BoardRegion) float64 {
@@ -219,7 +221,24 @@ const gridPeakTol = 3
 var offFractions = []float64{0.25, 0.5, 0.75}
 
 // axisAlignment は 1 軸分の整合度を返す。
-// origin から span 間隔で並ぶ10本の境界線と、線が無いはずの位置を比べる
+// origin から span 間隔で並ぶ10本の境界線と、線が無いはずの位置を比べる。
+//
+// **on は10本の平均ではなく、偶数番と奇数番の弱いほうを採る。**
+// 平均だと**周期が半分の当たり方**を弾けない。マス2つぶんを1マスとみなすと
+// 境界線が1本おきに本物の格子線に乗るので、乗っていない残り半分が
+// マスの内側でも on の平均は本物の半分ほどまでしか下がらず、
+// off（同じくマスの内側）を上回ったままになる。実測（保存済み33局面で
+// 盤の1/4を切り出したもの、悪いほうの軸）: **平均だと +0.94 まで出る**のに対し、
+// パリティの弱いほうなら最大 +0.01。正解座標のほうは +0.38〜+0.97 が
+// +0.31〜+0.97 とほぼ変わらないので、この一点で両者が分離する。
+//
+// 「1本おきに合っている」は本物の格子には起こらない（10本とも線に乗る）ので、
+// パリティで割っても正解側は失うものが無い、というのがこの測り方の根拠。
+//
+// **パリティごとに中央値を採るのは行き過ぎ**（「10本すべてが乗っている」を
+// もっと厳しく測ることになる）。off がほぼ 0 の画面（一様な背景に線が数本）で
+// 比が +1 に張り付く穴は塞がるが、格子線が薄い実盤の中継画像で正解座標が
+// **−0.33** まで落ちて使えなくなる（実測。CLAUDE.md「今後の課題」参照）。
 func axisAlignment(proj []float64, origin, span float64) float64 {
 	peak := func(pos float64) float64 {
 		best := 0.0
@@ -232,16 +251,20 @@ func axisAlignment(proj []float64, origin, span float64) float64 {
 		return best
 	}
 
-	on, off := 0.0, 0.0
+	even, odd, off := 0.0, 0.0, 0.0
 	for i := 0; i <= 9; i++ {
-		on += peak(origin + span*float64(i))
+		if i%2 == 0 {
+			even += peak(origin + span*float64(i))
+		} else {
+			odd += peak(origin + span*float64(i))
+		}
 	}
 	for i := 0; i < 9; i++ {
 		for _, fr := range offFractions {
 			off += peak(origin + span*(float64(i)+fr))
 		}
 	}
-	on /= 10
+	on := math.Min(even, odd) / 5
 	off /= float64(9 * len(offFractions))
 	if on+off == 0 {
 		return 0
