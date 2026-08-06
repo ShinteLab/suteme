@@ -340,6 +340,9 @@ const PIECES = [
 ];
 
 let currentSessionId = null;
+// 現在の画面が対応する履歴 ID。履歴からの再入力・一度保存した後はこれが入り、
+// 「保存」は新規登録ではなくその履歴の上書きになる（直すたびに増えないように）
+let currentHistoryId = null;
 let currentCell = null;
 let cellCategories = null;
 let boardLabels = null; // 9x9 のラベル状態（SFEN生成用）。null=未入力, 'none'=空, それ以外=SFEN駒文字
@@ -466,6 +469,7 @@ async function analyze(file) {
   // 前の画像の入力を持ち越さない。SFEN 欄が残っていると次の画像の
   // ラベリング中も古い局面が画面に居座って紛らわしい
   document.getElementById('sfen-input').value = '';
+  currentHistoryId = null; // 履歴からの再入力なら、この後で呼び出し側が入れ直す
   resetSaveButton();
   document.getElementById('loading').classList.add('active');
   document.getElementById('pipeline').style.display = 'none';
@@ -786,11 +790,16 @@ function applyLabel(r, c, pieceId, displayHtml, bgColor) {
   }
 }
 
+// 上書きになるのか新規登録になるのかはボタンの文言で分かるようにする
+function saveButtonLabel() {
+  return currentHistoryId ? '上書き保存' : '保存';
+}
+
 function enableSaveButton() {
   const btn = document.getElementById('btn-save-session');
   btn.disabled = false;
   btn.style.opacity = '1';
-  btn.textContent = '保存';
+  btn.textContent = saveButtonLabel();
 }
 
 // 新しい画像を読んだときは未保存状態に戻す（「保存済」のまま居残らせない）
@@ -798,7 +807,7 @@ function resetSaveButton() {
   const btn = document.getElementById('btn-save-session');
   btn.disabled = true;
   btn.style.opacity = '0.4';
-  btn.textContent = '保存';
+  btn.textContent = saveButtonLabel();
 }
 
 // boardLabels から SFEN 盤面部分を生成する
@@ -855,6 +864,8 @@ async function refreshHistory() {
              title="${e.sfen}">${e.sfen}</div>
       </div>
       <span style="font-size:11px;color:#4cc9f0;white-space:nowrap">再入力 ›</span>
+      <button class="hist-del" data-id="${e.id}" title="この局面を削除する"
+        style="margin-left:8px;font-size:11px;background:none;border:1px solid #6a2d3a;color:#ff8080;padding:2px 8px;border-radius:3px;cursor:pointer">削除</button>
     </div>`;
   }).join('');
   document.getElementById('hist-select-all').checked = false;
@@ -938,6 +949,13 @@ document.getElementById('history-list').addEventListener('click', async e => {
     updateTrainHistoryButton();
     return;
   }
+  // 削除は行を開く操作より先に見る（行クリックの再入力に流さない）
+  const del = e.target.closest('.hist-del');
+  if (del) {
+    e.stopPropagation();
+    await deleteHistory(del.dataset.id);
+    return;
+  }
   const btn = e.target.closest('.hist-row');
   if (!btn) return;
   const id = btn.dataset.id;
@@ -951,6 +969,9 @@ document.getElementById('history-list').addEventListener('click', async e => {
   const file = new File([blob], id + '.png', { type: 'image/png' });
   // analyze() が SFEN 欄をクリアするので、復元は analyze の後に行う
   await analyze(file);
+  // 再入力なので、保存は新規登録ではなくこの履歴の上書きにする
+  currentHistoryId = id;
+  resetSaveButton();
 
   // 保存した盤面座標を復元
   if (bounds && currentSessionId) {
@@ -977,6 +998,23 @@ document.getElementById('history-list').addEventListener('click', async e => {
   switchTab('analyze');
 });
 
+// 履歴の削除（エントリと保存画像の両方をサーバから消す）。
+// 学習データ（training_data_v3.json）に取り込み済みの分は消えないので、
+// 誤りを取り除きたい場合は削除してから学習をやり直す
+async function deleteHistory(id) {
+  if (!confirm('この局面を履歴から削除します。画像も消えます。よろしいですか？')) return;
+  const res = await fetch('/api/history/' + id, { method: 'DELETE' });
+  if (!res.ok) { alert('削除に失敗しました: ' + (await res.text())); return; }
+  processedHistory.delete(id);
+  if (currentHistoryId === id) {
+    // 上書き先が無くなったので、次の保存は新規登録に戻す
+    currentHistoryId = null;
+    const btn = document.getElementById('btn-save-session');
+    if (!btn.disabled) btn.textContent = saveButtonLabel();
+  }
+  await refreshHistory();
+}
+
 // 「保存」は画面のラベル入力（boardLabels）だけを保存する。
 // SFEN 欄はあくまで一括入力の手段であって保存の入力源にはしない
 // ―― 入力源にすると、貼り付けただけで「SFENから入力」を押していない場合や
@@ -1000,16 +1038,20 @@ async function saveSession() {
   const res = await fetch('/api/savesession', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session: currentSessionId, sfen }),
+    body: JSON.stringify({ session: currentSessionId, sfen, history_id: currentHistoryId || '' }),
   });
   const data = await res.json();
   if (data.status === 'ok') {
-    btn.textContent = '保存済';
+    // 以後の保存も同じ履歴を上書きする（直すたびに別データが増えないように）
+    currentHistoryId = data.id;
+    btn.textContent = data.overwrote ? '上書き済' : '保存済';
     btn.disabled = true;
     btn.style.opacity = '0.4';
     // 何を保存したのかを盤と文字列で確認できるようにする
     const sfenEl = document.getElementById('sfen-output');
-    let note = '<span style="font-size:12px;color:#74c69d">履歴タブで選択すると、この局面を学習に使えます</span>';
+    let note = data.overwrote
+      ? '<span style="font-size:12px;color:#74c69d">保存済みの局面を上書きしました（履歴は増えません）</span>'
+      : '<span style="font-size:12px;color:#74c69d">履歴タブで選択すると、この局面を学習に使えます</span>';
     if (filled.piece > 0) {
       note = '<span style="font-size:12px;color:#f0a030">未入力だった駒 ' + filled.piece +
         'マスは推論候補で埋めました</span><br>' + note;
@@ -1019,7 +1061,7 @@ async function saveSession() {
     updateBoardPreview(sfen);
     refreshHistory();
   } else {
-    btn.textContent = '保存';
+    btn.textContent = saveButtonLabel();
   }
 }
 
@@ -1095,10 +1137,7 @@ async function applyFromSFEN() {
   }
   document.getElementById('analyze-status').textContent = 'SFEN入力完了 — ' + labels.filter(l => l.piece !== 'none').length + '駒';
   updateBoardPreview(sfen); // 入力した SFEN を盤で表示
-  const saveBtn = document.getElementById('btn-save-session');
-  saveBtn.disabled = false;
-  saveBtn.style.opacity = '1';
-  saveBtn.textContent = '保存';
+  enableSaveButton();
 }
 
 // 画像を登録したら自動で走る認識。入力タブに読み取れた盤面を出すだけで、
