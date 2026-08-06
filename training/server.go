@@ -122,7 +122,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/images/", handleImage)
 	mux.HandleFunc("/api/cells/", handleCell)
 	mux.HandleFunc("/api/history", handleHistory)
-	mux.HandleFunc("/api/history/", handleHistoryImage)
+	mux.HandleFunc("/api/history/", handleHistoryItem)
 	mux.HandleFunc("/api/savesession", handleSaveSession)
 	mux.HandleFunc("/api/setboard", handleSetBoard)
 	mux.HandleFunc("/api/trainhistory", handleTrainHistory)
@@ -353,14 +353,18 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(h)
 }
 
-func handleHistoryImage(w http.ResponseWriter, r *http.Request) {
+// handleHistoryItem: /api/history/{id}/image で画像取得、
+// /api/history/{id} への DELETE で履歴（画像 + エントリ）を削除する
+func handleHistoryItem(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/history/")
 	id = strings.TrimSuffix(id, "/image")
-	for _, ch := range id {
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
-			http.NotFound(w, r)
-			return
-		}
+	if !validID(id) {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		handleHistoryDelete(w, r, id)
+		return
 	}
 	f, err := os.Open(filepath.Join(dataDir, id+".png"))
 	if err != nil {
@@ -369,8 +373,51 @@ func handleHistoryImage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "max-age=86400")
+	// 上書き保存で同じ URL の画像が差し替わるので、長期キャッシュにはしない
+	w.Header().Set("Cache-Control", "no-cache")
 	io.Copy(w, f)
+}
+
+// validID は履歴 ID（newID の 16 桁 hex）としてパスに使ってよい文字列かを返す。
+// ディレクトリを抜ける文字列で data/ 配下のファイルを触らせないための最低限の検査
+func validID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, ch := range id {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// handleHistoryDelete は履歴エントリと保存画像を削除する
+func handleHistoryDelete(w http.ResponseWriter, r *http.Request, id string) {
+	historyMu.Lock()
+	h := loadHistory()
+	found := false
+	kept := h.Entries[:0]
+	for _, e := range h.Entries {
+		if e.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if found {
+		h.Entries = kept
+		saveHistoryFile(h)
+		os.Remove(filepath.Join(dataDir, id+".png"))
+	}
+	historyMu.Unlock()
+
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": id})
 }
 
 func handleSaveSession(w http.ResponseWriter, r *http.Request) {
@@ -381,6 +428,9 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Session string `json:"session"`
 		SFEN    string `json:"sfen"`
+		// HistoryID があればその履歴を上書きする。保存し直すたびに
+		// 同じ画像の局面が増えないようにするため（空なら新規保存）
+		HistoryID string `json:"history_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -394,7 +444,23 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := newID()
+	// 上書き対象があるかを先に確かめる。履歴に無い ID（既に削除された等）は
+	// 黙って新規保存に倒す
+	id := ""
+	if validID(req.HistoryID) {
+		historyMu.RLock()
+		for _, e := range loadHistory().Entries {
+			if e.ID == req.HistoryID {
+				id = e.ID
+				break
+			}
+		}
+		historyMu.RUnlock()
+	}
+	overwrite := id != ""
+	if !overwrite {
+		id = newID()
+	}
 	os.MkdirAll(dataDir, 0755)
 	f, err := os.Create(filepath.Join(dataDir, id+".png"))
 	if err != nil {
@@ -415,18 +481,35 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	}
 	historyMu.Lock()
 	h := loadHistory()
-	h.Entries = append([]HistoryEntry{entry}, h.Entries...)
-	if len(h.Entries) > 100 {
-		for _, old := range h.Entries[100:] {
-			os.Remove(filepath.Join(dataDir, old.ID+".png"))
+	replaced := false
+	if overwrite {
+		for i := range h.Entries {
+			if h.Entries[i].ID == id {
+				// 一覧での位置は動かさない（直したものが先頭に飛ぶと追いにくい）
+				h.Entries[i] = entry
+				replaced = true
+				break
+			}
 		}
-		h.Entries = h.Entries[:100]
+	}
+	if !replaced {
+		h.Entries = append([]HistoryEntry{entry}, h.Entries...)
+		if len(h.Entries) > 100 {
+			for _, old := range h.Entries[100:] {
+				os.Remove(filepath.Join(dataDir, old.ID+".png"))
+			}
+			h.Entries = h.Entries[:100]
+		}
 	}
 	saveHistoryFile(h)
 	historyMu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": id})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"id":        id,
+		"overwrote": replaced,
+	})
 }
 
 // handleSetBoard: 手動指定の矩形で盤面を再設定する
