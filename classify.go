@@ -50,10 +50,23 @@ const (
 // 幅プロファイルの重心が駒の外接範囲の上下どちらに寄っているかで決める。
 // 外接範囲を基準にするので、盤面領域が数 px ずれてマスと駒の位置が
 // 合っていなくても結果が変わらない。
+//
+// **空判定はマスごとの局所地色、向き判定は渡された盤全体の地色を使う。**
+// 理由は下の boardColorFor / cellMask の注記を参照。
 func ClassifyCellWith(cell image.Image, boardColor uint8) CellCategory {
-	m := newCellMask(cell, boardColor)
+	local := cellBoardColor(cell)
+	m := newCellMask(cell, local)
 	if m == nil || m.cover < emptyCoverMax {
 		return CellEmpty
+	}
+	if local != boardColor {
+		// 向きは盤全体の地色で取り直す。局所地色だと駒が広く覆うマスで
+		// 中央値が駒の色に引っ張られ、駒の一部が「地色と同じ」に落ちて
+		// 幅プロファイルが壊れる
+		m = newCellMask(cell, boardColor)
+		if m == nil {
+			return CellEmpty
+		}
 	}
 	top, bottom, ok := m.span()
 	if !ok {
@@ -102,7 +115,16 @@ func BoardColor(img image.Image, br *BoardRegion) uint8 {
 
 // cellBoardColor はマス画像単体から盤の地色を推定する。
 // ExtractCell は cellPadding 分外側まで含むので、駒がマスを覆っていても
-// 地色の占める割合が中央値を取れる程度には残る
+// 地色の占める割合が中央値を取れる程度には残る。
+//
+// **空判定はこの局所地色を使う。盤にグラデーションのある画像では
+// 盤全体の中央値では空マスを拾えない。安易に戻さないこと。**
+// 実測（保存済み36局面）で、空マスの局所地色が盤の中で 65 も開く画像がある
+// （全体地色 187 に対し 156〜221）。pieceDiffFrac は ±12% なので許容帯は
+// 165〜209 にしかならず、**空マスの地色そのものが帯の外**に出て被覆率が
+// 0.2〜0.6 まで上がり、駒として扱われていた。誤りは明るさに沿って偏り、
+// 暗い側は 空→☖、明るい側は 空→☗ になる。
+// 空マスの誤りが 208 → 2 件、全体が 88.9% → 95.7% になった。
 func cellBoardColor(cell image.Image) uint8 {
 	if cell == nil {
 		return 0
