@@ -17,13 +17,68 @@ type BoardRegion struct {
 // 正方形とみなすと横方向に 8〜9% 広い盤を探すことになる。
 const boardAspect = 1.09
 
+// segSkipConfidence は画像全体での検出がこの信頼度に達したら
+// 線分による絞り込みを試さない基準。
+//
+// 盤だけを切り出した画像（保存済み 14 件中 11 件）は全体で 1.00 が出るので、
+// 候補を増やす意味が無いうえ、候補が同点で割り込む余地も与えたくない。
+const segSkipConfidence = 0.9
+
+// DetectBoard は画像から盤面領域を検出する。
+//
+// まず画像全体で検出し、信頼度が足りなければ **線分抽出で盤らしい x 範囲を
+// 絞ってから**同じ検出をやり直す（`segment.go`）。キャプチャは駒台まで含めて
+// 撮る想定なので、盤以外が写るのは例外ではなく常態であり、投影を全幅で取ると
+// 盤外の罫線に負ける。候補は ValidateBoard が最も高いものを採り、
+// 同点なら画像全体の結果を優先する。
 func DetectBoard(img image.Image) *BoardRegion {
 	gray := ConvertGray(img)
 	blurred := BoxBlur(gray, 2)
 	edges := Sobel(blurred)
 
-	bounds := img.Bounds()
+	best := detectBoardIn(edges, img.Bounds())
+	bestConf := ValidateBoard(img, best)
+	if bestConf >= segSkipConfidence {
+		return best
+	}
+
+	for _, roi := range boardROIs(blurred) {
+		cand := detectBoardIn(edges, roi)
+		if cand == nil {
+			continue
+		}
+		if !plausibleAspect(cand) {
+			continue
+		}
+		if conf := ValidateBoard(img, cand); conf > bestConf {
+			best, bestConf = cand, conf
+		}
+	}
+	return best
+}
+
+// aspectTolerance はマスの縦横比が boardAspect からずれてよい割合。
+// 保存済み局面の手動指定座標の実測が 1.045〜1.138（boardAspect の -4%〜+4%）なので
+// 余裕を持って ±20% とする
+const aspectTolerance = 0.2
+
+// plausibleAspect は候補のマスが将棋盤の縦横比に近いかを返す。
+// ROI を絞った先で盤以外（UI パネルなど）の格子が拾われたときに落とす
+func plausibleAspect(br *BoardRegion) bool {
+	if br == nil || br.Bounds.Dx() <= 0 || br.Bounds.Dy() <= 0 {
+		return false
+	}
+	a := (float64(br.Bounds.Dy()) / 9) / (float64(br.Bounds.Dx()) / 9)
+	return a >= boardAspect*(1-aspectTolerance) && a <= boardAspect*(1+aspectTolerance)
+}
+
+// detectBoardIn は指定範囲の中だけで盤面領域を検出する
+func detectBoardIn(edges *image.Gray, bounds image.Rectangle) *BoardRegion {
+	bounds = bounds.Intersect(edges.Bounds())
 	w, h := bounds.Dx(), bounds.Dy()
+	if w < 9*3 || h < 9*3 {
+		return nil
+	}
 
 	minDist := minInt(w, h) / 40
 	if minDist < 3 {

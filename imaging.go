@@ -80,6 +80,19 @@ func Rotate180(src image.Image) image.Image {
 	return dst
 }
 
+// transposeGray は縦横を入れ替えたグレースケール画像を返す。
+// 横線を探す処理（segment.go）をそのまま縦線に使うためのもの
+func transposeGray(src *image.Gray) *image.Gray {
+	b := src.Bounds()
+	dst := image.NewGray(image.Rect(0, 0, b.Dy(), b.Dx()))
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			dst.SetGray(y-b.Min.Y, x-b.Min.X, src.GrayAt(x, y))
+		}
+	}
+	return dst
+}
+
 func Sobel(src *image.Gray) *image.Gray {
 	bounds := src.Bounds()
 	dst := image.NewGray(bounds)

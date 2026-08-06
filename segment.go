@@ -1,0 +1,244 @@
+package suteme
+
+import (
+	"image"
+	"sort"
+)
+
+// 盤領域の絞り込み（線分抽出）
+//
+// **投影を画像の全幅で取ると、盤以外の横線が投影を支配する。** 実物の盤を撮った
+// 中継画像（`26e06136`）では対局時計バー・畳の横目・駒台・タイトルパネルの罫線が
+// 画像の全幅にわたって並ぶため、盤の格子線（画像の幅の半分しかない）は埋もれる。
+// 実測で DetectBoard は dx=+3.57マス と外していた。
+//
+// **手掛かりは幾何。盤の格子線は同じ x 範囲で始まり終わる。** 色・輝度・エッジ密度は
+// 盤と畳で分離しない（同じ木・同じ照明。実測で 32px ブロックの明るさ 6 対 5、
+// 彩度 9 対 8、エッジ密度 1〜3 対 1〜2）が、線の端点は盤の幅で揃う。
+// そこで横方向の線分を抜き出し、(左端, 右端) が近いものをまとめて
+// 「同じ幅で何本も並んでいる範囲」を盤の候補とする。
+//
+// **候補は複数出して ValidateBoard で選ぶ。盤以外の線のほうが本数が多いので
+// 最大クラスタを無条件に採ってはいけない。** ただしこの選択は候補が
+// **x 範囲で異なる**ので成立する。位相（全マスシフト）で異なる候補を
+// gridAlignment で選び直す試みは、整合度が全マスシフトに対して不変なため
+// 失敗している（CLAUDE.md「今後の課題」参照）。
+
+// segMinLenRatio は線分として拾う最小の長さ（画像幅に対する比）。
+// 盤が画像の 4 割弱しか占めない中継画像でも拾えるように小さめに取る
+const segMinLenRatio = 0.2
+
+// segGapTol は線分の途中で途切れてよい画素数。
+// 駒が格子線を隠す・木目で途切れる分を繋ぐ
+const segGapTol = 8
+
+// segEdgePercentile は水平エッジとみなす強さの分位。
+//
+// **絶対値のしきい値にしてはいけない。** 画像ごとにコントラストが違う。
+// 分位なら「上位 10% が線」という相対的な意味になる。
+const segEdgePercentile = 0.90
+
+// segMaxCandidates は返す候補の数。
+// 中継画像では盤（3〜5本）より画面枠（全幅・複数本）のほうが上位に来ることがある
+const segMaxCandidates = 3
+
+// segROIMargin は候補の x 範囲を左右に広げる割合。
+// クラスタは格子線の端であって外枠ではないので、少し余裕を持たせる
+const segROIMargin = 0.03
+
+// boardROIs は線分から盤らしい領域の候補を返す（良い順）。
+//
+// 横線の x 範囲と縦線の y 範囲をそれぞれクラスタにして組み合わせる。
+// **片方だけでは足りない。** 実測では x を絞ると横方向は合うようになるが、
+// 盤の上下に UI や駒台があると行の投影がそちらの罫線を拾って 1〜1.5マスずれる
+// （`b858741` / `baeac294`）。y も絞ると `b858741` が信頼度 1.00 で通る。
+func boardROIs(blurred *image.Gray) []image.Rectangle {
+	b := blurred.Bounds()
+	xs := segmentSpans(blurred, segMaxCandidates)
+	ys := segmentSpans(transposeGray(blurred), segMaxCandidates)
+
+	rois := make([]image.Rectangle, 0, len(xs)*(len(ys)+1)+len(ys))
+	for _, xr := range xs {
+		rois = append(rois, image.Rect(xr[0], b.Min.Y, xr[1], b.Max.Y))
+		for _, yr := range ys {
+			rois = append(rois, image.Rect(xr[0], yr[0], xr[1], yr[1]))
+		}
+	}
+	for _, yr := range ys {
+		rois = append(rois, image.Rect(b.Min.X, yr[0], b.Max.X, yr[1]))
+	}
+	return rois
+}
+
+// segmentSpans は横方向の線分の x 範囲をクラスタにして返す（良い順）。
+// 縦線に使うときは transposeGray した画像を渡す
+func segmentSpans(blurred *image.Gray, max int) [][2]int {
+	b := blurred.Bounds()
+	lines := horizontalLines(blurred)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	tol := b.Dx() / 50
+	if tol < 10 {
+		tol = 10
+	}
+
+	type cluster struct {
+		x1, x2 int
+		count  int
+	}
+	clusters := make([]cluster, 0, len(lines))
+	used := make([]bool, len(lines))
+	for i, l := range lines {
+		if used[i] {
+			continue
+		}
+		used[i] = true
+		c := cluster{x1: l.start, x2: l.end, count: 1}
+		for j := i + 1; j < len(lines); j++ {
+			if used[j] {
+				continue
+			}
+			if absInt(lines[j].start-l.start) <= tol && absInt(lines[j].end-l.end) <= tol {
+				used[j] = true
+				c.count++
+			}
+		}
+		clusters = append(clusters, c)
+	}
+
+	// 本数が多い順。同数なら幅の広いほうを先に見る
+	sort.SliceStable(clusters, func(i, j int) bool {
+		if clusters[i].count != clusters[j].count {
+			return clusters[i].count > clusters[j].count
+		}
+		return clusters[i].x2-clusters[i].x1 > clusters[j].x2-clusters[j].x1
+	})
+
+	spans := make([][2]int, 0, max)
+	for _, c := range clusters {
+		if len(spans) >= max {
+			break
+		}
+		// 1 本しか無い範囲は「同じ幅で並んでいる」の根拠にならない
+		if c.count < 2 {
+			continue
+		}
+		margin := int(float64(c.x2-c.x1) * segROIMargin)
+		x1 := maxInt(c.x1-margin, b.Min.X)
+		x2 := minInt(c.x2+margin+1, b.Max.X)
+		// 9 マスに割れない幅は候補にしない
+		if x2-x1 < 9*3 {
+			continue
+		}
+		spans = append(spans, [2]int{x1, x2})
+	}
+	return spans
+}
+
+// lineSegment は 1 本の横線。pos が y、start/end が x の範囲
+type lineSegment struct {
+	pos   int
+	start int
+	end   int
+}
+
+// horizontalLines は横方向に伸びる線分を返す。
+//
+// 縦方向の勾配 |gy| が強い画素を線の候補とし、行ごとに連続する範囲（run）を取る。
+// **上下 1px の揺れは許す**（線は完全な水平ではないし、ボケで太る）。
+// 近接した y の run は 1 本の線としてまとめる。
+func horizontalLines(blurred *image.Gray) []lineSegment {
+	b := blurred.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w < 3 || h < 3 {
+		return nil
+	}
+
+	gy := make([]int, w*h)
+	vals := make([]int, 0, w*h)
+	for y := 1; y < h-1; y++ {
+		for x := 1; x < w-1; x++ {
+			X, Y := x+b.Min.X, y+b.Min.Y
+			v := -int(blurred.GrayAt(X-1, Y-1).Y) - 2*int(blurred.GrayAt(X, Y-1).Y) - int(blurred.GrayAt(X+1, Y-1).Y) +
+				int(blurred.GrayAt(X-1, Y+1).Y) + 2*int(blurred.GrayAt(X, Y+1).Y) + int(blurred.GrayAt(X+1, Y+1).Y)
+			if v < 0 {
+				v = -v
+			}
+			gy[y*w+x] = v
+			vals = append(vals, v)
+		}
+	}
+	if len(vals) == 0 {
+		return nil
+	}
+	sort.Ints(vals)
+	thresh := vals[int(float64(len(vals)-1)*segEdgePercentile)]
+	if thresh < 1 {
+		thresh = 1
+	}
+
+	minLen := int(float64(w) * segMinLenRatio)
+	if minLen < 10 {
+		minLen = 10
+	}
+
+	on := func(x, y int) bool {
+		for dy := -1; dy <= 1; dy++ {
+			if ny := y + dy; ny >= 0 && ny < h && gy[ny*w+x] >= thresh {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 行ごとに最長の run だけを採る（盤の格子線は行の中で最も長いはず）
+	rows := make([]lineSegment, 0, h)
+	for y := 1; y < h-1; y++ {
+		best := lineSegment{pos: y, start: 0, end: -1}
+		for x := 0; x < w; {
+			if !on(x, y) {
+				x++
+				continue
+			}
+			start, last := x, x
+			for x < w {
+				if on(x, y) {
+					last = x
+				} else if x-last > segGapTol {
+					break
+				}
+				x++
+			}
+			if last-start > best.end-best.start {
+				best = lineSegment{pos: y, start: start, end: last}
+			}
+		}
+		if best.end-best.start >= minLen {
+			rows = append(rows, lineSegment{pos: y, start: best.start + b.Min.X, end: best.end + b.Min.X})
+		}
+	}
+
+	// 線の太さ・ボケで同じ線が数行にわたって出るのでまとめる
+	tol := w / 50
+	if tol < 10 {
+		tol = 10
+	}
+	lines := make([]lineSegment, 0, len(rows))
+	for _, r := range rows {
+		if n := len(lines); n > 0 && r.pos-lines[n-1].pos <= segGapTol &&
+			absInt(r.start-lines[n-1].start) < tol && absInt(r.end-lines[n-1].end) < tol {
+			continue
+		}
+		lines = append(lines, r)
+	}
+	return lines
+}
+
+func absInt(a int) int {
+	if a < 0 {
+		return -a
+	}
+	return a
+}
