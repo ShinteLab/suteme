@@ -162,7 +162,7 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 			if cell == nil {
 				continue
 			}
-			cat := suteme.ClassifyCellWith(cell, bc)
+			cat, _ := suteme.ClassifyCellFor(cell, bc, m)
 			if cat == suteme.CellEmpty {
 				grid[row][col] = map[string]interface{}{"label": suteme.EmptyLabel, "confidence": 95}
 				continue
@@ -891,8 +891,8 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 			if cell == nil {
 				continue
 			}
-			// 空/向きは盤の地色を基準に判定
-			cat := suteme.ClassifyCellWith(cell, bc)
+			// 空/向きは盤の地色を基準に判定（低確信のマスは推論器との回転照合）
+			cat, _ := suteme.ClassifyCellFor(cell, bc, m)
 			if cat == suteme.CellEmpty {
 				cells[row][col] = map[string]interface{}{
 					"label": "none", "confidence": 95,

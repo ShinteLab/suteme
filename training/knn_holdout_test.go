@@ -83,7 +83,7 @@ func wantGrid(s string) (*[9][9]string, error) {
 
 // predictCell は RecognizeBoard と同じ判断でマスのラベルを返す
 func predictCell(cell image.Image, bc uint8, p suteme.Predictor) string {
-	cat := suteme.ClassifyCellWith(cell, bc)
+	cat, _ := suteme.ClassifyCellFor(cell, bc, p)
 	if cat == suteme.CellEmpty {
 		return suteme.EmptyLabel
 	}
@@ -125,6 +125,7 @@ func TestKNNHoldout(t *testing.T) {
 	var totalCells, okCells int
 	var emptyTotal, emptyAsPiece, emptyAsPieceByClassifier int
 	var pieceTotal, pieceOK, pieceAsEmpty, pieceAsEmptyByClassifier int
+	var orientFlips, orientFlipsByClassifier int
 
 	for _, e := range h.Entries {
 		if _, ok := byEntry[e.ID]; !ok {
@@ -200,6 +201,15 @@ func TestKNNHoldout(t *testing.T) {
 				if suteme.ClassifyCellWith(cell, bc) == suteme.CellEmpty {
 					pieceAsEmptyByClassifier++
 				}
+				// 向きの反転。回転照合（OrientMarginMin）が効いているかを見る
+				wantDown := strings.HasPrefix(want[r][c], "-")
+				if got != suteme.EmptyLabel && strings.HasPrefix(got, "-") != wantDown {
+					orientFlips++
+				}
+				if cat := suteme.ClassifyCellWith(cell, bc); cat != suteme.CellEmpty &&
+					(cat == suteme.CellPieceDown) != wantDown {
+					orientFlipsByClassifier++
+				}
 			}
 		}
 		t.Logf("%s: %d/81  空→駒 %d件（分類器のみなら %d件）",
@@ -215,6 +225,8 @@ func TestKNNHoldout(t *testing.T) {
 		emptyTotal, emptyAsPiece, emptyAsPieceByClassifier)
 	t.Logf("駒 %d マス中 空と誤り: %d件（分類器のみなら %d件）",
 		pieceTotal, pieceAsEmpty, pieceAsEmptyByClassifier)
+	t.Logf("駒 %d マス中 向きの反転: %d件（分類器のみなら %d件）",
+		pieceTotal, orientFlips, orientFlipsByClassifier)
 	t.Logf("駒 %d マス中 駒種まで正解: %d件 = %.1f%%",
 		pieceTotal, pieceOK, 100*float64(pieceOK)/float64(pieceTotal))
 }

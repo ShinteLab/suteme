@@ -75,8 +75,11 @@ type CellDebug struct {
 	Col int `json:"col"` // 0 = 左（9筋）
 	// Rect は切り出しに使った矩形（ExtractCell の 15% 拡張は含まない）。
 	Rect image.Rectangle `json:"rect"`
-	// Category は ClassifyCellWith の判定（0=空 / 1=先手 / 2=後手）。
+	// Category は最終的に採用した 空/先手/後手（0=空 / 1=先手 / 2=後手）。
 	Category CellCategory `json:"category"`
+	// OrientBy は向きの決め方。既定（分類器の幅プロファイル）では ""、
+	// 分類器の確信度が足りず回転照合で決め直したときだけ "match"。
+	OrientBy string `json:"orient_by,omitempty"`
 	// Class は Predictor が返した駒種クラス（推論しなかったら -1、
 	// ClassEmpty なら分類を覆して空にしたということ）。
 	Class int `json:"class"`

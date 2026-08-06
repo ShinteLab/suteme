@@ -56,24 +56,56 @@ const (
 // 「地色より暗い画素だけ」「明るい画素だけ」の 2 通りを作り、
 // 被覆率の大きいほうを採る（`pieceSideOf`）。
 func ClassifyCellWith(cell image.Image, boardColor uint8) CellCategory {
+	cat, _ := ClassifyCellDetail(cell, boardColor)
+	return cat
+}
+
+// ClassifyCellDetail は ClassifyCellWith の判定に加えて、向き判定の
+// **確信の度合い**（0.0〜1.0）を返す。空マスでは 0。
+//
+// 値は上下半分の幅の中央値の差を駒の最大幅で割ったもので、
+// 「五角形がどれだけはっきり片側に広がっているか」を表す。
+// 0 に近いほど上下が同じ幅＝向きが決まっていないということ。
+//
+// **向きを外したマスはこの値が小さいほうに偏る。** 実測（保存済み36局面 /
+// 1202 駒マス）で、値が 0.08 未満の 85 マスに反転 47 件のうち 23 件が入る。
+// 呼び出し側はこれを見て別の手掛かり（`recognize.go` の回転照合など）に
+// 切り替えられる。
+func ClassifyCellDetail(cell image.Image, boardColor uint8) (CellCategory, float64) {
 	local := cellBoardColor(cell)
 	m := newCellMaskSign(cell, local, boardColor, signBoth)
 	if m == nil || m.cover < emptyCoverMax {
-		return CellEmpty
+		return CellEmpty, 0
 	}
 	if m = pieceSideOf(cell, local, boardColor); m == nil {
-		return CellEmpty
+		return CellEmpty, 0
 	}
 	top, bottom, ok := m.span()
 	if !ok {
-		return CellEmpty
+		return CellEmpty, 0
 	}
 	// 駒の五角形は尖り側が狭く底辺側が広いので、駒の外接範囲を上下に割ると
 	// 底辺のある側の幅が広い。広いほうが下 = 底辺が下 = 先手
-	if m.lowerIsWider(top, bottom) {
-		return CellPieceUp
+	half := (top + bottom) / 2
+	lower, upper := m.medianExtent(half+1, bottom), m.medianExtent(top, half)
+	cat := CellPieceDown
+	if lower >= upper {
+		cat = CellPieceUp
 	}
-	return CellPieceDown
+	maxExtent := 0
+	for y := top; y <= bottom; y++ {
+		if m.extent[y] > maxExtent {
+			maxExtent = m.extent[y]
+		}
+	}
+	if maxExtent == 0 {
+		return cat, 0
+	}
+	diff := lower - upper
+	if diff < 0 {
+		diff = -diff
+	}
+	return cat, float64(diff) / float64(maxExtent)
 }
 
 // pieceSideOf は向き判定に使うマスクを返す。
@@ -310,17 +342,11 @@ func (m *cellMask) span() (top, bottom int, ok bool) {
 	return top, bottom, true
 }
 
-// lowerIsWider は駒の外接範囲を上下に割り、下半分のほうが広いかを返す。
+// medianExtent は lo..hi の行の幅の中央値を返す。
 //
-// 幅の**中央値**で比べる。平均や重心だと、グリッド線や隣のマスから
-// 入り込んだ駒の断片が 1〜2 行あるだけで結果が反転する。中央値なら
-// そうした外れ行を無視できる（実測で向き判定 87.3% → 93.5%）。
-func (m *cellMask) lowerIsWider(top, bottom int) bool {
-	half := (top + bottom) / 2
-	return m.medianExtent(half+1, bottom) >= m.medianExtent(top, half)
-}
-
-// medianExtent は lo..bottom の行の幅の中央値を返す
+// 向きは上下半分の幅の**中央値**で比べる（`ClassifyCellDetail`）。平均や重心だと、
+// グリッド線や隣のマスから入り込んだ駒の断片が 1〜2 行あるだけで結果が反転する。
+// 中央値ならそうした外れ行を無視できる（実測で向き判定 87.3% → 93.5%）。
 func (m *cellMask) medianExtent(lo, hi int) int {
 	if hi < lo {
 		return 0

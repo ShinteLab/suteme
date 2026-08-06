@@ -186,6 +186,52 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 	return bestClass, bestConf
 }
 
+// OrientMarginMin はこの値未満の確信度（`ClassifyCellDetail`）のとき、
+// 向きを回転照合で決め直す。
+//
+// **分類器の向き判定は上下半分の幅の差で決まるので、差が小さいマスだけが
+// 危ない。** 実測（保存済み36局面 / 1202 駒マス）で、この値を境に
+// 反転 47 件のうち 23 件が 85 マスに固まっている（その帯での誤り率 27%、
+// 全体は 3.9%）。帯を広げると回転照合の弱いところまで任せることになり、
+// 逆に悪化する:
+//
+//	しきい値 0.02 → 96.59% / 0.05 → 97.17% / **0.08 → 97.42%**
+//	          0.12 → 97.00% / 0.20 → 95.75%（＝回転照合だけの成績）
+//
+// 回転照合単体は 95.75% で分類器（96.09%）より悪いので、
+// **全面的に置き換えてはいけない。** 弱いところだけ補い合う関係にある。
+const OrientMarginMin = 0.08
+
+// ClassifyCellFor は推論器も使ってマスを 空/先手/後手 に分類する。
+//
+// **空/先手/後手 を出すところは必ずこれを通すこと。** `ClassifyCellWith` は
+// 画像処理だけの一次判定で、確信度が足りないマスの向きは推論器との回転照合で
+// 決め直される。素の `ClassifyCellWith` を別途呼ぶと `RecognizeBoard` が返す
+// SFEN と食い違う。
+//
+// byMatch は回転照合で決め直したかどうか（観測用。`CellDebug.OrientBy`）。
+func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
+	cat, margin := ClassifyCellDetail(cell, boardColor)
+	if cat == CellEmpty || margin >= OrientMarginMin {
+		return cat, false
+	}
+	om, ok := m.(OrientationMatcher)
+	if !ok {
+		return cat, false
+	}
+	// 学習データは後手の駒を Rotate180 して先手向きに揃えてあるので、
+	// そのままのほうが近ければ先手、180度回した版のほうが近ければ後手
+	up := om.PieceDistance(cell)
+	down := om.PieceDistance(Rotate180(cell))
+	if math.IsInf(up, 1) && math.IsInf(down, 1) {
+		return cat, false
+	}
+	if up <= down {
+		return CellPieceUp, true
+	}
+	return CellPieceDown, true
+}
+
 // RecognizeBoard は盤面全体を認識してSFENを返す
 //
 // 空/向きは ClassifyCellWith が一次判定し、駒種は Predictor（NN または k-NN）で
@@ -219,8 +265,11 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 				continue
 			}
 
-			cat := ClassifyCellWith(cell, bc)
+			cat, byMatch := ClassifyCellFor(cell, bc, m)
 			cur.Category = cat
+			if byMatch {
+				cur.OrientBy = "match"
+			}
 			if cat == CellEmpty {
 				continue
 			}

@@ -45,6 +45,41 @@ func (kn *KNN) Len() int {
 	return len(kn.samples)
 }
 
+// OrientationMatcher は「このマス画像が、先手向きに正規化された学習データから
+// どれだけ離れているか」を返せる推論器。`recognize.go` が向きの決定に使う。
+//
+// 学習データは後手の駒を Rotate180 して先手向きに揃えてあるので、
+// そのままと 180度回した版のどちらが近いかで向きが決まる。
+type OrientationMatcher interface {
+	// PieceDistance は駒サンプルへの最近傍距離を返す（小さいほど近い）。
+	// 比較にしか使わないので尺度は実装依存でよい。
+	PieceDistance(cell image.Image) float64
+}
+
+// PieceDistance は駒サンプル（空を除く）への最近傍の2乗距離を返す。
+// 一致するサンプルが無ければ +Inf。
+func (kn *KNN) PieceDistance(cell image.Image) float64 {
+	input := CellToInput(cell)
+	best := math.Inf(1)
+	for _, s := range kn.samples {
+		if s.Label == ClassEmpty {
+			continue
+		}
+		d := 0.0
+		for j, v := range input {
+			diff := v - s.Input[j]
+			d += diff * diff
+			if d >= best {
+				break
+			}
+		}
+		if d < best {
+			best = d
+		}
+	}
+	return best
+}
+
 // Debug は認識結果に載せる推論器の素性を返す（DebugPredictor）。
 func (kn *KNN) Debug() PredictorDebug {
 	return PredictorDebug{
