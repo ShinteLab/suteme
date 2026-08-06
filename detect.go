@@ -44,17 +44,82 @@ func DetectBoard(img image.Image) *BoardRegion {
 
 	for _, roi := range boardROIs(blurred) {
 		cand := detectBoardIn(edges, roi)
-		if cand == nil {
+		if cand == nil || !plausibleAspect(cand) {
 			continue
 		}
-		if !plausibleAspect(cand) {
-			continue
-		}
-		if conf := ValidateBoard(img, cand); conf > bestConf {
+		cand, conf := refineRegion(img, cand)
+		if conf > bestConf {
 			best, bestConf = cand, conf
 		}
 	}
 	return best
+}
+
+// refineRegion は外枠を整合度が最大になる位置に寄せ、その領域と信頼度を返す。
+//
+// **投影のピークを拾って等間隔に割るところまでで 0.3〜0.5マスの誤差が残る。**
+// 1マスに直すと数px でも、`gridAlignment` は境界線が格子線に ±3px で
+// 乗っているかを見るので、この程度のずれで整合度が 0 付近まで落ちる。
+// 実測（中継画像 `26e06136`）: 正しい ROI から得た領域が
+// dw=+0.29 dh=+0.45 で整合度 -0.06、微調整すると 0.32マス・信頼度 1.00 になる。
+//
+// 探索は投影の上だけで行う（原点 ±半マス・間隔 ±10%）ので、
+// `lineProjections` を 1 回足すだけで済む。
+// **整合度が上がらなければ元の領域を返す**（縦横比が崩れる場合も同様）。
+func refineRegion(img image.Image, br *BoardRegion) (*BoardRegion, float64) {
+	base := ValidateBoard(img, br)
+
+	// 探索の余地として上下左右に半マス広げた範囲で投影を取る
+	padX := br.Bounds.Dx() / 18
+	padY := br.Bounds.Dy() / 18
+	b := image.Rect(
+		br.Bounds.Min.X-padX, br.Bounds.Min.Y-padY,
+		br.Bounds.Max.X+padX, br.Bounds.Max.Y+padY,
+	).Intersect(img.Bounds())
+	if b.Dx() < 9*3 || b.Dy() < 9*3 {
+		return br, base
+	}
+
+	sub := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			sub.Set(x-b.Min.X, y-b.Min.Y, img.At(x, y))
+		}
+	}
+	row, col := lineProjections(BoxBlur(ConvertGray(sub), 2))
+
+	oy, sy := refineAxis(row, float64(br.Bounds.Min.Y-b.Min.Y), float64(br.Bounds.Dy())/9)
+	ox, sx := refineAxis(col, float64(br.Bounds.Min.X-b.Min.X), float64(br.Bounds.Dx())/9)
+
+	refined := BoardRegionFromRect(
+		b.Min.X+int(math.Round(ox)), b.Min.Y+int(math.Round(oy)),
+		b.Min.X+int(math.Round(ox+sx*9)), b.Min.Y+int(math.Round(oy+sy*9)),
+	)
+	if !plausibleAspect(refined) {
+		return br, base
+	}
+	if conf := ValidateBoard(img, refined); conf > base {
+		return refined, conf
+	}
+	return br, base
+}
+
+// refineAxis は 1 軸分の (原点, 間隔) を整合度が最大になるように動かす
+func refineAxis(proj []float64, origin, span float64) (float64, float64) {
+	bestO, bestS := origin, span
+	best := axisAlignment(proj, origin, span)
+	for do := -span / 2; do <= span/2; do++ {
+		for ds := -span * 0.1; ds <= span*0.1; ds += 0.25 {
+			s := span + ds
+			if s < 3 {
+				continue
+			}
+			if v := axisAlignment(proj, origin+do, s); v > best {
+				best, bestO, bestS = v, origin+do, s
+			}
+		}
+	}
+	return bestO, bestS
 }
 
 // aspectTolerance はマスの縦横比が boardAspect からずれてよい割合。

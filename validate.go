@@ -67,12 +67,15 @@ func cellUniformity(img image.Image, br *BoardRegion) float64 {
 
 // gridAlignFull は gridAlignment の値をこれ以上なら整合度 1.0 とみなす基準。
 //
-// 実測（保存済み11局面）: 正解座標 +0.13〜+0.56 に対し、
-// 半マスずらすと -0.61〜-0.14、周期を 8/9 に縮めると -0.09〜+0.17、
-// 壊れた DetectBoard の結果は -0.25〜+0.02。
-// 0.20 を上限に線形にすると、既定の棄却しきい値 minBoardConfidence(0.5) が
-// gridAlignment ≒ 0.10 に対応し、正解を全件通しつつ誤検出を全件落とせる。
-const gridAlignFull = 0.20
+// 実測（保存済み15局面・悪いほうの軸）: 正解座標 +0.38〜+0.97 に対し、
+// 半マスずらすと -1.00〜-0.41、周期を 8/9 に縮めると -0.26〜+0.19。
+// 0.60 を上限に線形にすると、既定の棄却しきい値 minBoardConfidence(0.5) が
+// gridAlignment = 0.30 に対応する。歪みの最大 +0.19 と正解の最小 +0.38 の
+// ちょうど間なので、正解を全件通しつつ壊れた検出を落とせる。
+//
+// **lineProjections を変えたらこの値も測り直すこと。** 合計投影だった頃は
+// 正解が +0.13〜+0.56 で、0.20 が上限として妥当だった。
+const gridAlignFull = 0.60
 
 // gridConfidence は gridAlignment を 0.0-1.0 に写す
 func gridConfidence(img image.Image, br *BoardRegion) float64 {
@@ -117,17 +120,7 @@ func gridAlignment(img image.Image, br *BoardRegion) float64 {
 			sub.Set(x-b.Min.X, y-b.Min.Y, img.At(x, y))
 		}
 	}
-	edges := Sobel(BoxBlur(ConvertGray(sub), 2))
-
-	rowProj := make([]float64, b.Dy())
-	colProj := make([]float64, b.Dx())
-	for y := 0; y < b.Dy(); y++ {
-		for x := 0; x < b.Dx(); x++ {
-			v := float64(edges.GrayAt(x, y).Y)
-			rowProj[y] += v
-			colProj[x] += v
-		}
-	}
+	rowProj, colProj := lineProjections(BoxBlur(ConvertGray(sub), 2))
 
 	// br.Bounds は画像からはみ出しうるので、投影の添字は b.Min からの相対にする
 	v := axisAlignment(rowProj, float64(br.Bounds.Min.Y-b.Min.Y), float64(br.Bounds.Dy())/9)
@@ -136,6 +129,80 @@ func gridAlignment(img image.Image, br *BoardRegion) float64 {
 		return v
 	}
 	return h
+}
+
+// lineProjections は「その行/列にどれだけ線が通っているか」の投影を返す。
+//
+// **合計ではなく中央値を採る。方向別の勾配を使う。** どちらも実測で効いている。
+//
+//   - **中央値**: 格子線は盤の端から端まで通るので、その行（列）の**大半の画素**が
+//     エッジになる。合計だと、駒の輪郭や漢字の画のような**一部分に集中した強いエッジ**が
+//     線と同じだけの量を稼いでしまう。中央値なら局所的なものは無視される
+//   - **方向別**: 横線は |gy|、縦線は |gx| が強い。勾配強度（Sobel）のままだと
+//     木目や駒の輪郭のような向きを持たないエッジが両軸に等しく乗る
+//
+// 実測（保存済み15局面、`gridAlignment` の生値。悪いほうの軸）:
+//
+//	                   正解の最小   正解−歪みの最小差
+//	Sobel強度・合計      +0.02        -0.04（正解が歪みに負ける画像がある）
+//	方向別・合計         +0.14        +0.15
+//	方向別・エッジ被覆率  +0.30        +0.21
+//	**方向別・中央値**   **+0.38**    **+0.26**
+//
+// **実物の盤を撮った中継画像（`26e06136`）の列方向が +0.02 → +0.38 になる。**
+// 木目・照明・駒の重なりで格子線が合計投影にほとんど出ない画像であり、
+// この値が上がらないことが「正しい手動座標でも信頼度 0.12 止まり」の原因だった。
+//
+// 中央値は 0..255 にクランプしたヒストグラムで取る（クランプ無しの厳密な
+// 中央値と実測値は一致する）。ValidateBoard は候補ごとに呼ぶので、
+// 列ごとのソート O(n log n) を避ける意味がある。
+func lineProjections(blurred *image.Gray) (row, col []float64) {
+	b := blurred.Bounds()
+	w, h := b.Dx(), b.Dy()
+	row = make([]float64, h)
+	col = make([]float64, w)
+	if w < 3 || h < 3 {
+		return row, col
+	}
+
+	at := func(x, y int) int { return int(blurred.GrayAt(x+b.Min.X, y+b.Min.Y).Y) }
+	gx := make([]int, w*h)
+	gy := make([]int, w*h)
+	for y := 1; y < h-1; y++ {
+		for x := 1; x < w-1; x++ {
+			vx := -at(x-1, y-1) - 2*at(x-1, y) - at(x-1, y+1) + at(x+1, y-1) + 2*at(x+1, y) + at(x+1, y+1)
+			vy := -at(x-1, y-1) - 2*at(x, y-1) - at(x+1, y-1) + at(x-1, y+1) + 2*at(x, y+1) + at(x+1, y+1)
+			gx[y*w+x] = absInt(vx)
+			gy[y*w+x] = absInt(vy)
+		}
+	}
+
+	var hist [256]int
+	median := func(n int) float64 {
+		acc := 0
+		for i, c := range hist {
+			acc += c
+			if acc > n/2 {
+				return float64(i)
+			}
+		}
+		return 0
+	}
+	for y := 0; y < h; y++ {
+		hist = [256]int{}
+		for x := 0; x < w; x++ {
+			hist[minInt(gy[y*w+x], 255)]++
+		}
+		row[y] = median(w)
+	}
+	for x := 0; x < w; x++ {
+		hist = [256]int{}
+		for y := 0; y < h; y++ {
+			hist[minInt(gx[y*w+x], 255)]++
+		}
+		col[x] = median(h)
+	}
+	return row, col
 }
 
 // gridPeakTol は境界線位置のずれを許す範囲(px)。
