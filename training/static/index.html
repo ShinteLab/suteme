@@ -51,7 +51,6 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .cell img { filter: brightness(0.55); }
 .cell.labeled img { filter: brightness(1); }
 .cell img { width: 100%; display: block; aspect-ratio: 1; object-fit: contain; pointer-events: none; }
-.gote-mark { display: inline-block; transform: rotate(180deg); }
 .cell .label {
   font-size: 11px; padding: 2px; background: #0f3460;
   white-space: nowrap; overflow: hidden;
@@ -333,11 +332,11 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
     <span style="font-size:12px;color:#888">手番</span>
     <label style="font-size:13px;color:#eee;display:flex;align-items:center;gap:4px;cursor:pointer">
-      <input type="radio" name="turn" value="b" checked onchange="updateHandSummary()">☗先手</label>
+      <input type="radio" name="turn" value="b" checked onchange="updateHandSummary()">手前</label>
     <label style="font-size:13px;color:#eee;display:flex;align-items:center;gap:4px;cursor:pointer">
-      <input type="radio" name="turn" value="w" onchange="updateHandSummary()"><span class="gote-mark">☖</span>後手</label>
-    <button onclick="deriveHands()" title="盤面に無い駒を先手の駒台に置きます。駒落ちや詰将棋では正しくないので、あくまで下書きです"
-      style="margin-left:auto;font-size:11px;background:none;border:1px solid #444;color:#888;padding:3px 10px;border-radius:3px;cursor:pointer">盤面から逆算（下書き）</button>
+      <input type="radio" name="turn" value="w" onchange="updateHandSummary()">奥</label>
+    <button onclick="deriveHands()" title="盤面に無い駒を手前の駒台に置きます。駒落ちや詰将棋では正しくないので、あくまで下書きです"
+      style="margin-left:auto;font-size:11px;background:none;border:1px solid #444;color:#888;padding:3px 10px;border-radius:3px;cursor:pointer">盤面から逆算（下書き・手前へ）</button>
     <button onclick="clearHands()"
       style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:3px 10px;border-radius:3px;cursor:pointer">全部0にする</button>
   </div>
@@ -369,8 +368,10 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   <div class="select-row">
     <span class="select-label">分類:</span>
     <button class="sel-btn" id="sel-empty" onclick="selCat(0)">空</button>
-    <button class="sel-btn" id="sel-up" onclick="selCat(1)">☗先手</button>
-    <button class="sel-btn" id="sel-down" onclick="selCat(2)"><span class="gote-mark">☖</span>後手</button>
+    <!-- 「先手」「後手」とは書かない。駒の向きで見分けるものなので「手前」「奥」。
+         手前が後手というゲーム画面があるため（CLAUDE.md「先後の割り当て」） -->
+    <button class="sel-btn" id="sel-up" onclick="selCat(1)">↑ 手前</button>
+    <button class="sel-btn" id="sel-down" onclick="selCat(2)">↓ 奥</button>
   </div>
   <div id="piece-row" class="select-row">
     <span class="select-label">駒種: <strong id="selected-piece-name" style="color:#4cc9f0">未選択</strong></span>
@@ -670,8 +671,8 @@ function pieceNameFromLabel(label) {
 
 function catLabel(cat) {
   if (cat === 0) return '空';
-  if (cat === 1) return '☗';
-  if (cat === 2) return '<span class="gote-mark">☖</span>';
+  if (cat === 1) return '↑';
+  if (cat === 2) return '↓';
   return '?';
 }
 
@@ -768,7 +769,7 @@ function confirmCorrect() {
         ? '+' + pieceId.substring(1).toLowerCase()
         : pieceId.toLowerCase();
     }
-    const mark = (cat === 2 ? '<span class="gote-mark">☖</span>' : '☗')
+    const mark = (cat === 2 ? '↓' : '↑')
       + selectedPiece.label + '<span class="ok-mark">○</span>';
     applyLabel(r, c, pieceId, mark, cat === 1 ? '#2d6a4f' : '#9d0208');
   } else {
@@ -812,7 +813,7 @@ function fillUnlabeledCells() {
         unknown++;
         continue;
       }
-      const mark = (cat === 2 ? '<span class="gote-mark">☖</span>' : '☗') +
+      const mark = (cat === 2 ? '↓' : '↑') +
         name + '<span class="ok-mark">○</span>';
       applyLabel(r, c, label, mark, cat === 2 ? '#9d0208' : '#2d6a4f');
       piece++;
@@ -838,8 +839,8 @@ function confirmSelection() {
         : pieceId.toLowerCase();
     }
     const mark = selectedCat === 2
-      ? '<span class="gote-mark">☖</span>' + selectedPiece.label
-      : '☗' + selectedPiece.label;
+      ? '↓' + selectedPiece.label
+      : '↑' + selectedPiece.label;
     applyLabel(r, c, pieceId, mark, selectedCat === 1 ? '#2d6a4f' : '#9d0208');
     if (cellCategories) cellCategories[r][c] = selectedCat;
   } else {
@@ -933,24 +934,36 @@ function buildSFEN() {
 // 駒種の並び順は core/web の HAND_ORDER に従う（画面側に表を持たない）。
 let currentMoveNumber = 1;
 
+// 盤の見え方に合わせて、左に「奥」・右に「手前」を縦に並べる。
+//
+// **「先手」「後手」とは書かない。「手前」「奥」で書く。** ユーザから見て
+// 手前が後手という画面がある（自分が後手番のゲーム画面）ので、画像を見ながら
+// 入力する欄で先後を名乗ると、どちらを指しているのか分からなくなる。
+// SFEN 上は規約どおり 手前 = 先手（大文字）に落ちる
 function renderHandInputs() {
   const box = document.getElementById('hand-inputs');
   if (!box || box.dataset.ready) return;
   const order = ShinteWeb.sfen.HAND_ORDER;
   const label = k => (PIECE_TYPES.find(p => p.base === k) || {}).label || k;
-  const row = (side, mark, color) => `
-    <div style="display:flex;align-items:center;gap:6px;margin:4px 0">
-      <span style="width:46px;font-size:12px;color:${color};flex-shrink:0">${mark}</span>
+  const column = (side, title, color) => `
+    <div style="flex:0 0 auto">
+      <div style="font-size:12px;color:${color};text-align:center;margin-bottom:6px;
+                  border-bottom:1px solid #2a3a5e;padding-bottom:4px">${title}</div>
       ${order.map(k => `
-        <label style="display:flex;flex-direction:column;align-items:center;gap:2px">
-          <span style="font-size:11px;color:#888">${label(k)}</span>
+        <label style="display:flex;align-items:center;gap:6px;margin:3px 0;justify-content:flex-end">
+          <span style="font-size:12px;color:#aaa;width:20px;text-align:right">${label(k)}</span>
           <input type="number" class="hand-n hand-zero" min="0" value="0"
                  data-side="${side}" data-piece="${k}"
-                 style="width:38px;background:#0f3460;border:1px solid #333;color:#eee;
+                 style="width:44px;background:#0f3460;border:1px solid #333;color:#eee;
                         padding:3px;border-radius:3px;text-align:center;font-size:12px">
         </label>`).join('')}
     </div>`;
-  box.innerHTML = row('black', '☗先手', '#74c69d') + row('white', '☖後手', '#e07070');
+  // 左 = 奥（駒が下を向いている側）、右 = 手前（駒が上を向いている側）
+  box.innerHTML =
+    '<div style="display:flex;gap:32px;justify-content:center">' +
+    column('white', '奥', '#e07070') +
+    column('black', '手前', '#74c69d') +
+    '</div>';
   box.dataset.ready = '1';
   box.addEventListener('input', () => { markHandZeros(); scheduleHandCheck(); });
 }
@@ -999,7 +1012,7 @@ function clearHands() {
   scheduleHandCheck();
 }
 
-// 盤面に無い駒を先手の駒台に置く。**駒落ち・詰将棋では正しくないので下書き扱い**
+// 盤面に無い駒を手前の駒台に置く。**駒落ち・詰将棋では正しくないので下書き扱い**
 async function deriveHands() {
   const built = buildSFEN();
   if (!built || built.error) { alert('先に盤面のマスを埋めてください'); return; }
@@ -1458,11 +1471,11 @@ async function applyFromSFEN() {
       const pt = PIECE_TYPES.find(p => p.base === base);
       const pname = pt ? pt.label : piece;
       if (isGote) {
-        labelEl.innerHTML = '<span class="gote-mark">☖</span>' + pname;
+        labelEl.innerHTML = '↓' + pname;
         labelEl.style.background = catColors[2];
         if (cellCategories) cellCategories[row][col] = 2;
       } else {
-        labelEl.innerHTML = '☗' + pname;
+        labelEl.innerHTML = '↑' + pname;
         labelEl.style.background = catColors[1];
         if (cellCategories) cellCategories[row][col] = 1;
       }
@@ -1499,7 +1512,7 @@ async function runRecognition() {
   }
 
   if (!data || !data.sfen) {
-    // 学習データが無いと駒種を出せない。空/先手/後手の分類は出ているので
+    // 学習データが無いと駒種を出せない。空/手前/奥の分類は出ているので
     // 解析タブでのラベリング自体は続けられる
     out.innerHTML = '<span style="color:#f0a030">学習データが無いため駒種は推論できません。' +
       '解析タブで駒種を入力してください</span>';
@@ -1532,7 +1545,9 @@ function renderPieceCounts(v) {
   order.forEach(p => { tbl += `<th>${names[p]}</th>`; });
   tbl += '</tr>';
 
-  tbl += '<tr class="row-sente"><td class="row-label">先手</td>';
+  // 行の見出しも「先手/後手」ではなく「手前/奥」。SFEN 上は規約どおり
+  // 手前 = 大文字（sente）に落ちるが、画像を見ながら読む表なので向きで書く
+  tbl += '<tr class="row-sente"><td class="row-label">手前</td>';
   order.forEach(p => {
     const n = s[p] || 0;
     const warn = (n + (g[p]||0)) > limits[p] ? ' class="count-warn"' : '';
@@ -1540,7 +1555,7 @@ function renderPieceCounts(v) {
   });
   tbl += '</tr>';
 
-  tbl += '<tr class="row-gote"><td class="row-label">後手</td>';
+  tbl += '<tr class="row-gote"><td class="row-label">奥</td>';
   order.forEach(p => { tbl += `<td>${g[p]||0}</td>`; });
   tbl += '</tr>';
 
