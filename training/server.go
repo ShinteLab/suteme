@@ -44,11 +44,32 @@ type BoardBounds struct {
 	X1, Y1, X2, Y2 int
 }
 
+// 局面の出所。空文字（既存エントリ）は UI からの保存とみなす
+const (
+	SourceUI  = "ui"
+	SourceAPI = "api"
+)
+
 type HistoryEntry struct {
 	ID          string       `json:"id"`
 	CreatedAt   string       `json:"created_at"`
 	SFEN        string       `json:"sfen"`
 	BoardBounds *BoardBounds `json:"board_bounds,omitempty"`
+	// Source は登録経路（"ui" / "api"）。空は UI（既存エントリ）
+	Source string `json:"source,omitempty"`
+	// Verified は人が解析タブで内容を見たか。**画像と SFEN の対応は機械には
+	// 検証できない**ので、API 経由で入ったものは false で入り、学習の対象に
+	// しない。解析タブから保存し直すと true になる
+	Verified bool `json:"verified,omitempty"`
+	// Hash は登録された画像そのもののハッシュ。API のリトライで同じ局面が
+	// 増えないようにするためだけに使う
+	Hash string `json:"hash,omitempty"`
+}
+
+// IsVerified は学習に使ってよいエントリかを返す。
+// Source を持たない既存エントリは UI で作られたものなので確認済みとみなす
+func (e HistoryEntry) IsVerified() bool {
+	return e.Source != SourceAPI || e.Verified
 }
 
 type HistoryData struct {
@@ -69,15 +90,14 @@ func loadHistory() *HistoryData {
 	return &h
 }
 
+// saveHistoryFile は履歴を書き出す。
+// 一時ファイル + rename にしてあるのは、書き込み中に落ちたときに
+// 履歴が全損しないようにするため（API で書き込み頻度が上がる）
 func saveHistoryFile(h *HistoryData) {
 	os.MkdirAll(dataDir, 0755)
-	f, err := os.Create(historyFile)
-	if err != nil {
+	if err := writeJSONFile(historyFile, h); err != nil {
 		log.Printf("saveHistory: %v", err)
-		return
 	}
-	defer f.Close()
-	json.NewEncoder(f).Encode(h)
 }
 
 var (
@@ -99,6 +119,7 @@ var (
 // Serve はラベリング・学習用のWebサーバを起動する
 // 起動時にカレントディレクトリの model_v2.json / training_data_v2.json を自動ロードする
 func Serve(port string) error {
+	loadSettings()
 	// 起動時に保存済みモデルを読み込む
 	if m, err := suteme.LoadModel(modelFile); err == nil {
 		model = m
@@ -127,10 +148,23 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/setboard", handleSetBoard)
 	mux.HandleFunc("/api/trainhistory", handleTrainHistory)
 	mux.HandleFunc("/api/recognize", handleRecognize)
+	mux.HandleFunc("/api/status", handleStatus)
+	mux.HandleFunc("/api/settings", handleSettings)
+	mux.HandleFunc("/api/register", handleRegister)
 
+	// リスナは常に全インターフェースで張り、外部公開のオン/オフは
+	// リクエストごとに判定する（トグルが再起動なしで即時に効く）
 	addr := ":" + port
 	fmt.Printf("http://localhost%s\n", addr)
-	return http.ListenAndServe(addr, mux)
+	if s := currentSettings(); s.External {
+		log.Printf("外部公開: 有効 / 登録受付: %v / トークン: %v", s.Enabled, s.Token != "")
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           withAccessControl(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 // currentPredictor は使用する推論器を返す（k-NN 優先、なければ gobrain NN）
@@ -447,18 +481,31 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	// 上書き対象があるかを先に確かめる。履歴に無い ID（既に削除された等）は
 	// 黙って新規保存に倒す
 	id := ""
+	var prev HistoryEntry
+	historyMu.RLock()
+	cur := loadHistory()
 	if validID(req.HistoryID) {
-		historyMu.RLock()
-		for _, e := range loadHistory().Entries {
+		for _, e := range cur.Entries {
 			if e.ID == req.HistoryID {
-				id = e.ID
+				id, prev = e.ID, e
 				break
 			}
 		}
-		historyMu.RUnlock()
 	}
+	full := len(cur.Entries) >= maxHistory
+	historyMu.RUnlock()
+
 	overwrite := id != ""
 	if !overwrite {
+		// **古い局面を押し出して消すのはやめた。** 手でラベル付けした正解が
+		// 黙って失われる（実際に過去そうなった）ため、上限に達したら断る。
+		// 上書きは件数が増えないので通す
+		if full {
+			http.Error(w,
+				fmt.Sprintf("履歴が上限（%d 件）です。履歴タブで不要な局面を削除してください", maxHistory),
+				http.StatusInsufficientStorage)
+			return
+		}
 		id = newID()
 	}
 	os.MkdirAll(dataDir, 0755)
@@ -474,6 +521,14 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 		ID:        id,
 		CreatedAt: time.Now().Format("01/02 15:04"),
 		SFEN:      req.SFEN,
+		Source:    SourceUI,
+		// 画面から保存した＝人が解析タブで見た、ということ。
+		// API 経由で入った未確認の局面はここを通ると確認済みになる
+		Verified: true,
+		Hash:     prev.Hash,
+	}
+	if overwrite && prev.Source != "" {
+		entry.Source = prev.Source
 	}
 	if s.Result != nil && s.Result.Board != nil {
 		b := s.Result.Board.Bounds
@@ -494,12 +549,6 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if !replaced {
 		h.Entries = append([]HistoryEntry{entry}, h.Entries...)
-		if len(h.Entries) > 100 {
-			for _, old := range h.Entries[100:] {
-				os.Remove(filepath.Join(dataDir, old.ID+".png"))
-			}
-			h.Entries = h.Entries[:100]
-		}
 	}
 	saveHistoryFile(h)
 	historyMu.Unlock()
@@ -617,6 +666,12 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 		e, ok := byID[id]
 		if !ok {
 			results = append(results, entryResult{ID: id, Error: "履歴にありません"})
+			continue
+		}
+		// **画像と SFEN の対応は機械には検証できない。** API 経由で入った
+		// 局面は、解析タブで人が一度見て保存し直すまで学習に使わない
+		if !e.IsVerified() {
+			results = append(results, entryResult{ID: id, Error: "未確認です（解析タブで内容を確認してください）"})
 			continue
 		}
 		samples, err := samplesFromHistory(e)

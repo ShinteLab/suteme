@@ -38,6 +38,7 @@ SFEN の駒文字マッピングや盤面文字列の組み立てを suteme 側�
 | `knn.go` | **駒種認識(k-NN)**: 学習不要・距離重み付き投票。現在の主認識器。`Predictor` IF |
 | `training/training.go` | **学習パッケージ**: `Train` / `BalanceData` / `ClassDistribution` / `SaveModel` |
 | `training/server.go` | **学習用Webサーバ**: `Serve(port)`・APIハンドラ・履歴管理・UI embed |
+| `training/api.go` | **外部からの訓練データ登録**: アクセス制御・`/api/status`・`/api/settings`・`/api/register` |
 | `_cmd/suteme-training/` | 学習用Webサーバの起動コマンド（`training.Serve` を呼ぶだけ）|
 | `komadai.go` | **駒台推定**: `ValidatePieces` / `CountFromSFEN`（盤面 + 駒台 = 全駒 検証）|
 | `imaging.go` | グレースケール変換・二値化・BoxBlur・Sobel・`Rotate180` |
@@ -742,6 +743,63 @@ go run ./_cmd/suteme-training/ 8888
 | `GET /api/history/:id/image` | 保存済み局面の画像取得 |
 | `DELETE /api/history/:id` | 保存済み局面の削除（`history.json` のエントリ + `data/{id}.png`）|
 | `POST /api/savesession` | 現在のセッション（画像 + SFEN + 盤面座標）を保存。`history_id` があれば**上書き** |
+| `GET /api/status` | 登録を受け付けられる状態か（**`/api/health` ではない**）|
+| `GET,POST /api/settings` | 外部公開・トークンの設定（ローカル限定）|
+| `POST /api/register` | **外部からの訓練データ登録**（画像 + SFEN + 盤面座標）→ 未確認として履歴に入る |
+
+### 外部からの訓練データ登録（`api.go` + APIタブ）
+
+ikkyoku のように盤面認識を通したデータを持っているアプリから、学習用の局面を
+直接送り込むための口。**既定は無効**で、APIタブで有効にする。設定は
+`data/settings.json` に保存する（`Enabled` / `External` / `Token`）。
+
+```
+POST /api/register   multipart/form-data
+  image        画像（PNG / JPEG）
+  sfen         正解の SFEN
+  x1,y1,x2,y2  盤面の外枠座標（必須）
+  → 履歴に Source="api" / Verified=false で入る
+```
+
+**学習データは壊れやすい資産**（手でラベル付けした正解であり、一度学習に通すと
+`MergeSamples` が畳んだサンプルは履歴を消しても残る）なので、書き込み口を
+開けるにあたって次の約束を置いた。**安易に緩めないこと。**
+
+- **ループバック以外から触れるのは `/api/status` と `/api/register` だけ。**
+  学習（`/api/trainhistory`）・削除・セッション系は公開設定に関わらず常に
+  ローカル限定にする。トークンが漏れたときの被害を「不正なデータが 1 件増える」に
+  閉じ込めるため。「Bearer を要求する」より強い制約であることが重要
+- **ループバックは認証を免除する。** 同じサーバが配信している `static/index.html` は
+  9 箇所で素の `fetch('/api/...')` を投げているので、ここを縛ると画面が全滅する。
+  守りたいのは LAN の他人であってローカルのプロセスではない
+- **リスナは常に全インターフェースで張り、公開のオン/オフはリクエストごとに判定する。**
+  bind アドレスを設定にすると切り替えにサーバ再起動が要り、APIタブのトグルが
+  即時に効かない。公開オフの間は非ループバックを **404**（403 ではなく）で返し、
+  エンドポイントの存在自体を伏せる
+- **API 経由のデータは未確認（`Verified=false`）として入り、学習の対象にしない。**
+  画像と SFEN の対応は機械には検証できない。解析タブで人が見て保存し直すと
+  確認済みになる（`handleSaveSession` が `Verified=true` を立てる）。
+  履歴タブでは「API / 未確認」と表示され、チェックボックスが disabled になる。
+  `HistoryEntry.IsVerified()` は `Source` を持たない既存エントリを確認済みとみなす
+- **SFEN は登録時に検証しない。** 解析タブで人が直す運びなので、ここで弾くと
+  直す機会ごと失う。パースできない SFEN は学習時にその局面だけ失敗として報告される
+- **盤面座標は必須（無ければ 400）。** 座標なしのエントリは `samplesFromHistory` が
+  `DetectBoard` に頼るうえ `shiftAugment` のずらしを作らないので学習価値が 1/5 になり、
+  しかもその事実に学習を押すまで気付けない。送り手は認識を通した座標を持っている
+- **同じ画像の再送は増やさない。** 画像そのもののハッシュ（`HistoryEntry.Hash`）で
+  照合し、一致すれば既存の ID を返す。リトライを安全にするため
+
+#### 履歴の上限（200 件）と eviction の廃止
+
+**上限に達したら古い局面を消すのではなく 507 で断る。** 以前は 100 件を超えると
+最古のエントリと `data/*.png` を削除していたが、外部から流し込めるようになると
+**手でラベル付けした正解データが数分で押し出されて消える**。認識精度は 100 局面
+あたりで頭打ちになる想定なので、200 を上限に据えて超過分は拒否する。
+**UI からの新規保存も同じく 507 にする**（API だけ守っても意味が無い）。
+上書き保存は件数が増えないので通る。
+
+`saveHistoryFile` は一時ファイル + rename にしてある。書き込み頻度が上がるので、
+途中で落ちたときに履歴が全損しないようにするため。
 
 ### UI 構成（タブ）
 
@@ -753,6 +811,7 @@ go run ./_cmd/suteme-training/ 8888
 解析タブ  元画像/エッジ/盤面検出・盤面の手動指定・マス目のラベリング → 保存
    ↓
 履歴タブ  保存済み局面を選んで学習
+APIタブ   外部からの訓練データ登録の設定（既定は無効）
 ```
 
 入力タブは「画像を入れて、今どう読めているかを見る」だけ。パイプライン画像と
@@ -855,10 +914,12 @@ go run ./_cmd/suteme-training/ 8888
 
 ### データの永続化
 
+- `data/settings.json`: 外部公開の設定（有効/無効・外部公開・Bearerトークン）
 - `training_data_v3.json`: 学習データ累積（毎回マージ・`MergeSamples` で重複除去）
 - `model_v3.json`: 学習済み FeedForward NN（起動時自動ロード）
 - `data/{id}.png`: 保存した局面画像
-- `data/history.json`: 保存した局面の一覧（SFEN・盤面座標含む、最大100件）
+- `data/history.json`: 保存した局面の一覧（SFEN・盤面座標・出所・確認済みか、**最大200件**。
+  上限を超えたら古いものを消すのではなく 507 で断る）
 
 ---
 

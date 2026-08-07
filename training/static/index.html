@@ -156,6 +156,71 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <button class="tab-btn active" id="tab-btn-input" onclick="switchTab('input')">入力</button>
   <button class="tab-btn" id="tab-btn-analyze" onclick="switchTab('analyze')">解析</button>
   <button class="tab-btn" id="tab-btn-history" onclick="switchTab('history')">履歴</button>
+  <button class="tab-btn" id="tab-btn-api" onclick="switchTab('api')">API</button>
+</div>
+
+<div id="tab-api" style="display:none;max-width:600px;margin:0 auto 20px">
+  <div style="font-size:12px;color:#888;line-height:1.8;margin-bottom:12px">
+    外部（ikkyoku など）から訓練データを登録するための口です。
+    登録された局面は履歴に <span style="color:#f0a030">未確認</span> として入り、
+    解析タブで一度内容を確認して保存し直すまで学習には使われません。
+  </div>
+
+  <div style="background:#16213e;border:1px solid #2a3a5e;border-radius:4px;padding:12px;margin-bottom:12px">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px">
+      <input type="checkbox" id="api-enabled" style="width:16px;height:16px;accent-color:#2d6a4f">
+      <span style="font-size:13px;color:#eee;font-weight:600">API 登録を受け付ける</span>
+    </label>
+    <div style="font-size:11px;color:#777;margin:-6px 0 12px 24px">
+      オフの間は <code>/api/status</code> が <code>enabled: false</code> を返し、登録は 503 で断ります。
+    </div>
+
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px">
+      <input type="checkbox" id="api-external" style="width:16px;height:16px;accent-color:#2d6a4f">
+      <span style="font-size:13px;color:#eee">このマシンの外からのアクセスを許可する</span>
+    </label>
+    <div style="font-size:11px;color:#777;margin:-6px 0 12px 24px">
+      オフなら 127.0.0.1 からのみ。オンにしても外から触れるのは
+      <code>/api/status</code> と <code>/api/register</code> だけで、
+      学習・削除・セッション系は常にローカル限定です。
+    </div>
+
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
+      <input type="checkbox" id="api-usetoken" style="width:16px;height:16px;accent-color:#2d6a4f">
+      <span style="font-size:13px;color:#eee">Bearer トークンを要求する</span>
+    </label>
+    <div id="api-token-box" style="display:none;margin:0 0 10px 24px">
+      <div style="display:flex;gap:6px;align-items:center">
+        <code id="api-token" style="flex:1;font-size:11px;color:#4cc9f0;background:#0f3460;padding:5px 8px;border-radius:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></code>
+        <button onclick="regenerateToken()" style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:3px 8px;border-radius:3px;cursor:pointer;white-space:nowrap">再発行</button>
+      </div>
+      <div style="font-size:11px;color:#777;margin-top:4px">ローカルからのアクセスには要求しません（この画面が動かなくなるため）。</div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
+      <button onclick="saveApiSettings()" style="font-size:12px;background:#2d6a4f;color:#eee;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600">設定を保存</button>
+      <span id="api-status" style="font-size:12px;color:#888"></span>
+    </div>
+  </div>
+
+  <div id="api-info" style="font-size:12px;color:#888;line-height:1.8;margin-bottom:12px"></div>
+
+  <details style="font-size:12px;color:#888">
+    <summary style="cursor:pointer;color:#4cc9f0">登録リクエストの形式</summary>
+    <pre style="background:#0f3460;padding:10px;border-radius:4px;overflow-x:auto;font-size:11px;line-height:1.6;margin-top:8px">POST /api/register   multipart/form-data
+  image        画像ファイル（PNG / JPEG）
+  sfen         正解の SFEN（盤面部分だけでも可）
+  x1,y1,x2,y2  盤面の外枠座標（<b>必須</b>）
+
+Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のとき
+
+200  {"status":"ok","id":"...","verified":false,"entries":12}
+200  {"status":"ok","id":"...","duplicate":true}   同じ画像の再送
+400  座標が無い / 画像が壊れている
+401  トークンが不正
+503  API 登録が無効
+507  履歴が上限（古い局面は消しません）</pre>
+  </details>
 </div>
 
 <div id="tab-history" style="display:none;max-width:600px;margin:0 auto 20px">
@@ -832,12 +897,74 @@ function buildSFEN() {
 //   入力 = 画像を登録して自動認識の結果を見る
 //   解析 = マス目をラベリングして保存する
 //   履歴 = 保存済み局面を選んで学習する
+//   API  = 外部からの訓練データ登録の設定
 function switchTab(name) {
-  for (const t of ['input', 'analyze', 'history']) {
+  for (const t of ['input', 'analyze', 'history', 'api']) {
     document.getElementById('tab-' + t).style.display = name === t ? '' : 'none';
     document.getElementById('tab-btn-' + t).className = 'tab-btn' + (name === t ? ' active' : '');
   }
   if (name === 'history') refreshHistory();
+  if (name === 'api') loadApiSettings();
+}
+
+// API タブ
+async function loadApiSettings() {
+  const s = await (await fetch('/api/settings')).json();
+  document.getElementById('api-enabled').checked = !!s.enabled;
+  document.getElementById('api-external').checked = !!s.external;
+  document.getElementById('api-usetoken').checked = !!s.token;
+  showToken(s.token || '');
+  refreshApiInfo();
+}
+
+function showToken(token) {
+  document.getElementById('api-token-box').style.display = token ? '' : 'none';
+  document.getElementById('api-token').textContent = token;
+}
+
+document.getElementById('api-usetoken').addEventListener('change', e => {
+  // 発行は保存時に行う。ここでは欄の出し入れだけ
+  if (!e.target.checked) showToken('');
+});
+
+async function saveApiSettings(regenerate) {
+  const body = {
+    enabled: document.getElementById('api-enabled').checked,
+    external: document.getElementById('api-external').checked,
+    use_token: document.getElementById('api-usetoken').checked,
+    regenerate: !!regenerate,
+  };
+  const el = document.getElementById('api-status');
+  const res = await fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    el.innerHTML = '<span style="color:#ff8080">保存に失敗しました</span>';
+    return;
+  }
+  const s = await res.json();
+  showToken(s.token || '');
+  el.innerHTML = '<span style="color:#74c69d">保存しました</span>';
+  setTimeout(() => { el.textContent = ''; }, 2000);
+  refreshApiInfo();
+}
+
+function regenerateToken() {
+  if (!confirm('トークンを再発行します。今のトークンを使っている送り手は 401 になります。よろしいですか？')) return;
+  saveApiSettings(true);
+}
+
+async function refreshApiInfo() {
+  const s = await (await fetch('/api/status')).json();
+  const rest = s.capacity - s.entries;
+  document.getElementById('api-info').innerHTML =
+    '履歴 <b style="color:#eee">' + s.entries + '</b> / ' + s.capacity + ' 件' +
+    '（あと ' + rest + ' 件受け付けられます' +
+    (rest <= 0 ? '' : rest <= 20 ? '。<span style="color:#f0a030">残りわずかです</span>' : '') + '）' +
+    (rest <= 0 ? '<br><span style="color:#ff8080">上限に達しています。登録は 507 で断られます。履歴タブで不要な局面を削除してください</span>' : '') +
+    '<br>学習データ: <code>' + s.data_version + '</code>';
 }
 
 // 履歴
@@ -853,13 +980,18 @@ async function refreshHistory() {
   }
   list.innerHTML = data.entries.map(e => {
     const done = processedHistory.has(e.id);
+    // API 経由で入って、まだ人が解析タブで見ていない局面。
+    // 画像と SFEN の対応は機械には検証できないので学習には使えない
+    const unverified = e.source === 'api' && !e.verified;
     return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
       data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}">
-      <div class="hist-sel-cell" title="学習に使う"><input type="checkbox" class="hist-sel" data-id="${e.id}"></div>
+      <div class="hist-sel-cell" title="${unverified ? '未確認の局面は学習に使えません' : '学習に使う'}">
+        <input type="checkbox" class="hist-sel" data-id="${e.id}" ${unverified ? 'disabled' : ''}></div>
       <span class="hist-check">${done ? '○' : ''}</span>
       <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
       <div style="flex:1;min-width:0">
-        <div style="font-size:11px;color:#888">${e.created_at}</div>
+        <div style="font-size:11px;color:#888">${e.created_at}${
+          unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。行をクリックして解析タブで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
         <div style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
              title="${e.sfen}">${e.sfen}</div>
       </div>
@@ -873,8 +1005,9 @@ async function refreshHistory() {
 }
 
 // 履歴の選択（学習の対象）
+// 未確認（API 登録直後）の行は disabled にしてあるので選択に入れない
 function historySelection() {
-  return [...document.querySelectorAll('.hist-sel:checked')].map(c => c.dataset.id);
+  return [...document.querySelectorAll('.hist-sel:checked:not(:disabled)')].map(c => c.dataset.id);
 }
 
 function updateTrainHistoryButton() {
@@ -886,7 +1019,7 @@ function updateTrainHistoryButton() {
 }
 
 function toggleAllHistory(on) {
-  document.querySelectorAll('.hist-sel').forEach(c => { c.checked = on; });
+  document.querySelectorAll('.hist-sel:not(:disabled)').forEach(c => { c.checked = on; });
   updateTrainHistoryButton();
 }
 
@@ -1040,6 +1173,13 @@ async function saveSession() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session: currentSessionId, sfen, history_id: currentHistoryId || '' }),
   });
+  if (!res.ok) {
+    // 履歴が上限のとき（507）など。**古い局面を消して場所を空けることはしない**ので、
+    // ここで止まったら履歴タブで不要な局面を削除してもらう
+    alert('保存できませんでした:\n' + (await res.text()));
+    btn.textContent = saveButtonLabel();
+    return;
+  }
   const data = await res.json();
   if (data.status === 'ok') {
     // 以後の保存も同じ履歴を上書きする（直すたびに別データが増えないように）
