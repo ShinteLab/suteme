@@ -268,6 +268,75 @@ func TestVerifyKeepsHandsAndTurn(t *testing.T) {
 	}
 }
 
+// 駒数の突き合わせ。
+//
+// **盤面の検証は参考情報であってエラーではない。** 正しいのは画像であって、
+// 駒がそろっている必要はない。駒落ち・詰将棋では少ないほうが正常なので、
+// 不足は excess に入れず missing（画面では注記）に留める
+func TestHandCheckTreatsShortageAsInformational(t *testing.T) {
+	const initial = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL"
+
+	handCheck := func(board string, hands map[string]int) map[string]interface{} {
+		body, _ := json.Marshal(map[string]interface{}{"board": board, "hands": hands})
+		w := httptest.NewRecorder()
+		handleHandCheck(w, httptest.NewRequest(http.MethodPost, "/api/handcheck", bytes.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("code = %d, body = %s", w.Code, w.Body)
+		}
+		var resp map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &resp)
+		return resp
+	}
+	count := func(resp map[string]interface{}, key string) int {
+		v, _ := resp[key].([]interface{})
+		return len(v)
+	}
+
+	t.Run("平手は過不足なし", func(t *testing.T) {
+		r := handCheck(initial, nil)
+		if count(r, "excess") != 0 || count(r, "missing") != 0 {
+			t.Errorf("excess = %v, missing = %v", r["excess"], r["missing"])
+		}
+	})
+
+	t.Run("駒落ちはエラーにしない", func(t *testing.T) {
+		// 香車を2枚落とした盤面
+		r := handCheck("1nsgkgsn1/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL", nil)
+		if count(r, "excess") != 0 {
+			t.Errorf("駒落ちが excess に入っている: %v", r["excess"])
+		}
+		if count(r, "missing") == 0 {
+			t.Error("不足が missing に載っていない")
+		}
+	})
+
+	t.Run("多すぎるものだけ excess", func(t *testing.T) {
+		// 歩が19枚（1段目に1枚足した）
+		r := handCheck("lnsgkgsnP/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL", nil)
+		if count(r, "excess") == 0 {
+			t.Error("超過が excess に載っていない")
+		}
+	})
+
+	t.Run("持ち駒を足した分も数える", func(t *testing.T) {
+		// 平手の盤面 + 歩1枚の持ち駒 = 19枚で超過
+		if r := handCheck(initial, map[string]int{"P": 1}); count(r, "excess") == 0 {
+			t.Error("持ち駒を含めた超過が検出されていない")
+		}
+	})
+
+	t.Run("逆算は盤面に無い分を返す", func(t *testing.T) {
+		r := handCheck("1nsgkgsn1/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL", nil)
+		d, _ := r["derived"].(map[string]interface{})
+		if d["L"] != float64(2) {
+			t.Errorf("derived[L] = %v, want 2", d["L"])
+		}
+		if _, ok := d["P"]; ok {
+			t.Errorf("過不足のない駒種が derived に入っている: %v", d)
+		}
+	})
+}
+
 func TestMergeSFEN(t *testing.T) {
 	const board = "9/9/9/9/9/9/9/9/9"
 	cases := []struct {

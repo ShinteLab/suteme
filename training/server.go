@@ -148,6 +148,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/setboard", handleSetBoard)
 	mux.HandleFunc("/api/trainhistory", handleTrainHistory)
 	mux.HandleFunc("/api/recognize", handleRecognize)
+	mux.HandleFunc("/api/handcheck", handleHandCheck)
 	mux.HandleFunc("/api/status", handleStatus)
 	mux.HandleFunc("/api/settings", handleSettings)
 	mux.HandleFunc("/api/register", handleRegister)
@@ -562,6 +563,70 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 		// 実際に保存した文字列を返す（表示と保存内容を食い違わせない）
 		"sfen": entry.SFEN,
 	})
+}
+
+// handleHandCheck は「盤面 + 手入力した持ち駒」を駒種ごとに突き合わせる。
+//
+// **これは参考情報であってエラーではない。** 正しいのは画像であって、盤面が
+// 全駒そろっている必要はない。**駒落ち・詰将棋では少ないほうが正常**なので、
+// 不足は警告にしない（`missing` として返し、画面では注記に留める）。
+// 多すぎる場合だけが認識か正解ラベルの誤りを示すので `excess` に入れる。
+//
+// 駒数の上限は `core/sfen` 由来（`suteme.PieceLimits`）。画面側に表を持たせない
+// ためにサーバで計算する。
+func handleHandCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Board string         `json:"board"`
+		Hands map[string]int `json:"hands"` // 先後合計（駒台は先後を区別せず突き合わせる）
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	sente, gote := suteme.CountFromSFEN(req.Board)
+	type diff struct {
+		Piece string `json:"piece"`
+		Total int    `json:"total"`
+		Limit int    `json:"limit"`
+	}
+	resp := map[string]interface{}{
+		"order":   suteme.HandOrder,
+		"limits":  suteme.PieceLimits,
+		"derived": map[string]int{},
+		"excess":  []diff{},
+		"missing": []diff{},
+	}
+	derived := map[string]int{}
+	var excess, missing []diff
+	for _, k := range suteme.HandOrder {
+		limit := suteme.PieceLimits[k]
+		onBoard := sente[k] + gote[k]
+		// 盤面から逆算した駒台の枚数（「逆算」ボタンの下書き用）
+		if n := limit - onBoard; n > 0 {
+			derived[k] = n
+		}
+		total := onBoard + req.Hands[k]
+		switch {
+		case total > limit:
+			excess = append(excess, diff{k, total, limit})
+		case total < limit:
+			missing = append(missing, diff{k, total, limit})
+		}
+	}
+	resp["derived"] = derived
+	if excess != nil {
+		resp["excess"] = excess
+	}
+	if missing != nil {
+		resp["missing"] = missing
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // mergeSFEN は画面が作り直した盤面部分に、既存エントリの手番・持ち駒・手数を引き継ぐ。
