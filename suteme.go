@@ -16,11 +16,20 @@ import (
 // **入力ベクトルの作り方（CellToInput / resizeGray）を変えたら版を上げること。**
 // MergeSamples は入力の内容でマージするので、表現の違うサンプルを同じファイルに
 // 混ぜると古いものが消えずに残り続ける。
+// v4: 入力ベクトルを float32 の精度へ丸め、ファイルもバイナリにした
+//
+//	（JSON は float64 1 個が 20 文字前後になり 186MB / 読み込み 1.8s だった）
+//
 // v3: リサイズを最近傍法から面積平均に変更（v2 は標準化・回転正規化・空クラス対応）
 const (
-	DefaultDataFile  = "training_data_v3.json"
-	DefaultModelFile = "model_v3.json"
+	DefaultDataFile  = "training_data_v4.bin"
+	DefaultModelFile = "model_v4.json"
 )
+
+// LegacyDataFiles は既定のファイルが無いときに読みにいく旧版の学習データ。
+// **v3 の JSON は v4 のバイナリと同じ内容（float32 に丸めて読む）**なので
+// そのまま使える。書き出しは常に DefaultDataFile なので、一度学習すれば移る。
+var LegacyDataFiles = []string{"training_data_v3.json"}
 
 // minBoardConfidence は盤面領域を採用する最低信頼度（ValidateBoard の値）。
 // これを下回る検出結果は「盤面ではない」として棄却する。
@@ -46,12 +55,16 @@ func SetPredictor(p Predictor) {
 }
 
 // LoadPredictor は dir から駒種推論器を読み込む。
-// training_data_v3.json があれば k-NN を優先する（学習処理が要らず、
-// サンプルを足した瞬間に反映されるため）。無ければ model_v3.json の
-// gobrain モデルを使う。
+// 学習データ（DefaultDataFile、無ければ LegacyDataFiles）があれば k-NN を
+// 優先する（学習処理が要らず、サンプルを足した瞬間に反映されるため）。
+// 無ければ DefaultModelFile の gobrain モデルを使う。
 func LoadPredictor(dir string) (Predictor, error) {
-	dataPath := filepath.Join(dir, DefaultDataFile)
-	if data, err := LoadTrainingData(dataPath); err == nil {
+	for _, name := range append([]string{DefaultDataFile}, LegacyDataFiles...) {
+		dataPath := filepath.Join(dir, name)
+		data, err := LoadTrainingData(dataPath)
+		if err != nil {
+			continue
+		}
 		if kn := NewKNN(data.Samples); kn != nil {
 			kn.source = dataPath
 			return kn, nil
@@ -105,7 +118,7 @@ func defaultPredictor() (Predictor, error) {
 // 持ち駒や検証結果も要るなら Recognize を使う。
 //
 // 駒種の推論器はカレントディレクトリ、次に実行ファイルのディレクトリから
-// 自動で読み込む（training_data_v3.json → k-NN 優先、無ければ model_v3.json）。
+// 自動で読み込む（training_data_v4.bin → k-NN 優先、無ければ model_v4.json）。
 // 明示的に指定する場合は SetPredictor / WithPredictor を使う。
 //
 // 既定では盤面の検証は行うがエラーにはしない。おかしい盤面をエラーにしたい場合は

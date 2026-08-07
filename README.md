@@ -1,4 +1,4 @@
-# suteme
+﻿# suteme
 
 将棋盤の画像から盤面を認識して SFEN を出力する Pure Go のライブラリ。
 
@@ -76,7 +76,7 @@ fmt.Println(board) // '/' 区切りの9段。手番・持ち駒・手数は付�
 `LoadSFEN` が返すのは**盤面部分だけ**。suteme の責務を「画像 → 盤面」に閉じてある。
 
 駒種の推論器はカレントディレクトリ、次に実行ファイルのディレクトリから自動で読む
-（`training_data_v3.json` があれば k-NN、無ければ `model_v3.json` の NN）。
+（`training_data_v4.bin` があれば k-NN、無ければ `model_v4.json` の NN）。
 見つからなければ `ErrNoPredictor` を返す。
 
 ### 駒数の検証・持ち駒の推定まで
@@ -136,7 +136,7 @@ r, err := suteme.Recognize(img, suteme.WithRect(4, 1, 637, 703))
 r, _ := suteme.Recognize(img)
 
 fmt.Println(r.Debug)
-// region=(4,1)-(637,703) cell=70x78 src=detect conf=1.00 predictor=knn(k=5, samples=5265) <- ./training_data_v3.json
+// region=(4,1)-(637,703) cell=70x78 src=detect conf=1.00 predictor=knn(k=5, samples=5265) <- ./training_data_v4.bin
 
 fmt.Print(r.Debug.Dump())        // 盤の形に並べた表記と確信度
 r.Debug.LowConfidenceCells(0.6)  // 怪しいマスだけ絞り込む
@@ -170,13 +170,16 @@ go run ./_cmd/suteme-training/ 8888
 自動分類と推論候補で埋まる）→ 履歴タブで「全選択」→「学習」。
 ズレていれば解析タブで盤面をドラッグ指定し、違うマスだけクリックして直す。
 
-学習データは `training_data_v3.json` に累積し、k-NN はそこから即座に構築される
+学習データは `training_data_v4.bin` に累積し、k-NN はそこから即座に構築される
 （学習処理は要らない）。「学習」が数秒で終わるのはこのため。
+v4 は float32 のバイナリで、JSON だった v3 に比べて 178MB → 36.5MB・
+読み込み 1.72s → 42ms（16605 サンプルでの実測）。
+**旧 `training_data_v3.json` があればそのまま読める**ので作り直しは要らない。
 
-比較用の gobrain NN（`model_v3.json`）は**既定では訓練しない**。
+比較用の gobrain NN（`model_v4.json`）は**既定では訓練しない**。
 訓練時間が累積サンプル数に比例して数十分かかるうえ、認識に使うのは k-NN だからで、
 必要なときだけ履歴タブの「NN（比較用）も学習し直す」を付ける。
-そのため `model_v3.json` は学習データより古いことがあり、画面では
+そのため `model_v4.json` は学習データより古いことがあり、画面では
 「NN（学習データより古い）」と断って表示する。
 
 ### どれだけ集めればよいか

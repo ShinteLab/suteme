@@ -467,8 +467,13 @@ ClassifyCellWith(cell, 盤全体の地色)
 **`CellToInput` / `resizeGray` を変えたら `DefaultDataFile` / `DefaultModelFile` の
 版を上げること。** `MergeSamples` は入力の内容でマージするので、表現の違う
 サンプルを同じファイルに混ぜると古いものが消えずに残り続ける。
-面積平均への変更で v2 → v3 に上げた。**v3 へ上げた後は履歴タブで
-「全選択」→「学習」して作り直す必要がある**（v2 のファイルは読まれない）。
+面積平均への変更で v2 → v3、float32 への丸め（後述のバイナリ形式）で v3 → v4 に上げた。
+**v2 のファイルは読まれない**ので、v2 から来た場合は履歴タブで
+「全選択」→「学習」して作り直す必要がある。
+**v3 → v4 は例外で作り直しが要らない**（丸めるだけで内容は同じなので、
+`LoadTrainingData` が v3 の JSON も読める）。`model_v3.json` のほうは
+読まないが、これは比較用の NN なので実害は無い（次に NN を学習したときに
+`model_v4.json` ができる）。
 
 ### パッケージ分割の方針
 
@@ -485,8 +490,8 @@ gobrain の FeedForward NN を使用:
 - クラス数: **15**（駒種 14＝歩/香/桂/銀/金/角/飛/玉/と/杏/圭/全/馬/龍、向きなし ＋ 空 `ClassEmpty`=14）
 - 向きは `ClassifyCellWith` が担当（NN 不使用）
 - **向きの正規化**: 後手の駒は `Rotate180` で先手向きにしてから NN に入力（学習・推論とも）
-- モデル保存: `model_v3.json`（JSON シリアライズ）
-- 学習データ: `training_data_v3.json`（累積保存）
+- モデル保存: `model_v4.json`（JSON シリアライズ）
+- 学習データ: `training_data_v4.bin`（累積保存。後述のバイナリ形式）
 - 訓練パラメータ: 300 epochs / lr=0.2 / momentum=0.5、**学習前にパターンをシャッフル**（クラス順のままだと逐次学習が偏る）
 
 **NN の学習は既定で行わない（`/api/trainhistory` の `nn` が false のとき）。**
@@ -505,20 +510,56 @@ gobrain の FeedForward NN を使用:
 **局面を足すほど線形に伸びる**（100局面なら 40 分超）。しかもこの NN は
 `/api/recognize` の比較用 SFEN（`sfen_nn`）にしか使われないので、既定から外して
 履歴タブのチェックボックスで明示的に回す形にしてある。**`Train` / `BalanceData` を
-消していない**のは、`training_data_v3.json` が 186MB あるのに対し `model_v3.json` は
-小さく、**軽量な配布用モデル**という道を残すため（`LoadPredictor` は
-training_data が無ければ model を読む）。
+消していない**のは、学習データが 36MB あるのに対し `model_v4.json` は小さく、
+**軽量な配布用モデル**という道を残すため（`LoadPredictor` は
+学習データが無ければ model を読む）。
 
-**NN を外しても 0 秒にはならない。** 実測（16605 サンプル / 186MB）:
-読み込み 1.8s + `MergeSamples` 74ms + k-NN 構築 ~0ms + 保存 0.8s = **約 2.6 秒**
-（これに選んだ局面ぶんの `samplesFromHistory` が乗る）。次に効かせるなら
-**学習データの JSON をやめる**（float64 の配列を 576 個 × 16605 件をテキストで
-持っているのが 186MB の正体）。
+**NN を外しても 0 秒にはならない。** 16605 サンプルでの内訳（v4 バイナリ）:
+読み込み 42ms + `MergeSamples` 74ms + k-NN 構築 ~0ms + 保存 18ms
+（これに選んだ局面ぶんの `samplesFromHistory` が乗る）。
 
-NN を回さないと `model_v3.json` は学習データより古くなる。**「比較用」として
+### 学習データのファイル形式（v4 = バイナリ）
+
+**v3 まで JSON だったのをやめた。float64 1 個が `-0.4351893093912134` のような
+20 文字前後のテキストになるため。** 576 次元 × 16605 サンプル ≒ 956 万個の数値で
+**178MB**、読むたびに全部を `strconv` で数値に戻すので**読み込み 1.72s / 保存 0.79s**
+かかっていた。同じ内容を float32 で並べた実測:
+
+| | v3 (JSON) | **v4 (バイナリ)** |
+|---|---|---|
+| サイズ | 178 MB | **36.5 MB** |
+| 読み込み | 1.72 s | **42 ms** |
+| 保存 | 0.79 s | **18 ms** |
+
+```
+ヘッダ 16 バイト
+  magic     [8]byte  "SUTEMETD"
+  version   uint16   = 4
+  inputSize uint16   = 576
+  count     uint32
+以降 count 件: label int32 + input [576]float32   （すべてリトルエンディアン）
+```
+
+- **`CellToInput` も float32 の精度へ丸める（`quantize`）。これが要。**
+  `MergeSamples` は入力ベクトルの**内容の一致**で重複を判定するので、
+  「ファイルから読んだサンプル（float32）」と「同じマスから作り直したサンプル
+  （素の float64）」が食い違うと**重複除去が丸ごと効かなくなり、学習を押すたびに
+  同じサンプルが積み上がる**（実装当初にこれで 71% が重複していた）。
+  回帰テストは `TestCellToInputSurvivesSaveLoad`。
+  丸めても情報は落ちない（元は 0〜255 の輝度で、float32 の相対誤差は 6e-8）
+- **`LoadTrainingData` は v3 の JSON も読む**（先頭が `{` かで判別し、読んだ値を
+  float32 に丸める）。178MB の既存ファイルを捨てずに移行するため。
+  **書き出しは常に v4** なので、一度学習すれば移る。探索順は
+  `DefaultDataFile` → `LegacyDataFiles`（`loadExistingTrainingData`）
+- **保存は一時ファイル + rename。** 手でラベル付けした正解から作られる
+  壊れやすい資産なので、書き込み中に落ちても全損させない（`history.json` と同じ）
+- **壊れたファイルは読み飛ばさずエラーにする。** 空データとして読むと
+  「新規」扱いになり、次の保存で正解データが消える
+
+NN を回さないと `model_v4.json` は学習データより古くなる。**「比較用」として
 見ているものが数十局面前のモデル、という誤読を防ぐ**ため `nnStale` を持ち、
 `/api/recognize` の `nn_stale` で返して画面に「NN（学習データより古い）」と出す。
-起動時は `model_v3.json` と `training_data_v3.json` の更新時刻で判定する。
+起動時は `model_v4.json` と `training_data_v4.bin` の更新時刻で判定する。
 
 **重複除去** (`MergeSamples`): `/api/train` は毎回「既存ファイルの全件 + メモリ上の
 全セッションのラベル」を保存し直すため、素通しだと学習を押すたびに同じサンプルが
@@ -556,7 +597,7 @@ NN を回さないと `model_v3.json` は学習データより古くなる。**�
 1 件から **152 件**に、最近傍1件の相対比較でも **115 件**に増えた。
 絶対しきい値なら、一致しない限り `ClassifyCellWith` の判定がそのまま残るので
 **精度を下げる方向には働かない**（駒→空は 1 件のまま）。
-- **学習処理が不要**: `training_data_v3.json` から起動時に構築、/api/train 後に再構築
+- **学習処理が不要**: `training_data_v4.bin` から起動時に構築、/api/train 後に再構築
 - サーバは k-NN 優先で推論し、gobrain モデルもあれば /api/recognize で比較用 SFEN（`sfen_nn`）も返す
 
 ### 駒台推定・盤面検証（`komadai.go` → `core/sfen`）
@@ -671,7 +712,7 @@ SFEN と食い違う（学習用サーバの `predictCells` / `/api/recognize` �
 ```
 LoadSFEN(img)
   ↓ defaultPredictor: カレントディレクトリ → 実行ファイルのディレクトリの順に探索
-  │   training_data_v3.json → k-NN（優先）/ model_v3.json → gobrain
+  │   training_data_v4.bin → k-NN（優先）/ model_v4.json → gobrain
   │   ※ 見つかった結果はキャッシュ。失敗はキャッシュしない（後からファイルを置けば拾う）
   ↓ detectBoardRegion: DetectBoard → 信頼度不足なら「画像全体が盤面」で再評価
   │   ※ ikkyoku のガイド枠のように盤だけを切り出した画像はグリッド線が
@@ -739,7 +780,7 @@ fmt.Println(r.SFEN()) // "lnsg... b 2R2B4G4S4N4L18P 1"
 
 ```go
 r, _ := suteme.Recognize(img)
-// region=(4,1)-(637,703) cell=70x78 src=detect conf=1.00 predictor=knn(k=5, samples=5265) <- ./training_data_v3.json
+// region=(4,1)-(637,703) cell=70x78 src=detect conf=1.00 predictor=knn(k=5, samples=5265) <- ./training_data_v4.bin
 log.Println(r.Debug)
 fmt.Print(r.Debug.Dump())       // 盤の形に並べた表記と確信度（" l  100% n   91% +p  43% ..."）
 r.Debug.LowConfidenceCells(0.6) // 怪しいマスだけ絞り込む
@@ -790,7 +831,7 @@ UI は `training/static/index.html`（embed）。
 go run ./_cmd/suteme-training/ 8888
 ```
 
-起動時に `model_v3.json` があれば自動ロード。
+起動時に `model_v4.json` があれば自動ロード。
 
 ### API エンドポイント
 
@@ -1067,7 +1108,7 @@ APIタブ   外部からの訓練データ登録の設定（既定は無効）
   `ParseBoard` は**駒のあるマスしか呼ばない**ので、埋まったマスを記録して
   残りを空として補う（`label == "None"` での判定は効かない）
   **モデルを作り直すなら「全選択」→「学習」の 1 操作。** ゼロからなら先に
-  `training_data_v3.json` を消す（消さなくても重複は `MergeSamples` が畳む）。
+  `training_data_v4.bin` を消す（消さなくても重複は `MergeSamples` が畳む）。
   1局面につき `shiftAugment` の分（現在 5 通り）× 81マスのサンプルが作られる。
   **既定では gobrain NN を学習しない**（k-NN の再構築と学習データの保存だけ）ので
   数秒で終わる。NN も要るなら履歴タブの「NN（比較用）も学習し直す」を付ける
@@ -1078,8 +1119,9 @@ APIタブ   外部からの訓練データ登録の設定（既定は無効）
 ### データの永続化
 
 - `data/settings.json`: 外部公開の設定（有効/無効・外部公開・Bearerトークン）
-- `training_data_v3.json`: 学習データ累積（毎回マージ・`MergeSamples` で重複除去）
-- `model_v3.json`: 学習済み FeedForward NN（起動時自動ロード。**既定では更新されない**ので
+- `training_data_v4.bin`: 学習データ累積（毎回マージ・`MergeSamples` で重複除去）。
+  旧 `training_data_v3.json` があれば読み込みだけ受け付ける（書き出しは常に v4）
+- `model_v4.json`: 学習済み FeedForward NN（起動時自動ロード。**既定では更新されない**ので
   学習データより古いことがある。`nnStale` として画面に出す）
 - `data/{id}.png`: 保存した局面画像
 - `data/history.json`: 保存した局面の一覧（SFEN・盤面座標・出所・確認済みか、**最大200件**。

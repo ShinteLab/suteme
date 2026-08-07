@@ -1,11 +1,17 @@
 package suteme
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ShinteLab/core/sfen"
@@ -96,7 +102,19 @@ type TrainingSample struct {
 }
 
 // CellToInput はマス画像を入力ベクトルに変換 (24x24 グレースケール → 576 float64)
-// 画像ごとの明るさ・コントラスト差を吸収するため、平均0・分散1に標準化する
+// 画像ごとの明るさ・コントラスト差を吸収するため、平均0・分散1に標準化する。
+//
+// **最後に float32 の精度へ丸める（v4）。学習データファイルが float32 で
+// 持つので、そこに合わせないと `MergeSamples` の重複除去が効かなくなる。**
+// MergeSamples は入力ベクトルの内容が一致するかで重複を判定するが、
+// ファイルから読んだサンプル（float32 で丸め済み）と新しく作ったサンプル
+// （素の float64）は同じマスから作っても値がわずかに食い違うため、
+// 丸めないと**学習を押すたびに同じサンプルが積み上がる**
+// （実装当初にこれで 1173 件中 838 件＝71% が重複していた）。
+//
+// 元の値は 0〜255 の輝度から作るので、float32 の仮数 24bit で
+// 表現できる範囲を超える情報は元から無い（相対誤差 6e-8。
+// k-NN の距離の順位には影響しない）。
 func CellToInput(cell image.Image) []float64 {
 	resized := resizeGray(cell, cellSize, cellSize)
 	input := make([]float64, inputSize)
@@ -117,31 +135,163 @@ func CellToInput(cell image.Image) []float64 {
 		std = 1
 	}
 	for i := range input {
-		input[i] = (input[i] - mean) / std
+		input[i] = quantize((input[i] - mean) / std)
 	}
 	return input
 }
 
-// SaveTrainingData は学習データをJSONファイルに保存
+// quantize は float32 の精度へ丸める（ファイル表現と揃えるため。CellToInput 参照）
+func quantize(v float64) float64 { return float64(float32(v)) }
+
+// 学習データファイル（v4）のバイナリ表現。
+//
+// **v3 まではこれを JSON で持っていたが、float64 1 個が 20 文字前後の
+// テキストになるので実測 16605 サンプルで 186MB あった**（576 × 16605 ≒
+// 956 万個の数値）。読むたびに全部を strconv で数値に戻すため、
+// 読み込み 1.8s・保存 0.8s かかっていた。同じ内容を float32 で並べれば
+// 38MB・0.1s 程度で済む。
+//
+//	ヘッダ 16 バイト
+//	  magic     [8]byte  "SUTEMETD"
+//	  version   uint16   = 4
+//	  inputSize uint16   = 576
+//	  count     uint32   サンプル数
+//	以降 count 件
+//	  label     int32
+//	  input     [inputSize]float32
+//
+// すべてリトルエンディアン。
+const (
+	trainingDataVersion = 4
+	trainingDataHeader  = 16
+)
+
+var trainingDataMagic = [8]byte{'S', 'U', 'T', 'E', 'M', 'E', 'T', 'D'}
+
+// SaveTrainingData は学習データをバイナリファイルに保存する。
+//
+// **一時ファイルに書いてから rename する。** 手でラベル付けした正解から
+// 作られる壊れやすい資産で、しかも書き込みに数百 ms かかるので、
+// 途中で落ちたときに全損させない（history.json と同じ扱い）。
 func SaveTrainingData(path string, data *TrainingData) error {
-	f, err := os.Create(path)
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return json.NewEncoder(f).Encode(data)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // rename に成功していれば消えるものは無い
+
+	w := bufio.NewWriterSize(tmp, 1<<20)
+	if err := writeTrainingData(w, data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := w.Flush(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
-// LoadTrainingData は学習データをJSONファイルから読み込み
+func writeTrainingData(w io.Writer, data *TrainingData) error {
+	var head [trainingDataHeader]byte
+	copy(head[:8], trainingDataMagic[:])
+	binary.LittleEndian.PutUint16(head[8:], trainingDataVersion)
+	binary.LittleEndian.PutUint16(head[10:], uint16(inputSize))
+	binary.LittleEndian.PutUint32(head[12:], uint32(len(data.Samples)))
+	if _, err := w.Write(head[:]); err != nil {
+		return err
+	}
+
+	buf := make([]byte, 4+inputSize*4)
+	for _, s := range data.Samples {
+		if len(s.Input) != inputSize {
+			return fmt.Errorf("入力長が %d ではありません: %d", inputSize, len(s.Input))
+		}
+		binary.LittleEndian.PutUint32(buf, uint32(int32(s.Label)))
+		for i, v := range s.Input {
+			binary.LittleEndian.PutUint32(buf[4+i*4:], math.Float32bits(float32(v)))
+		}
+		if _, err := w.Write(buf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LoadTrainingData は学習データをファイルから読み込む。
+// v4 のバイナリと、v3 までの JSON の**どちらも読める**
+// （186MB の既存ファイルを捨てずに移行するため。書き出しは常に v4）。
 func LoadTrainingData(path string) (*TrainingData, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+
+	r := bufio.NewReaderSize(f, 1<<20)
+	head, err := r.Peek(1)
+	if err != nil {
+		return nil, err
+	}
+	if head[0] == '{' {
+		return readTrainingDataJSON(r)
+	}
+	return readTrainingData(r)
+}
+
+func readTrainingData(r io.Reader) (*TrainingData, error) {
+	var head [trainingDataHeader]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil {
+		return nil, fmt.Errorf("学習データのヘッダが読めません: %w", err)
+	}
+	if !bytes.Equal(head[:8], trainingDataMagic[:]) {
+		return nil, fmt.Errorf("学習データファイルではありません")
+	}
+	if v := binary.LittleEndian.Uint16(head[8:]); v != trainingDataVersion {
+		return nil, fmt.Errorf("学習データの版が違います: %d (対応 %d)", v, trainingDataVersion)
+	}
+	n := int(binary.LittleEndian.Uint16(head[10:]))
+	if n != inputSize {
+		return nil, fmt.Errorf("入力長が違います: %d (対応 %d)", n, inputSize)
+	}
+	count := int(binary.LittleEndian.Uint32(head[12:]))
+
+	data := &TrainingData{Samples: make([]TrainingSample, 0, count)}
+	buf := make([]byte, 4+n*4)
+	for i := 0; i < count; i++ {
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, fmt.Errorf("%d 件目が読めません: %w", i, err)
+		}
+		input := make([]float64, n)
+		for j := 0; j < n; j++ {
+			input[j] = float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[4+j*4:])))
+		}
+		data.Samples = append(data.Samples, TrainingSample{
+			Input: input,
+			Label: int(int32(binary.LittleEndian.Uint32(buf))),
+		})
+	}
+	return data, nil
+}
+
+// readTrainingDataJSON は v3 までの JSON 形式を読む。
+// **読んだ値は float32 に丸める。** v4 のファイルから読んだ場合と同じ値にしないと、
+// MergeSamples の重複判定が形式をまたいだときだけ効かなくなる（CellToInput 参照）。
+func readTrainingDataJSON(r io.Reader) (*TrainingData, error) {
 	var data TrainingData
-	err = json.NewDecoder(f).Decode(&data)
-	return &data, err
+	if err := json.NewDecoder(r).Decode(&data); err != nil {
+		return nil, err
+	}
+	for _, s := range data.Samples {
+		for i := range s.Input {
+			s.Input[i] = quantize(s.Input[i])
+		}
+	}
+	return &data, nil
 }
 
 // Model は駒認識モデル

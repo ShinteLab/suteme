@@ -108,11 +108,14 @@ var (
 	// nnStale: 学習データを更新したのに gobrain NN を学習し直していない状態。
 	// 比較用 SFEN（sfen_nn）が古いモデルの出力であることを画面に出すために持つ
 	nnStale bool
-	// v3: リサイズを最近傍法から面積平均に変えたため入力ベクトルの表現が
-	// v2 と食い違う。MergeSamples は入力の内容でマージするので、同じファイルに
-	// 混ぜると古い表現のサンプルが消えずに残り続ける。
-	// （v2 は入力の標準化・後手の回転正規化・空マス除外に対応した形式。
-	//   旧 training_data.json は空マスが歩として混入しているため使用しない）
+	// 入力ベクトルの表現を変えたらファイル名の版を上げる。MergeSamples は
+	// 入力の内容でマージするので、表現の違うサンプルを同じファイルに混ぜると
+	// 古いものが消えずに残り続ける。
+	// （v4 は float32 精度 + バイナリ、v3 は面積平均リサイズ + JSON、
+	//   v2 は最近傍リサイズ。旧 training_data.json は空マスが歩として
+	//   混入しているため使用しない）
+	// **v3 の JSON は内容としては v4 と同じなので読み込みだけ受け付ける**
+	// （loadExistingTrainingData）。書き出しは常に dataFile。
 	dataFile  = suteme.DefaultDataFile
 	modelFile = suteme.DefaultModelFile
 	modelLock sync.RWMutex
@@ -123,20 +126,21 @@ var (
 // 起動時にカレントディレクトリの model_v3.json / training_data_v3.json を自動ロードする
 func Serve(port string) error {
 	loadSettings()
+	// 学習データがあれば k-NN を構築（学習処理は不要）
+	data, dataPath := loadExistingTrainingData()
+	if data != nil {
+		if kn := suteme.NewKNN(data.Samples); kn != nil {
+			knn = kn
+			log.Printf("Built k-NN from %d samples in %s", kn.Len(), dataPath)
+		}
+	}
 	// 起動時に保存済みモデルを読み込む
 	if m, err := suteme.LoadModel(modelFile); err == nil {
 		model = m
 		// NN は既定では学習し直さないので、前回の起動より前に置き去りになっている
 		// ことがある。学習データより古ければ比較用 SFEN に断りを出す
-		nnStale = olderThan(modelFile, dataFile)
+		nnStale = olderThan(modelFile, dataPath)
 		log.Printf("Loaded model from %s (stale=%v)", modelFile, nnStale)
-	}
-	// 学習データがあれば k-NN を構築（学習処理は不要）
-	if data, err := suteme.LoadTrainingData(dataFile); err == nil {
-		if kn := suteme.NewKNN(data.Samples); kn != nil {
-			knn = kn
-			log.Printf("Built k-NN from %d samples in %s", kn.Len(), dataFile)
-		}
 	}
 
 	mux := http.NewServeMux()
@@ -172,6 +176,23 @@ func Serve(port string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return srv.ListenAndServe()
+}
+
+// loadExistingTrainingData は既存の学習データを読む。dataFile（v4）が無ければ
+// 旧版（v3 の JSON）を探す。**書き出しは常に dataFile なので、一度学習すれば移る。**
+// 見つからなければ nil を返す。戻り値の 2 つ目は読み込み元のパス
+func loadExistingTrainingData() (*suteme.TrainingData, string) {
+	for _, path := range append([]string{dataFile}, suteme.LegacyDataFiles...) {
+		data, err := suteme.LoadTrainingData(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Printf("学習データが読めません (%s): %v", path, err)
+			}
+			continue
+		}
+		return data, path
+	}
+	return nil, ""
 }
 
 // olderThan は a の更新時刻が b より古いかを返す。どちらかが読めなければ false
@@ -961,11 +982,11 @@ func samplesFromRegion(img image.Image, br *suteme.BoardRegion, board string) ([
 // その 9 分で作られる NN は /api/recognize の比較用 SFEN（sfen_nn）にしか
 // 使われないので、既定から外して明示的に回す形にしてある。
 func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]interface{}, error) {
-	// 既存の学習データを読み込む
+	// 既存の学習データを読み込む（v4 が無ければ旧版から引き継ぐ）
 	var existing []suteme.TrainingSample
-	if e, err := suteme.LoadTrainingData(dataFile); err == nil {
+	if e, path := loadExistingTrainingData(); e != nil {
 		existing = e.Samples
-		log.Printf("Loaded %d existing samples from %s", len(existing), dataFile)
+		log.Printf("Loaded %d existing samples from %s", len(existing), path)
 	}
 
 	// 入力長が合わないサンプルを除外
@@ -990,8 +1011,11 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 		return nil, fmt.Errorf("学習データがありません")
 	}
 
-	// 学習データを保存（生データ全件）
-	suteme.SaveTrainingData(dataFile, &data)
+	// 学習データを保存（生データ全件）。**これに失敗したら先へ進まない。**
+	// ラベル付けした正解が消えたのに「学習完了」と出るのが一番まずい
+	if err := suteme.SaveTrainingData(dataFile, &data); err != nil {
+		return nil, fmt.Errorf("学習データを保存できませんでした: %w", err)
+	}
 
 	// k-NN は生データから即再構築（学習不要）
 	if kn := suteme.NewKNN(data.Samples); kn != nil {
