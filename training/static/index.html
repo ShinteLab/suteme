@@ -1095,7 +1095,11 @@ async function updateHandSummary() {
     '<code style="color:#eee">' + handStr + '</code>' +
     '<span style="color:#888"> / 手番 </span><span style="color:#eee">' +
     TURN_LABEL[currentTurn()] + '</span>' +
-    '<span style="color:#888"> / 手数 ' + sfenMoveNumber() +
+    // **「手数 40」と出さない。「次が 40 手目」と出す。**
+    // 将棋のユーザは「40手目の盤面」を "40手目を指した後" の意味で使うが、
+    // SFEN の 40 は "次に指すのが40手目"（＝39手目まで指された局面）。
+    // そのまま数字を見せると 1 ずれたまま読まれる
+    '<span style="color:#888"> / 次が ' + sfenMoveNumber() + ' 手目' +
     (currentMoveNumber === null ? '（不明。手番の印として付けた値）' : '') + '</span>';
 
   const built = buildSFEN();
