@@ -331,10 +331,13 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   </h2>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
     <span style="font-size:12px;color:#888">手番</span>
+    <!-- 既定は「不明」。画像から手番は決まらないので、既定で手前と主張しない -->
     <label style="font-size:13px;color:#eee;display:flex;align-items:center;gap:4px;cursor:pointer">
-      <input type="radio" name="turn" value="b" checked onchange="updateHandSummary()">手前</label>
+      <input type="radio" name="turn" value="" checked onchange="updateHandSummary()">不明</label>
     <label style="font-size:13px;color:#eee;display:flex;align-items:center;gap:4px;cursor:pointer">
       <input type="radio" name="turn" value="w" onchange="updateHandSummary()">奥</label>
+    <label style="font-size:13px;color:#eee;display:flex;align-items:center;gap:4px;cursor:pointer">
+      <input type="radio" name="turn" value="b" onchange="updateHandSummary()">手前</label>
     <button onclick="deriveHands()" title="盤面に無い駒を手前の駒台に置きます。駒落ちや詰将棋では正しくないので、あくまで下書きです"
       style="margin-left:auto;font-size:11px;background:none;border:1px solid #444;color:#888;padding:3px 10px;border-radius:3px;cursor:pointer">盤面から逆算（下書き・手前へ）</button>
     <button onclick="clearHands()"
@@ -561,8 +564,8 @@ async function analyze(file) {
   document.getElementById('sfen-input').value = '';
   currentHistoryId = null; // 履歴からの再入力なら、この後で呼び出し側が入れ直す
   // 手番・持ち駒も持ち越さない（前の局面の駒台が残ると別画像の正解データが汚れる）
-  currentMoveNumber = 1;
-  setTurn('b');
+  currentMoveNumber = null;
+  setTurn(''); // 不明
   setHands('-');
   resetSaveButton();
   document.getElementById('loading').classList.add('active');
@@ -932,7 +935,22 @@ function buildSFEN() {
 // その値をここへ流し込み、保存でそのまま書き戻すのが主目的
 // （以前は保存のたびに `b - 1` を作っていて、送られてきた持ち駒が消えていた）。
 // 駒種の並び順は core/web の HAND_ORDER に従う（画面側に表を持たない）。
-let currentMoveNumber = 1;
+//
+// **手番の既定は「不明」。** 画像から手番は決まらないので、既定で手前と主張しない。
+// ただし SFEN の手番欄は空にできないので、手数で表す:
+//
+//   | 画面   | 保存する SFEN |
+//   |--------|---------------|
+//   | 不明   | `b … 1`       |
+//   | 奥     | `w … 2`       |
+//   | 手前   | `b … 3`       |
+//
+// 手数の偶奇と手番が一致するので SFEN として自然な形のまま。
+// **これは手数が分からないときだけの符号化。** API から本物の手数
+// （`w 2G3P 42` など）が来ていればその値を保つ。手数まで 1/2/3 に
+// 書き換えると、持ち駒のときと同じ「確認したら消える」を手数で繰り返すことになる。
+let currentMoveNumber = null; // null = 不明（保存時に手番から決める）
+const UNKNOWN_MOVE_NUMBER = { '': 1, w: 2, b: 3 };
 
 // 盤の見え方に合わせて、左に「奥」・右に「手前」を縦に並べる。
 //
@@ -996,14 +1014,43 @@ function setHands(str) {
   scheduleHandCheck();
 }
 
+// '' = 不明 / 'w' = 奥 / 'b' = 手前
 function setTurn(t) {
-  const el = document.querySelector(`input[name="turn"][value="${t === 'w' ? 'w' : 'b'}"]`);
+  const v = (t === 'w' || t === 'b') ? t : '';
+  const el = document.querySelector(`input[name="turn"][value="${v}"]`);
   if (el) el.checked = true;
 }
 
 function currentTurn() {
   const el = document.querySelector('input[name="turn"]:checked');
-  return el ? el.value : 'b';
+  return el ? el.value : '';
+}
+
+const TURN_LABEL = { '': '不明', w: '奥', b: '手前' };
+
+// SFEN に書く手番。**不明は書けないので `b` + 手数 1 で表す**（上記の表）
+function sfenTurn() {
+  return currentTurn() || 'b';
+}
+
+// SFEN に書く手数。分かっていればその値、分からなければ手番から決める
+function sfenMoveNumber() {
+  if (currentMoveNumber !== null) return currentMoveNumber;
+  return UNKNOWN_MOVE_NUMBER[currentTurn()] || 1;
+}
+
+// SFEN の手番・手数 → 画面。**`b … 1` は「不明」と読む**（保存時の符号化の逆）。
+// 本物の初期局面（平手の開始図）も `b … 1` なので不明として表示されるが、
+// 保存し直しても同じ `b … 1` に戻るのでデータは変わらない
+function applyTurnFields(turn, move) {
+  const mv = Number(move);
+  if (turn === 'b' && mv === 1) {
+    setTurn('');
+    currentMoveNumber = null;
+    return;
+  }
+  setTurn(turn);
+  currentMoveNumber = mv > 0 ? mv : null;
 }
 
 function clearHands() {
@@ -1046,7 +1093,10 @@ async function updateHandSummary() {
   const handStr = ShinteWeb.sfen.formatHands(hands);
   let html = '<span style="color:#888">保存する持ち駒: </span>' +
     '<code style="color:#eee">' + handStr + '</code>' +
-    '<span style="color:#888"> / 手番 </span><code style="color:#eee">' + currentTurn() + '</code>';
+    '<span style="color:#888"> / 手番 </span><span style="color:#eee">' +
+    TURN_LABEL[currentTurn()] + '</span>' +
+    '<span style="color:#888"> / 手数 ' + sfenMoveNumber() +
+    (currentMoveNumber === null ? '（不明。手番の印として付けた値）' : '') + '</span>';
 
   const built = buildSFEN();
   if (built && !built.error) {
@@ -1319,9 +1369,8 @@ document.getElementById('history-list').addEventListener('click', async e => {
     document.getElementById('sfen-input').value = sfen;
     await applyFromSFEN();
     const f = sfen.trim().split(/\s+/);
-    setTurn(f[1] || 'b');
     setHands(f[2] || '-');
-    currentMoveNumber = Number(f[3]) > 0 ? Number(f[3]) : 1;
+    applyTurnFields(f[1], f[3]);
   }
   // 再入力が目的なので、復元し終えてから解析タブに移る
   switchTab('analyze');
@@ -1362,8 +1411,8 @@ async function saveSession() {
   }
   // 盤面は画面のラベルから、手番・持ち駒は「3. 手番と持ち駒」の入力欄から。
   // どちらも画面に見えている値なので、隠れた既定値が入ることはない
-  const sfen = [built.sfen, currentTurn(),
-    ShinteWeb.sfen.formatHands(readHands()), currentMoveNumber].join(' ');
+  const sfen = [built.sfen, sfenTurn(),
+    ShinteWeb.sfen.formatHands(readHands()), sfenMoveNumber()].join(' ');
 
   const btn = document.getElementById('btn-save-session');
   btn.textContent = '保存中...';
@@ -1445,9 +1494,8 @@ async function applyFromSFEN() {
   // 完全形が貼られたら手番・持ち駒の欄にも展開する。
   // 「SFENから入力」を押すのは明示的な操作なので、盤面と同じ扱いでよい
   const f = sfen.split(/\s+/);
-  if (f.length > 1) setTurn(f[1]);
   if (f.length > 2) setHands(f[2]);
-  if (f.length > 3 && Number(f[3]) > 0) currentMoveNumber = Number(f[3]);
+  if (f.length > 1) applyTurnFields(f[1], f[3]);
 
   // ラベルは画面側だけで保持する。保存(SFEN)と履歴からの学習で完結するので
   // サーバにマスごとのラベルを持たせる必要はない
