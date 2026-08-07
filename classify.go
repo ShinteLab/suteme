@@ -5,13 +5,20 @@ import (
 	"sort"
 )
 
-// CellCategory はマスの大分類
+// CellCategory はマスの大分類。
+//
+// **「手前（上向き）＝先手」は前提であって、画像から検証できるものではない。**
+// 駒の向きで分かるのは「どちらの対局者の駒か」だけで、その人が先手か後手かは
+// 盤の絵に写っていない。中継・紙面は「手前が先手」の慣習があるので合うが、
+// **ゲーム画面では自分が後手番のとき手前が後手になる**。その場合、駒の配置は
+// 正しいまま盤面全体の大文字/小文字が反転する。
+// 先後を確定させたいなら外から与えてもらうしかない（CLAUDE.md「先後の割り当て」）。
 type CellCategory int
 
 const (
 	CellEmpty     CellCategory = 0 // 空
-	CellPieceUp   CellCategory = 1 // 先手（上向き）
-	CellPieceDown CellCategory = 2 // 後手（下向き）
+	CellPieceUp   CellCategory = 1 // 上向き。手前側の対局者の駒 → 先手として扱う
+	CellPieceDown CellCategory = 2 // 下向き。奥側の対局者の駒 → 後手として扱う
 )
 
 func (c CellCategory) String() string {
