@@ -237,6 +237,59 @@ func TestSaveSessionVerifiesAPIEntry(t *testing.T) {
 	}
 }
 
+// 送られてきた手番・持ち駒が、解析タブでの確認（＝保存し直し）で消えない。
+//
+// 画面は盤面部分しか作れないので、以前はここで `b - 1` を作って上書きしていた。
+// `-` は「持ち駒なし」という積極的な主張なので、落とすより質が悪い
+func TestVerifyKeepsHandsAndTurn(t *testing.T) {
+	chdirTemp(t)
+	resetSettings(t)
+
+	const full = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w 2G3P 42"
+	img := testImage(t, 100, 100, color.RGBA{200, 180, 120, 255})
+	_, resp := doRegister(t, img, full, &BoardBounds{5, 5, 95, 95})
+	id, _ := resp["id"].(string)
+
+	if got := loadHistory().Entries[0].SFEN; got != full {
+		t.Fatalf("登録時点で欠けている\n got = %q\nwant = %q", got, full)
+	}
+
+	// 解析タブからの保存。画面が送るのは盤面部分だけ
+	board := "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL"
+	sess := newTestSession(t)
+	saved := postSave(t, sess, board, id)
+
+	if got := loadHistory().Entries[0].SFEN; got != full {
+		t.Errorf("確認後に手番・持ち駒が失われた\n got = %q\nwant = %q", got, full)
+	}
+	// 表示と保存内容を食い違わせない
+	if saved["sfen"] != full {
+		t.Errorf("レスポンスの sfen = %v, want %q", saved["sfen"], full)
+	}
+}
+
+func TestMergeSFEN(t *testing.T) {
+	const board = "9/9/9/9/9/9/9/9/9"
+	cases := []struct {
+		name        string
+		board, prev string
+		want        string
+	}{
+		{"引き継ぐ元があれば引き継ぐ", board, board + " w 2G3P 42", board + " w 2G3P 42"},
+		{"分からないものは書かない", board, "", board},
+		{"引き継ぐ元が盤面だけなら盤面だけ", board, board, board},
+		{"送られた側が持っていればそちらを優先", board + " b - 1", board + " w 2G3P 42", board + " b - 1"},
+		{"盤面が空なら既存を残す", "", board + " w 2G3P 42", board + " w 2G3P 42"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := mergeSFEN(c.board, c.prev); got != c.want {
+				t.Errorf("mergeSFEN(%q, %q) = %q, want %q", c.board, c.prev, got, c.want)
+			}
+		})
+	}
+}
+
 // アクセス制御。ループバックは素通し、外部は公開設定と許可パスに縛られる
 func TestAccessControl(t *testing.T) {
 	resetSettings(t)

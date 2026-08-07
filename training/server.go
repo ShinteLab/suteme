@@ -520,7 +520,7 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	entry := HistoryEntry{
 		ID:        id,
 		CreatedAt: time.Now().Format("01/02 15:04"),
-		SFEN:      req.SFEN,
+		SFEN:      mergeSFEN(req.SFEN, prev.SFEN),
 		Source:    SourceUI,
 		// 画面から保存した＝人が解析タブで見た、ということ。
 		// API 経由で入った未確認の局面はここを通ると確認済みになる
@@ -558,7 +558,37 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"id":        id,
 		"overwrote": replaced,
+		// 画面が送った盤面部分に手番・持ち駒が足されていることがあるので、
+		// 実際に保存した文字列を返す（表示と保存内容を食い違わせない）
+		"sfen": entry.SFEN,
 	})
+}
+
+// mergeSFEN は画面が作り直した盤面部分に、既存エントリの手番・持ち駒・手数を引き継ぐ。
+//
+// **解析タブには手番や持ち駒を編集する UI が無い**ので、画面から送られてくるのは
+// 盤面部分だけ。以前はここで `b - 1` を作って保存していたため、API 登録で受け取った
+// 正確な持ち駒が、確認して保存し直した瞬間に「持ち駒なし・先手番」に化けていた。
+// `-` は「無い」という積極的な主張なので、落とすより質が悪い。
+//
+// **分からないものは書かない。** 引き継ぐ元が無ければ盤面部分だけを保存する
+// （学習は fields[0] しか見ないので、これで困ることはない）。
+func mergeSFEN(board, prev string) string {
+	f := strings.Fields(board)
+	if len(f) == 0 {
+		return prev
+	}
+	rest := f[1:]
+	if len(rest) == 0 {
+		// 画面からの保存。既存エントリが持っていれば引き継ぐ
+		if p := strings.Fields(prev); len(p) > 1 {
+			rest = p[1:]
+		}
+	}
+	if len(rest) == 0 {
+		return f[0]
+	}
+	return f[0] + " " + strings.Join(rest, " ")
 }
 
 // handleSetBoard: 手動指定の矩形で盤面を再設定する

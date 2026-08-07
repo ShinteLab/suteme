@@ -890,7 +890,11 @@ function buildSFEN() {
   };
   const board = ShinteWeb.sfen.formatBoard(cell);
   if (missing.length > 0) return { error: missing };
-  return { sfen: board + ' b - 1' };
+  // **盤面部分だけを返す。手番と持ち駒はこの画面では決められない。**
+  // 以前は 'b - 1' を足していたため、API から受け取った正確な持ち駒が
+  // 「確認して保存し直す」だけで持ち駒なし・先手番に化けていた。
+  // 引き継ぎはサーバの mergeSFEN が行う
+  return { sfen: board };
 }
 
 // タブ切り替え
@@ -1196,7 +1200,8 @@ async function saveSession() {
       note = '<span style="font-size:12px;color:#f0a030">未入力だった駒 ' + filled.piece +
         'マスは推論候補で埋めました</span><br>' + note;
     }
-    sfenEl.innerHTML = '保存した盤面: ' + sfen + '<br>' + note;
+    // サーバが手番・持ち駒を引き継いでいることがあるので、保存された文字列を出す
+    sfenEl.innerHTML = '保存した盤面: ' + (data.sfen || sfen) + '<br>' + note;
     sfenEl.style.display = 'block';
     updateBoardPreview(sfen);
     refreshHistory();
