@@ -213,6 +213,8 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     <pre style="background:#0f3460;padding:10px;border-radius:4px;overflow-x:auto;font-size:11px;line-height:1.6;margin-top:8px">POST /api/register   multipart/form-data
   image        画像ファイル（PNG / JPEG）
   sfen         正解の SFEN（盤面部分だけでも可）
+               ※<b>手前側を先手として表現すること</b>。実際の対局で後手が手前でも同じ。
+                 これを外すと学習データの向き正規化が狂います
   x1,y1,x2,y2  盤面の外枠座標（<b>必須</b>）
 
 Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のとき
