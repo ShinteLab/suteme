@@ -117,7 +117,7 @@ var (
 )
 
 // Serve はラベリング・学習用のWebサーバを起動する
-// 起動時にカレントディレクトリの model_v2.json / training_data_v2.json を自動ロードする
+// 起動時にカレントディレクトリの model_v3.json / training_data_v3.json を自動ロードする
 func Serve(port string) error {
 	loadSettings()
 	// 起動時に保存済みモデルを読み込む

@@ -46,8 +46,8 @@ func SetPredictor(p Predictor) {
 }
 
 // LoadPredictor は dir から駒種推論器を読み込む。
-// training_data_v2.json があれば k-NN を優先する（学習処理が要らず、
-// サンプルを足した瞬間に反映されるため）。無ければ model_v2.json の
+// training_data_v3.json があれば k-NN を優先する（学習処理が要らず、
+// サンプルを足した瞬間に反映されるため）。無ければ model_v3.json の
 // gobrain モデルを使う。
 func LoadPredictor(dir string) (Predictor, error) {
 	dataPath := filepath.Join(dir, DefaultDataFile)
@@ -105,7 +105,7 @@ func defaultPredictor() (Predictor, error) {
 // 持ち駒や検証結果も要るなら Recognize を使う。
 //
 // 駒種の推論器はカレントディレクトリ、次に実行ファイルのディレクトリから
-// 自動で読み込む（training_data_v2.json → k-NN 優先、無ければ model_v2.json）。
+// 自動で読み込む（training_data_v3.json → k-NN 優先、無ければ model_v3.json）。
 // 明示的に指定する場合は SetPredictor / WithPredictor を使う。
 //
 // 既定では盤面の検証は行うがエラーにはしない。おかしい盤面をエラーにしたい場合は
