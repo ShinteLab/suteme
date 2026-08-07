@@ -242,6 +242,10 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   <div style="font-size:12px;color:#888;margin-bottom:6px">
     学習するだけならチェックを付けて「選択した局面で学習」。行をクリックすると解析タブで再入力できます。
   </div>
+  <label style="font-size:12px;color:#888;display:flex;align-items:center;gap:5px;cursor:pointer;margin-bottom:6px"
+    title="認識に使うのは k-NN で、これは学習データを保存した時点で更新されます。NN は /api/recognize の比較用 SFEN にしか使いません。学習には累積サンプル数に比例した時間（現状で 10 分以上）がかかります">
+    <input type="checkbox" id="hist-train-nn"> NN（比較用）も学習し直す — 数十分かかります
+  </label>
   <div id="history-list" style="max-height:480px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
   <div id="hist-train-result" style="display:none;margin-top:8px;padding:8px 12px;background:#0f3460;border-radius:4px;font-size:12px;line-height:1.7"></div>
 </div>
@@ -1272,18 +1276,21 @@ function toggleAllHistory(on) {
 async function trainFromHistory() {
   const ids = historySelection();
   if (ids.length === 0) return;
+  const nn = document.getElementById('hist-train-nn').checked;
   const btn = document.getElementById('btn-train-history');
   const box = document.getElementById('hist-train-result');
   btn.disabled = true;
   btn.textContent = ids.length + ' 件を学習中...';
   box.style.display = 'block';
-  box.innerHTML = '<span style="color:#888">学習中です。局面数によっては数十秒かかります…</span>';
+  box.innerHTML = nn
+    ? '<span style="color:#888">学習中です。NN の学習は累積サンプル数に比例するので数十分かかります…</span>'
+    : '<span style="color:#888">学習中です。数秒かかります…</span>';
 
   try {
     const res = await fetch('/api/trainhistory', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
+      body: JSON.stringify({ ids, nn }),
     });
     if (!res.ok) {
       box.innerHTML = '<span style="color:#ff8080">学習に失敗しました: ' + (await res.text()) + '</span>';
@@ -1298,8 +1305,13 @@ async function trainFromHistory() {
     const pieces = okList.reduce((a, e) => a + e.pieces, 0);
     let html = '<b style="color:#74c69d">学習完了</b> — ' +
       okList.length + ' 局面 / 駒 ' + pieces + '枚 → ' +
-      '学習データ ' + data.samples + '件（バランス後 ' + data.balanced + '件' +
+      '学習データ ' + data.samples + '件（' +
+      (data.balanced ? 'バランス後 ' + data.balanced + '件' : 'k-NN 再構築済み') +
       (data.duplicates ? ' / 重複除去 ' + data.duplicates + '件' : '') + '）';
+    // NN を回していない場合、比較用 SFEN は古いモデルの出力になる
+    if (data.nn_stale) {
+      html += '<br><span style="color:#888">NN（比較用）は学習していないので model_v3.json は古いままです。</span>';
+    }
     if (ngList.length > 0) {
       html += '<br><span style="color:#ff8080">失敗 ' + ngList.length + '件: ' +
         ngList.map(e => e.id.slice(0, 8) + ' — ' + e.error).join(' / ') + '</span>';
@@ -1573,10 +1585,12 @@ async function runRecognition() {
 
   const engine = data.engine === 'knn' ? 'k-NN' : 'NN';
   let html = 'SFEN (' + engine + '): ' + data.sfen;
+  // NN を学習し直していない間、比較用 SFEN は古いモデルの出力なので断っておく
+  const nnLabel = data.nn_stale ? 'NN（学習データより古い）' : 'NN';
   if (data.sfen_nn && data.sfen_nn !== data.sfen) {
-    html += '<br><span style="color:#888;font-size:12px">NN比較: ' + data.sfen_nn + '</span>';
+    html += '<br><span style="color:#888;font-size:12px">' + nnLabel + '比較: ' + data.sfen_nn + '</span>';
   } else if (data.sfen_nn) {
-    html += '<br><span style="color:#74c69d;font-size:12px">NN も同一結果</span>';
+    html += '<br><span style="color:#74c69d;font-size:12px">' + nnLabel + ' も同一結果</span>';
   }
   out.innerHTML = html;
 

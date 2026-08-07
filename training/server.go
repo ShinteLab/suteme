@@ -105,6 +105,9 @@ var (
 	mu       sync.RWMutex
 	model    *suteme.Model
 	knn      *suteme.KNN
+	// nnStale: 学習データを更新したのに gobrain NN を学習し直していない状態。
+	// 比較用 SFEN（sfen_nn）が古いモデルの出力であることを画面に出すために持つ
+	nnStale bool
 	// v3: リサイズを最近傍法から面積平均に変えたため入力ベクトルの表現が
 	// v2 と食い違う。MergeSamples は入力の内容でマージするので、同じファイルに
 	// 混ぜると古い表現のサンプルが消えずに残り続ける。
@@ -123,7 +126,10 @@ func Serve(port string) error {
 	// 起動時に保存済みモデルを読み込む
 	if m, err := suteme.LoadModel(modelFile); err == nil {
 		model = m
-		log.Printf("Loaded model from %s", modelFile)
+		// NN は既定では学習し直さないので、前回の起動より前に置き去りになっている
+		// ことがある。学習データより古ければ比較用 SFEN に断りを出す
+		nnStale = olderThan(modelFile, dataFile)
+		log.Printf("Loaded model from %s (stale=%v)", modelFile, nnStale)
 	}
 	// 学習データがあれば k-NN を構築（学習処理は不要）
 	if data, err := suteme.LoadTrainingData(dataFile); err == nil {
@@ -166,6 +172,19 @@ func Serve(port string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return srv.ListenAndServe()
+}
+
+// olderThan は a の更新時刻が b より古いかを返す。どちらかが読めなければ false
+func olderThan(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return fa.ModTime().Before(fb.ModTime())
 }
 
 // currentPredictor は使用する推論器を返す（k-NN 優先、なければ gobrain NN）
@@ -729,6 +748,10 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		IDs []string `json:"ids"`
+		// NN: gobrain NN も学習し直すか。**既定は false。**
+		// 主認識器の k-NN は生データから即再構築されるので、通常は要らない。
+		// 詳細は trainAndSave のコメント
+		NN bool `json:"nn"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -781,7 +804,7 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Training from %d history entries (%d pieces, %d empty)",
 		len(req.IDs), len(fresh)-countEmpty(fresh), countEmpty(fresh))
-	res, err := trainAndSave(fresh)
+	res, err := trainAndSave(fresh, req.NN)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -926,9 +949,18 @@ func samplesFromRegion(img image.Image, br *suteme.BoardRegion, board string) ([
 	return samples, nil
 }
 
-// trainAndSave は既存の学習データに fresh をマージして学習し、
-// 学習データ・k-NN・モデルを更新する。戻り値はそのまま JSON で返せる形。
-func trainAndSave(fresh []suteme.TrainingSample) (map[string]interface{}, error) {
+// trainAndSave は既存の学習データに fresh をマージして学習データ・k-NN を更新する。
+// 戻り値はそのまま JSON で返せる形。
+//
+// **gobrain NN の学習は trainNN が真のときだけ行う（既定は行わない）。**
+// 主認識器は k-NN（`currentPredictor` が優先）で、生データから即座に組み直せる。
+// 一方 NN の学習は「選んだ局面数」ではなく**累積した全サンプル数**に比例し、
+// しかも 300 エポック固定なので、1 局だけ選んでも全量を学習し直す。
+// 実測で 1 パターン×1 エポック = 257µs、7000 サンプルで 9 分、
+// 16605 サンプル（41局面）で 21 分。局面を足すほど線形に伸びる。
+// その 9 分で作られる NN は /api/recognize の比較用 SFEN（sfen_nn）にしか
+// 使われないので、既定から外して明示的に回す形にしてある。
+func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]interface{}, error) {
 	// 既存の学習データを読み込む
 	var existing []suteme.TrainingSample
 	if e, err := suteme.LoadTrainingData(dataFile); err == nil {
@@ -968,9 +1000,30 @@ func trainAndSave(fresh []suteme.TrainingSample) (map[string]interface{}, error)
 		modelLock.Unlock()
 	}
 
+	res := map[string]interface{}{
+		"status":     "ok",
+		"samples":    len(data.Samples),
+		"duplicates": duplicates,
+		// 分布は生データから出す。NN を回さない場合も学習データの中身は見たい
+		"distribution": ClassDistribution(data.Samples),
+		"nn":           trainNN,
+	}
+
+	if !trainNN {
+		// **既存の model_v3.json は残るが、学習データより古くなる。**
+		// 比較用 SFEN を「今の学習データの NN」だと誤読させないための印
+		modelLock.Lock()
+		nnStale = model != nil
+		modelLock.Unlock()
+		res["nn_stale"] = nnStale
+		log.Printf("Training data updated (%d samples), NN training skipped", len(data.Samples))
+		return res, nil
+	}
+
 	// クラスバランス調整してから学習
 	balanced := BalanceData(data.Samples)
-	dist := ClassDistribution(balanced)
+	res["balanced"] = len(balanced)
+	res["distribution"] = ClassDistribution(balanced)
 	log.Printf("Training: %d raw → %d balanced", len(data.Samples), len(balanced))
 
 	m := Train(&suteme.TrainingData{Samples: balanced})
@@ -978,17 +1031,12 @@ func trainAndSave(fresh []suteme.TrainingSample) (map[string]interface{}, error)
 
 	modelLock.Lock()
 	model = m
+	nnStale = false
 	modelLock.Unlock()
 
 	log.Printf("Training complete, model saved to %s", modelFile)
 
-	return map[string]interface{}{
-		"status":       "ok",
-		"samples":      len(data.Samples),
-		"balanced":     len(balanced),
-		"duplicates":   duplicates,
-		"distribution": dist,
-	}, nil
+	return res, nil
 }
 
 // filterByInputSize は入力長が合わないサンプルを取り除き、除いた件数を返す
@@ -1083,11 +1131,14 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 	modelLock.RLock()
 	usingKNN := knn != nil
 	nnModel := model
+	stale := nnStale
 	modelLock.RUnlock()
 	if usingKNN {
 		resp["engine"] = "knn"
 		if nnModel != nil {
 			resp["sfen_nn"] = suteme.RecognizeBoard(s.Original, s.Result.Board, nnModel)
+			// 学習データを更新したあと NN を回していないなら、この結果は古い
+			resp["nn_stale"] = stale
 		}
 	} else {
 		resp["engine"] = "nn"
