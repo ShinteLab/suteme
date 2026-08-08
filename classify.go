@@ -40,9 +40,25 @@ const (
 	// pieceDiffMin は明度差の下限（暗い盤で割合が小さくなりすぎるのを防ぐ）
 	pieceDiffMin = 12.0
 	// emptyCoverMax はこの被覆率未満を空マスと見なす。
-	// 駒はマスの 40〜70% を覆うのに対し、空マスは盤の地色そのものなので
-	// ほぼ 0 になる。間を広く取っている
-	emptyCoverMax = 0.15
+	// 空マスは盤の地色そのものなので被覆率はほぼ 0 になる（実測 51 局面 2428 マスで
+	// 中央値 0.007・9割が 0.029 以下）。駒との間は本来かなり開いている。
+	//
+	// **駒の被覆率は盤によって大きく変わるので、駒の側に寄せてはいけない。**
+	// 駒の地に色が付いた盤（普通のゲーム画面・橙の中継）では駒の本体ごと
+	// マスクに入って 0.4〜0.6 になるが、**駒の色が盤の地色とほぼ同じ木目の盤**では
+	// 墨の字画と駒の輪郭しかマスクに残らず 0.13〜0.27 まで落ちる。
+	// 0.15 にしていたときは後者の盤で駒 102 マス中 22 マスが空に化けていた。
+	//
+	//	しきい値  空→駒 / 駒→空（51局面 4131 マス）
+	//	0.15         3 / 31
+	//	0.12         3 /  5
+	//	**0.10       4 /  5**
+	//	0.08        14 /  5
+	//	0.06        34 /  4
+	//
+	// 0.12 でも同等だが、木目の盤の駒の下限が 0.130 なので余裕が 1 割も無い。
+	// 空マス側は 0.10 まで上げても 1 件しか増えないので、下限から離せる 0.10 を採る。
+	emptyCoverMax = 0.10
 	// gridLineFrac はこの割合以上を占める行・列をグリッド線／盤外と見なして除外する。
 	// グリッド線は行または列の全体を貫くが、駒はマスの端まで届かない
 	gridLineFrac = 0.90
@@ -216,8 +232,10 @@ func medianBrightnessRect(img image.Image, rect image.Rectangle) uint8 {
 // cellMask はマス画像から「盤の地色と異なる画素」のマスクを作り、
 // 行ごとの駒の幅を保持する
 type cellMask struct {
-	extent []int   // 行ごとの駒の幅（除外した行は 0）
-	cover  float64 // 有効領域に対する被覆率
+	extent []int    // 行ごとの駒の幅（除外した行は 0）
+	edges  [][2]int // 行ごとの駒の左右端（除外した行は {-1,-1}）
+	cover  float64  // 有効領域に対する被覆率
+	origin image.Point
 }
 
 // maskSign はマスクに含める画素の向き（地色より暗い/明るい）
@@ -295,6 +313,10 @@ func newCellMaskSign(cell image.Image, center, diffBase uint8, sign maskSign) *c
 	// 横のグリッド線を落としつつ、行ごとの幅を測る
 	rowLimit := int(float64(validW) * gridLineFrac)
 	extent := make([]int, h)
+	edges := make([][2]int, h)
+	for i := range edges {
+		edges[i] = [2]int{-1, -1}
+	}
 	count, validH := 0, 0
 	for y := 0; y < h; y++ {
 		row := marked[y*w : (y+1)*w]
@@ -309,6 +331,7 @@ func newCellMaskSign(cell image.Image, center, diffBase uint8, sign maskSign) *c
 		}
 		if left, right := runEdges(row); right > left {
 			extent[y] = right - left + 1
+			edges[y] = [2]int{left, right}
 		}
 		count += n
 		validH++
@@ -317,7 +340,52 @@ func newCellMaskSign(cell image.Image, center, diffBase uint8, sign maskSign) *c
 		return nil
 	}
 
-	return &cellMask{extent: extent, cover: float64(count) / float64(validH*validW)}
+	return &cellMask{
+		extent: extent,
+		edges:  edges,
+		cover:  float64(count) / float64(validH*validW),
+		origin: b.Min,
+	}
+}
+
+// pieceBox は駒の外接矩形（cell の座標系）を返す。駒が見つからなければ false。
+//
+// **駒種の照合はこの矩形に切り揃えてから行う（`CellToInput`）。**
+// マスをそのまま潰すと、盤ごとに違う「駒がマスのどこにどの大きさで描かれるか」が
+// そのまま特徴量に乗ってしまい、未知の盤の駒が既知の同じ駒と一致しなくなる。
+func pieceBox(cell image.Image) (image.Rectangle, bool) {
+	if cell == nil {
+		return image.Rectangle{}, false
+	}
+	local := cellBoardColor(cell)
+	m := pieceSideOf(cell, local, local)
+	if m == nil {
+		return image.Rectangle{}, false
+	}
+	top, bottom, ok := m.span()
+	if !ok {
+		return image.Rectangle{}, false
+	}
+	left, right := -1, -1
+	for y := top; y <= bottom; y++ {
+		e := m.edges[y]
+		if e[0] < 0 {
+			continue
+		}
+		if left < 0 || e[0] < left {
+			left = e[0]
+		}
+		if e[1] > right {
+			right = e[1]
+		}
+	}
+	if left < 0 || right <= left {
+		return image.Rectangle{}, false
+	}
+	return image.Rect(
+		m.origin.X+left, m.origin.Y+top,
+		m.origin.X+right+1, m.origin.Y+bottom+1,
+	), true
 }
 
 // span は駒の上端・下端の行を返す。最大幅の pieceExtentFrac 未満の行は

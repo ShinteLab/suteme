@@ -16,20 +16,24 @@ import (
 // **入力ベクトルの作り方（CellToInput / resizeGray）を変えたら版を上げること。**
 // MergeSamples は入力の内容でマージするので、表現の違うサンプルを同じファイルに
 // 混ぜると古いものが消えずに残り続ける。
+// v5: 駒の外接矩形に切り揃えてから 24x24 に落とすようにした（CellToInput 参照）
 // v4: 入力ベクトルを float32 の精度へ丸め、ファイルもバイナリにした
 //
 //	（JSON は float64 1 個が 20 文字前後になり 186MB / 読み込み 1.8s だった）
 //
 // v3: リサイズを最近傍法から面積平均に変更（v2 は標準化・回転正規化・空クラス対応）
 const (
-	DefaultDataFile  = "training_data_v4.bin"
-	DefaultModelFile = "model_v4.json"
+	DefaultDataFile  = "training_data_v5.bin"
+	DefaultModelFile = "model_v5.json"
 )
 
 // LegacyDataFiles は既定のファイルが無いときに読みにいく旧版の学習データ。
-// **v3 の JSON は v4 のバイナリと同じ内容（float32 に丸めて読む）**なので
-// そのまま使える。書き出しは常に DefaultDataFile なので、一度学習すれば移る。
-var LegacyDataFiles = []string{"training_data_v3.json"}
+//
+// **v4 以前は入れない。** v5 で入力ベクトルの作り方が変わったので、
+// 古いファイルのベクトルは今の `CellToInput` の出力と別物になっている。
+// 学習データは `data/history.json` の画像と正解 SFEN から作り直せるので、
+// 履歴タブで全件を選んで学習し直せば v5 のファイルができる。
+var LegacyDataFiles []string
 
 // minBoardConfidence は盤面領域を採用する最低信頼度（ValidateBoard の値）。
 // これを下回る検出結果は「盤面ではない」として棄却する。

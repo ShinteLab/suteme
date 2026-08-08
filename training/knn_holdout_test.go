@@ -83,7 +83,17 @@ func wantGrid(s string) (*[9][9]string, error) {
 
 // predictCell は RecognizeBoard と同じ判断でマスのラベルを返す
 func predictCell(cell image.Image, bc uint8, p suteme.Predictor) string {
-	cat, _ := suteme.ClassifyCellFor(cell, bc, p)
+	return predictCellBO(cell, bc, nil, p)
+}
+
+// predictCellBO は盤ごとの向き判定（BoardOrient）を使う版。bo が nil なら定数版
+func predictCellBO(cell image.Image, bc uint8, bo *suteme.BoardOrient, p suteme.Predictor) string {
+	var cat suteme.CellCategory
+	if bo != nil {
+		cat, _ = bo.Classify(cell, bc, p)
+	} else {
+		cat, _ = suteme.ClassifyCellFor(cell, bc, p)
+	}
 	if cat == suteme.CellEmpty {
 		return suteme.EmptyLabel
 	}
@@ -159,6 +169,7 @@ func TestKNNHoldout(t *testing.T) {
 		b := e.BoardBounds
 		br := suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2)
 		bc := suteme.BoardColor(img, br)
+		bo := suteme.NewBoardOrient(img, br, bc)
 		want, err := wantGrid(e.SFEN)
 		if err != nil {
 			t.Logf("%s: SFEN 解析に失敗 (%v)", e.ID, err)
@@ -172,7 +183,7 @@ func TestKNNHoldout(t *testing.T) {
 				if cell == nil {
 					continue
 				}
-				got := predictCell(cell, bc, kn)
+				got := predictCellBO(cell, bc, bo, kn)
 				totalCells++
 				if got == want[r][c] {
 					ok++
@@ -280,6 +291,7 @@ func TestKNNCellHoldout(t *testing.T) {
 		b := e.BoardBounds
 		br := suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2)
 		bc := suteme.BoardColor(img, br)
+		bo := suteme.NewBoardOrient(img, br, bc)
 		want, err := wantGrid(e.SFEN)
 		if err != nil {
 			continue
@@ -306,7 +318,7 @@ func TestKNNCellHoldout(t *testing.T) {
 				if kn == nil {
 					continue
 				}
-				got := predictCell(cell, bc, kn)
+				got := predictCellBO(cell, bc, bo, kn)
 
 				if want[r][c] == suteme.EmptyLabel {
 					emptyTotal++

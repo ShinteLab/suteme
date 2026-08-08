@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/ShinteLab/core/sfen"
@@ -104,6 +105,24 @@ type TrainingSample struct {
 // CellToInput はマス画像を入力ベクトルに変換 (24x24 グレースケール → 576 float64)
 // 画像ごとの明るさ・コントラスト差を吸収するため、平均0・分散1に標準化する。
 //
+// **まず駒の外接矩形に切り揃えてから 24x24 に落とす（v5）。**
+// マスをそのまま潰していたときは、盤ごとに違う「駒がマスのどこに・どの大きさで
+// 描かれるか」がそのまま 576 次元に乗っていた。同じ駒でも盤が変われば別のベクトルに
+// なるので、k-NN は**その盤の駒を一度も見ていないと当たらない**。
+// 外接矩形に揃えると駒の位置と大きさが消え、字の形だけが残る。
+//
+// 出所ごと丸ごと学習から外した実測（駒種のみ・向きは正解を使用）:
+//
+//	                      木目     橙    その他   全体
+//	マスそのまま (v4)      41.2%  48.2%  76.9%  72.9%
+//	**外接矩形 (v5)**     45.1%  65.5%  83.2%  79.8%
+//	外接矩形 + 墨2値       36.3%  61.8%  83.1%  78.9%
+//	外接矩形 + 1割の余白    42.2%  64.6%  79.9%  76.6%
+//
+// 余白を残すと切り揃えた意味が薄れ、墨だけの 2 値にすると駒の地の濃淡という
+// 手掛かりまで捨ててしまう。**外接矩形ちょうどで切るのが一番良い。**
+// 空マスなど駒が見つからないマスは、従来どおりマス全体を使う。
+//
 // **最後に float32 の精度へ丸める（v4）。学習データファイルが float32 で
 // 持つので、そこに合わせないと `MergeSamples` の重複除去が効かなくなる。**
 // MergeSamples は入力ベクトルの内容が一致するかで重複を判定するが、
@@ -116,6 +135,9 @@ type TrainingSample struct {
 // 表現できる範囲を超える情報は元から無い（相対誤差 6e-8。
 // k-NN の距離の順位には影響しない）。
 func CellToInput(cell image.Image) []float64 {
+	if box, ok := pieceBox(cell); ok {
+		cell = cropImage(cell, box)
+	}
 	resized := resizeGray(cell, cellSize, cellSize)
 	input := make([]float64, inputSize)
 	bounds := resized.Bounds()
@@ -142,6 +164,22 @@ func CellToInput(cell image.Image) []float64 {
 
 // quantize は float32 の精度へ丸める（ファイル表現と揃えるため。CellToInput 参照）
 func quantize(v float64) float64 { return float64(float32(v)) }
+
+// cropImage は画像の一部を切り出す。SubImage を持たない実装のために
+// グレースケールへ落としてから切る道も用意しておく。
+func cropImage(src image.Image, r image.Rectangle) image.Image {
+	type subImager interface {
+		SubImage(image.Rectangle) image.Image
+	}
+	r = r.Intersect(src.Bounds())
+	if r.Empty() {
+		return src
+	}
+	if s, ok := src.(subImager); ok {
+		return s.SubImage(r)
+	}
+	return ConvertGray(src).SubImage(r)
+}
 
 // 学習データファイル（v4）のバイナリ表現。
 //
@@ -336,33 +374,95 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 	return bestClass, bestConf
 }
 
-// OrientMarginMin はこの値未満の確信度（`ClassifyCellDetail`）のとき、
-// 向きを回転照合で決め直す。
+// OrientMarginMin は確信度（`ClassifyCellDetail`）がこの値未満のとき
+// 向きを回転照合で決め直す、という**盤の情報が無いとき用の既定値**。
+//
+// 盤全体を扱えるなら `NewBoardOrient` を使うこと（そちらは盤ごとに境目を決める）。
+const OrientMarginMin = 0.08
+
+// OrientMarginQuantile は向きを回転照合で決め直すマスの割合。
 //
 // **分類器の向き判定は上下半分の幅の差で決まるので、差が小さいマスだけが
-// 危ない。** 実測（保存済み36局面 / 1202 駒マス）で、この値を境に
-// 反転 47 件のうち 23 件が 85 マスに固まっている（その帯での誤り率 27%、
-// 全体は 3.9%）。帯を広げると回転照合の弱いところまで任せることになり、
-// 逆に悪化する:
+// 危ない。** ここまでは定数のしきい値（`OrientMarginMin`）で切っていたが、
+// **確信度は盤ごとにスケールが違うので定数では切れない。**
+// 確信度は「上下の幅の差 ÷ 駒の最大幅」なので、駒の五角形の尖りが浅く
+// 描かれた盤では駒がはっきり写っていても値が小さいほうへ寄る。実測で、
+// 橙の中継の駒 110 マスは中央値 0.074・9割が 0.100 以下しかなく、
+// 定数 0.08 だと 75 マス（68%）が回転照合送りになっていた。
+// 回転照合は未知の盤に弱いので、この盤の向き判定は 92.7% → 80.7% に落ちる。
 //
-//	しきい値 0.02 → 96.59% / 0.05 → 97.17% / **0.08 → 97.42%**
-//	          0.12 → 97.00% / 0.20 → 95.75%（＝回転照合だけの成績）
+// そこで**その盤の確信度の分布の下から何割か**を決め直す形にする。
+// 分位点にすれば、確信度が全体に小さい盤でも「その盤の中で弱いマス」だけが
+// 選ばれ、確信度がよく開く盤では逆に多めに拾える。
+// 出所ごと学習から外した実測（51局面 / 駒 1673 マス、向きの誤り件数）:
 //
-// 回転照合単体は 95.75% で分類器（96.09%）より悪いので、
-// **全面的に置き換えてはいけない。** 弱いところだけ補い合う関係にある。
-const OrientMarginMin = 0.08
+//	                     木目   橙   その他   全体
+//	分類器のみ            15    8     69      92
+//	回転照合のみ           2   28     44      74
+//	固定 0.08（旧）       11   21     44      76
+//	盤ごと分位点 0.15      13    7     48      68
+//	**盤ごと分位点 0.25** 12    9     44      65
+//	盤ごと分位点 0.30     10    9     44      63
+//
+// 0.30 まで上げてもわずかに良くなるが、そちらは回転照合の比重が上がって
+// 未知の盤で崩れやすい側に寄る。橙が最も良い 0.15 と合わせて 0.25 を採る。
+const OrientMarginQuantile = 0.25
+
+// BoardOrient は盤ごとの向き判定。
+//
+// 盤の全マスの確信度を先に見て、下から `OrientMarginQuantile` 分を
+// 「回転照合で決め直すマス」として切る境目を持つ。
+type BoardOrient struct {
+	marginMin float64
+}
+
+// NewBoardOrient は盤の全マスの確信度から決め直す境目を求める。
+// 駒マスが無ければ既定値（`OrientMarginMin`）にしておく。
+func NewBoardOrient(img image.Image, br *BoardRegion, boardColor uint8) *BoardOrient {
+	if img == nil || br == nil {
+		return &BoardOrient{marginMin: OrientMarginMin}
+	}
+	margins := make([]float64, 0, 81)
+	for r := 0; r < 9; r++ {
+		for c := 0; c < 9; c++ {
+			cell := br.ExtractCell(img, r, c)
+			if cell == nil {
+				continue
+			}
+			if cat, margin := ClassifyCellDetail(cell, boardColor); cat != CellEmpty {
+				margins = append(margins, margin)
+			}
+		}
+	}
+	if len(margins) == 0 {
+		return &BoardOrient{marginMin: OrientMarginMin}
+	}
+	sort.Float64s(margins)
+	return &BoardOrient{marginMin: margins[int(OrientMarginQuantile*float64(len(margins)-1))]}
+}
+
+// Classify はマスを 空/先手/後手 に分類する。
+// byMatch は向きを回転照合で決め直したかどうか（観測用。`CellDebug.OrientBy`）。
+func (bo *BoardOrient) Classify(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
+	return classifyCellMargin(cell, boardColor, bo.marginMin, m)
+}
 
 // ClassifyCellFor は推論器も使ってマスを 空/先手/後手 に分類する。
 //
-// **空/先手/後手 を出すところは必ずこれを通すこと。** `ClassifyCellWith` は
-// 画像処理だけの一次判定で、確信度が足りないマスの向きは推論器との回転照合で
-// 決め直される。素の `ClassifyCellWith` を別途呼ぶと `RecognizeBoard` が返す
-// SFEN と食い違う。
+// **空/先手/後手 を出すところは必ずこれか `BoardOrient.Classify` を通すこと。**
+// `ClassifyCellWith` は画像処理だけの一次判定で、確信度が足りないマスの向きは
+// 推論器との回転照合で決め直される。素の `ClassifyCellWith` を別途呼ぶと
+// `RecognizeBoard` が返す SFEN と食い違う。
 //
-// byMatch は回転照合で決め直したかどうか（観測用。`CellDebug.OrientBy`）。
+// 盤全体を扱えるなら `NewBoardOrient` のほうが精度が高い（`OrientMarginQuantile`）。
+// こちらは 1 マスだけを見るので定数のしきい値で切るしかない。
 func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
+	return classifyCellMargin(cell, boardColor, OrientMarginMin, m)
+}
+
+func classifyCellMargin(cell image.Image, boardColor uint8, marginMin float64, m Predictor) (CellCategory, bool) {
 	cat, margin := ClassifyCellDetail(cell, boardColor)
-	if cat == CellEmpty || margin >= OrientMarginMin {
+	if cat == CellEmpty || margin >= marginMin {
 		return cat, false
 	}
 	om, ok := m.(OrientationMatcher)
@@ -401,6 +501,7 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 	// ランレングス圧縮・段区切り)は core/sfen に委譲する。
 	var grid [9][9]string
 	bc := BoardColor(img, br)
+	bo := NewBoardOrient(img, br, bc)
 	cells := make([]CellDebug, 0, 81)
 	for r := 0; r < 9; r++ {
 		for c := 0; c < 9; c++ {
@@ -415,7 +516,7 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 				continue
 			}
 
-			cat, byMatch := ClassifyCellFor(cell, bc, m)
+			cat, byMatch := bo.Classify(cell, bc, m)
 			cur.Category = cat
 			if byMatch {
 				cur.OrientBy = "match"
