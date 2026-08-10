@@ -1,0 +1,595 @@
+package training
+
+// 認識率の記録（評価タブ）。
+//
+// **モデルを更新したときに新旧を比べたい**が、その場の数字だけを見ても
+// 良くなったのか分からない。実行 1 回を 1 レコードとして
+// data/accuracy.json に積み、あとから並べて見られるようにする。
+//
+// 測るのは 3 つ。
+//
+//   - **盤面検出**: 自動検出した外枠と、履歴に保存してある手動指定座標との差
+//     （マス単位）。**最終目標は手入力の座標なしで認識が動くこと**なので、
+//     外した局面もずれ幅つきで残す。「あの中継画像の盤が拾えるようになったか」を
+//     後から確かめられるようにするため、成功件数だけに畳まない
+//   - **手動座標での認識率**: 座標を与えたときの成績＝認識器そのものの実力
+//   - **自動座標での認識率**: 検出から通した端から端まで。**盤面を検出できなかった
+//     局面は 0/81 として数える**（それが手入力なしで動かしたときの実力）
+//
+// それぞれを 2 通りの推論器で測る。
+//
+//   - **full**: 起動中の推論器そのまま。**評価する局面が学習済みなら高く出る**ので
+//     絶対値は信用できない（丸暗記）。版どうしの相対比較に使う
+//   - **holdout**: その局面を学習から外して作り直した k-NN（leave-one-out）。
+//     未知の局面に対する実力。局面ごとに k-NN を組み直すので時間がかかる
+//
+// 数字の意味は TestKNNHoldout と揃えてある（同じ predictCellBO 相当の判断を
+// suteme.Recognize 経由で通す）。違いは、こちらが盤面検出も測ることと、
+// 結果をファイルに残すこと。
+
+import (
+	"encoding/json"
+	"fmt"
+	"image"
+	_ "image/jpeg"
+	"image/png"
+	"log"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ShinteLab/core/sfen"
+	"github.com/ShinteLab/suteme"
+)
+
+const (
+	evalFile = "data/accuracy.json"
+	// maxEvalRuns は残す実行の件数。版の比較が目的なので、
+	// 履歴（正解データ）と違って古いものは押し出してよい
+	maxEvalRuns = 100
+	// alignedMaxShift は盤面検出が「合っている」とみなす手動座標との差（マス）。
+	// detect_data_test.go の判定と揃えてある
+	alignedMaxShift = 0.5
+)
+
+var evalMu sync.Mutex
+
+// EvalMetrics は認識の成績。実行全体の集計にも、局面 1 件の内訳にも使う。
+type EvalMetrics struct {
+	Boards        int `json:"boards"`         // 評価した局面数
+	BoardsPerfect int `json:"boards_perfect"` // 81マスすべて一致した局面数
+	NoBoard       int `json:"no_board"`       // 盤面を検出できず 0/81 とした局面数
+	Cells         int `json:"cells"`          // 比較したマス数
+	OK            int `json:"ok"`             // 空/向き/駒種まで一致
+	PieceCells    int `json:"piece_cells"`    // 正解が駒のマス
+	PieceOK       int `json:"piece_ok"`       // うち向き・駒種まで一致
+	EmptyAsPiece  int `json:"empty_as_piece"` // 空を駒と誤った
+	PieceAsEmpty  int `json:"piece_as_empty"` // 駒を空と誤った
+	OrientFlip    int `json:"orient_flip"`    // 駒だが向きが逆
+	TypeMiss      int `json:"type_miss"`      // 向きは合っているが駒種が違う
+}
+
+func (m *EvalMetrics) add(o EvalMetrics) {
+	m.Boards += o.Boards
+	m.BoardsPerfect += o.BoardsPerfect
+	m.NoBoard += o.NoBoard
+	m.Cells += o.Cells
+	m.OK += o.OK
+	m.PieceCells += o.PieceCells
+	m.PieceOK += o.PieceOK
+	m.EmptyAsPiece += o.EmptyAsPiece
+	m.PieceAsEmpty += o.PieceAsEmpty
+	m.OrientFlip += o.OrientFlip
+	m.TypeMiss += o.TypeMiss
+}
+
+// EvalDetect は盤面検出の結果を手動指定座標と突き合わせたもの。
+// ずれはマス単位（画像の解像度に依らず比較できるようにするため）。
+//
+// **棄却された候補もずれと信頼度を残す。** 「盤を見つけられなかった」だけだと
+// 惜しかったのか全然違う場所を見ていたのかが分からず、次の版で直ったかを
+// 追えない（CLAUDE.md の「dx=+3.57 を conf 0.00 で棄却」のような記録が要る）。
+type EvalDetect struct {
+	// Found は信頼度を満たして採用されたか。false でも Candidate が真なら
+	// 棄却された候補の位置・信頼度が入っている
+	Found bool `json:"found"`
+	// Candidate は DetectBoard が領域を返したか（採用されたかは別）
+	Candidate bool `json:"candidate"`
+	// Source は領域の決め方（"detect" / "whole"）
+	Source string `json:"source"`
+	// Confidence は ValidateBoard の値
+	Confidence float64 `json:"confidence"`
+	// DX/DY は左上の、DW/DH は幅・高さの手動座標との差（マス単位）
+	DX float64 `json:"dx"`
+	DY float64 `json:"dy"`
+	DW float64 `json:"dw"`
+	DH float64 `json:"dh"`
+	// MaxShift は上の 4 つの絶対値の最大
+	MaxShift float64 `json:"max_shift"`
+	// Aligned は MaxShift が alignedMaxShift 以内か
+	Aligned bool `json:"aligned"`
+}
+
+// EvalDetectSummary は盤面検出の集計。
+type EvalDetectSummary struct {
+	Boards  int `json:"boards"`
+	Found   int `json:"found"`   // 信頼度を満たして領域が採用された
+	Aligned int `json:"aligned"` // うち手動座標と 0.5マス以内
+	Whole   int `json:"whole"`   // 「画像全体が盤面」フォールバックで通った
+}
+
+// EvalEntry は局面 1 件の評価結果。
+type EvalEntry struct {
+	ID string `json:"id"`
+	// Error があればその局面は評価できていない（画像が無い・SFEN が壊れている等）
+	Error  string     `json:"error,omitempty"`
+	Detect EvalDetect `json:"detect"`
+	// Manual は手動座標、Auto は自動検出座標での成績（起動中の推論器）
+	Manual EvalMetrics `json:"manual"`
+	Auto   EvalMetrics `json:"auto"`
+	// *Holdout はこの局面を学習から外した k-NN での成績（holdout=false なら nil）
+	ManualHoldout *EvalMetrics `json:"manual_holdout,omitempty"`
+	AutoHoldout   *EvalMetrics `json:"auto_holdout,omitempty"`
+}
+
+// EvalRun は評価の実行 1 回。
+type EvalRun struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	// Label は実行につける覚え書き（「v5 外接矩形」など）。空なら自動生成
+	Label string `json:"label"`
+	// Engine / Samples / DataFile は「何を測ったか」の素性。
+	// **これが無いと後から見て何と何を比べているのか分からない**
+	Engine   string `json:"engine"`
+	Samples  int    `json:"samples"`
+	DataFile string `json:"data_file"`
+	// Seconds は所要時間（leave-one-out を付けると桁が変わるので残す）
+	Seconds float64 `json:"seconds"`
+	Holdout bool    `json:"holdout"`
+
+	DetectSummary EvalDetectSummary `json:"detect_summary"`
+	Manual        EvalMetrics       `json:"manual"`
+	Auto          EvalMetrics       `json:"auto"`
+	ManualHoldout *EvalMetrics      `json:"manual_holdout,omitempty"`
+	AutoHoldout   *EvalMetrics      `json:"auto_holdout,omitempty"`
+
+	Entries []EvalEntry `json:"entries"`
+	// Skipped は評価に入れられなかった局面数（座標が無い・未確認など）
+	Skipped int `json:"skipped"`
+}
+
+type EvalHistory struct {
+	Runs []EvalRun `json:"runs"`
+}
+
+func loadEvalHistory() *EvalHistory {
+	f, err := os.Open(evalFile)
+	if err != nil {
+		return &EvalHistory{Runs: []EvalRun{}}
+	}
+	defer f.Close()
+	var h EvalHistory
+	if err := json.NewDecoder(f).Decode(&h); err != nil {
+		log.Printf("loadEvalHistory: %v", err)
+	}
+	if h.Runs == nil {
+		h.Runs = []EvalRun{}
+	}
+	return &h
+}
+
+func saveEvalHistory(h *EvalHistory) error {
+	os.MkdirAll(dataDir, 0755)
+	return writeJSONFile(evalFile, h)
+}
+
+// boardGrid は SFEN の盤面部分をマスごとのラベルに展開する。
+// 空マスは EmptyLabel、後手は "-" を前置（TestKNNHoldout の表記と同じ）。
+func boardGrid(s string) (*[9][9]string, error) {
+	var g [9][9]string
+	for r := range g {
+		for c := range g[r] {
+			g[r][c] = suteme.EmptyLabel
+		}
+	}
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("SFEN が空です")
+	}
+	err := sfen.ParseBoard(fields[0], func(rank, file, base int, black, promoted bool) {
+		// 保存済み SFEN が壊れている場合に備える
+		if rank < 0 || rank >= 9 || file < 0 || file >= 9 {
+			return
+		}
+		label := sfen.Letter(base)
+		if label == "None" {
+			return
+		}
+		if promoted {
+			label = "+" + label
+		}
+		if !black {
+			label = "-" + label
+		}
+		g[rank][file] = label
+	})
+	return &g, err
+}
+
+// gradeBoard は正解と認識結果を突き合わせて成績を出す。
+func gradeBoard(want, got *[9][9]string) EvalMetrics {
+	m := EvalMetrics{Boards: 1}
+	for r := 0; r < 9; r++ {
+		for c := 0; c < 9; c++ {
+			w, g := want[r][c], got[r][c]
+			m.Cells++
+			if w == g {
+				m.OK++
+			}
+			if w == suteme.EmptyLabel {
+				if g != suteme.EmptyLabel {
+					m.EmptyAsPiece++
+				}
+				continue
+			}
+			m.PieceCells++
+			switch {
+			case w == g:
+				m.PieceOK++
+			case g == suteme.EmptyLabel:
+				m.PieceAsEmpty++
+			case strings.HasPrefix(w, "-") != strings.HasPrefix(g, "-"):
+				m.OrientFlip++
+			default:
+				m.TypeMiss++
+			}
+		}
+	}
+	if m.OK == m.Cells {
+		m.BoardsPerfect = 1
+	}
+	return m
+}
+
+// missedBoard は盤面を検出できなかった局面を 0/81 として数える。
+//
+// **端から端までの成績なので、検出できなかったことも失点として数える。**
+// 認識器の内訳（空→駒など）には入れない（認識を呼んでいないため）。
+func missedBoard(want *[9][9]string) EvalMetrics {
+	m := EvalMetrics{Boards: 1, NoBoard: 1, Cells: 81}
+	for r := 0; r < 9; r++ {
+		for c := 0; c < 9; c++ {
+			if want[r][c] != suteme.EmptyLabel {
+				m.PieceCells++
+			}
+		}
+	}
+	return m
+}
+
+// recognizeGrid は指定の推論器・オプションで認識してマスのラベルに展開する。
+// 盤面を検出できなければ (nil, debug, err) を返す。
+func recognizeGrid(img image.Image, p suteme.Predictor, opts ...suteme.Option) (*[9][9]string, *suteme.Debug, error) {
+	r, err := suteme.Recognize(img, append(opts, suteme.WithPredictor(p))...)
+	if r == nil {
+		return nil, nil, err
+	}
+	g, gerr := boardGrid(r.Board)
+	if gerr != nil {
+		return nil, r.Debug, gerr
+	}
+	return g, r.Debug, nil
+}
+
+// evalTarget は評価できる局面（画像 + 正解 SFEN + 手動座標が揃っているもの）。
+type evalTarget struct {
+	entry HistoryEntry
+	img   image.Image
+	want  *[9][9]string
+	rect  BoardBounds
+}
+
+// loadEvalTarget は履歴 1 件を評価できる形に読む。
+// **手動座標が無いものは評価に入れない。** 検出のずれを測る基準が無く、
+// 自動検出の結果と比べようが無いため
+func loadEvalTarget(e HistoryEntry) (*evalTarget, error) {
+	if e.BoardBounds == nil {
+		return nil, fmt.Errorf("盤面座標が保存されていません")
+	}
+	f, err := os.Open(filepath.Join(dataDir, e.ID+".png"))
+	if err != nil {
+		return nil, fmt.Errorf("画像が読めません")
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		return nil, fmt.Errorf("画像のデコードに失敗しました")
+	}
+	want, err := boardGrid(e.SFEN)
+	if err != nil {
+		return nil, fmt.Errorf("SFEN の解析に失敗しました")
+	}
+	return &evalTarget{entry: e, img: img, want: want, rect: *e.BoardBounds}, nil
+}
+
+// gradeDetect は自動検出の結果を手動指定座標と突き合わせる。
+// found は信頼度を満たして採用されたか（棄却された候補も位置は記録する）。
+func gradeDetect(r image.Rectangle, src suteme.RegionSource, conf float64, found bool, b *BoardBounds) EvalDetect {
+	cw := float64(b.X2-b.X1) / 9
+	ch := float64(b.Y2-b.Y1) / 9
+	if cw <= 0 || ch <= 0 || r.Empty() {
+		return EvalDetect{Confidence: conf}
+	}
+	res := EvalDetect{
+		Found:      found,
+		Candidate:  true,
+		Source:     string(src),
+		Confidence: conf,
+		DX:         float64(r.Min.X-b.X1) / cw,
+		DY:         float64(r.Min.Y-b.Y1) / ch,
+		DW:         float64(r.Dx()-(b.X2-b.X1)) / cw,
+		DH:         float64(r.Dy()-(b.Y2-b.Y1)) / ch,
+	}
+	for _, v := range []float64{res.DX, res.DY, res.DW, res.DH} {
+		if a := math.Abs(v); a > res.MaxShift {
+			res.MaxShift = a
+		}
+	}
+	res.Aligned = res.MaxShift <= alignedMaxShift
+	return res
+}
+
+// holdoutPredictors は leave-one-out 用に「その局面を学習から外した k-NN」を
+// 局面ごとに作る。学習に使うのは確認済みの局面だけ（/api/trainhistory と同じ条件）。
+func holdoutPredictors(entries []HistoryEntry, want map[string]bool) map[string]*suteme.KNN {
+	byEntry := make(map[string][]suteme.TrainingSample, len(entries))
+	for _, e := range entries {
+		if !e.IsVerified() {
+			continue
+		}
+		s, err := samplesFromHistory(e)
+		if err != nil {
+			log.Printf("evaluate: %s のサンプル化に失敗 (%v)", e.ID, err)
+			continue
+		}
+		byEntry[e.ID] = s
+	}
+	out := make(map[string]*suteme.KNN, len(want))
+	for id := range want {
+		var train []suteme.TrainingSample
+		for other, s := range byEntry {
+			if other != id {
+				train = append(train, s...)
+			}
+		}
+		if kn := suteme.NewKNN(MergeSamples(train)); kn != nil {
+			out[id] = kn
+		}
+	}
+	return out
+}
+
+// runEvaluation は選択した局面の認識率を測って 1 レコードにまとめる。
+// ids が空なら評価できる局面すべてを対象にする。
+func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
+	p := currentPredictor()
+	if p == nil {
+		return nil, fmt.Errorf("推論器がありません（先に履歴タブで学習してください）")
+	}
+	historyMu.RLock()
+	h := loadHistory()
+	historyMu.RUnlock()
+
+	selected := map[string]bool{}
+	for _, id := range ids {
+		selected[id] = true
+	}
+
+	start := time.Now()
+	run := &EvalRun{
+		ID:        newID(),
+		CreatedAt: time.Now().Format("2006-01-02 15:04"),
+		Label:     strings.TrimSpace(label),
+		DataFile:  dataFile,
+		Holdout:   holdout,
+	}
+	if d, ok := p.(suteme.DebugPredictor); ok {
+		run.Engine = d.Debug().Kind
+	}
+	modelLock.RLock()
+	if knn != nil {
+		run.Samples = knn.Len()
+	}
+	modelLock.RUnlock()
+
+	// 対象を先に確定する（画像・SFEN・手動座標が揃っているものだけ）
+	var targets []*evalTarget
+	for _, e := range h.Entries {
+		if len(selected) > 0 && !selected[e.ID] {
+			continue
+		}
+		t, err := loadEvalTarget(e)
+		if err != nil {
+			run.Entries = append(run.Entries, EvalEntry{ID: e.ID, Error: err.Error()})
+			run.Skipped++
+			continue
+		}
+		targets = append(targets, t)
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("評価できる局面がありません（画像・正解 SFEN・盤面座標が揃っている必要があります）")
+	}
+
+	var holdoutKNN map[string]*suteme.KNN
+	if holdout {
+		want := make(map[string]bool, len(targets))
+		for _, t := range targets {
+			want[t.entry.ID] = true
+		}
+		log.Printf("evaluate: leave-one-out 用の学習データを作成中（%d 局面）", len(h.Entries))
+		holdoutKNN = holdoutPredictors(h.Entries, want)
+		run.ManualHoldout = &EvalMetrics{}
+		run.AutoHoldout = &EvalMetrics{}
+	}
+
+	for i, t := range targets {
+		res := EvalEntry{ID: t.entry.ID}
+
+		// 手動座標。認識器そのものの成績
+		if g, _, err := recognizeGrid(t.img, p, suteme.WithRect(t.rect.X1, t.rect.Y1, t.rect.X2, t.rect.Y2)); err == nil {
+			res.Manual = gradeBoard(t.want, g)
+		} else {
+			res.Error = err.Error()
+		}
+
+		// 自動検出。検出できなければ 0/81
+		g, dbg, err := recognizeGrid(t.img, p)
+		if err == nil && dbg != nil {
+			res.Detect = gradeDetect(dbg.Region, dbg.RegionSource, dbg.Confidence, true, t.entry.BoardBounds)
+			res.Auto = gradeBoard(t.want, g)
+		} else {
+			// 棄却された候補の位置と信頼度も残す。次の版で拾えるように
+			// なったかを追えるようにするため（0/81 という結果だけでは分からない）
+			if br := suteme.DetectBoard(t.img); br != nil {
+				res.Detect = gradeDetect(br.Bounds, suteme.RegionFromDetect,
+					suteme.ValidateBoard(t.img, br), false, t.entry.BoardBounds)
+			}
+			res.Auto = missedBoard(t.want)
+		}
+
+		if kn, ok := holdoutKNN[t.entry.ID]; ok {
+			mh := EvalMetrics{}
+			if g, _, err := recognizeGrid(t.img, kn, suteme.WithRect(t.rect.X1, t.rect.Y1, t.rect.X2, t.rect.Y2)); err == nil {
+				mh = gradeBoard(t.want, g)
+			}
+			ah := missedBoard(t.want)
+			if g, _, err := recognizeGrid(t.img, kn); err == nil {
+				ah = gradeBoard(t.want, g)
+			}
+			res.ManualHoldout, res.AutoHoldout = &mh, &ah
+			run.ManualHoldout.add(mh)
+			run.AutoHoldout.add(ah)
+		}
+
+		run.Manual.add(res.Manual)
+		run.Auto.add(res.Auto)
+		run.DetectSummary.Boards++
+		if res.Detect.Found {
+			run.DetectSummary.Found++
+			if res.Detect.Aligned {
+				run.DetectSummary.Aligned++
+			}
+			if res.Detect.Source == string(suteme.RegionFromWholeImage) {
+				run.DetectSummary.Whole++
+			}
+		}
+		run.Entries = append(run.Entries, res)
+		det := fmt.Sprintf("%.2fマス conf=%.2f", res.Detect.MaxShift, res.Detect.Confidence)
+		switch {
+		case !res.Detect.Candidate:
+			det = "候補なし"
+		case !res.Detect.Found:
+			det += "（棄却）"
+		}
+		log.Printf("evaluate [%d/%d] %s: 手動 %d/81 自動 %d/81 検出 %s",
+			i+1, len(targets), t.entry.ID, res.Manual.OK, res.Auto.OK, det)
+	}
+	run.Seconds = time.Since(start).Seconds()
+	if run.Label == "" {
+		run.Label = fmt.Sprintf("%s / %d サンプル", run.DataFile, run.Samples)
+	}
+	return run, nil
+}
+
+// appendEvalRun は実行結果を data/accuracy.json の先頭に足す。
+func appendEvalRun(run *EvalRun) error {
+	evalMu.Lock()
+	defer evalMu.Unlock()
+	h := loadEvalHistory()
+	h.Runs = append([]EvalRun{*run}, h.Runs...)
+	if len(h.Runs) > maxEvalRuns {
+		h.Runs = h.Runs[:maxEvalRuns]
+	}
+	return saveEvalHistory(h)
+}
+
+// handleEvaluate は評価を実行して結果を保存する（ループバック限定）。
+//
+// **同期で返す。** leave-one-out を付けると局面数に比例して数分かかるが、
+// 学習（NN 込みで数十分）と同じ扱いにしてある。進捗はサーバのログに出る。
+func handleEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		// IDs が空なら評価できる局面すべて
+		IDs   []string `json:"ids"`
+		Label string   `json:"label"`
+		// Holdout: その局面を学習から外した k-NN でも測るか
+		Holdout bool `json:"holdout"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	run, err := runEvaluation(req.IDs, req.Label, req.Holdout)
+	if err != nil {
+		httpJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := appendEvalRun(run); err != nil {
+		httpJSONError(w, http.StatusInternalServerError, "評価結果を保存できませんでした: "+err.Error())
+		return
+	}
+	log.Printf("evaluate: %s 手動 %d/%d 自動 %d/%d 検出 %d/%d (%.1fs)",
+		run.Label, run.Manual.OK, run.Manual.Cells, run.Auto.OK, run.Auto.Cells,
+		run.DetectSummary.Aligned, run.DetectSummary.Boards, run.Seconds)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(run)
+}
+
+// handleEvaluations は保存済みの評価結果を返す / 削除する（ループバック限定）。
+//
+//	GET    /api/evaluations       実行の一覧（新しい順）
+//	DELETE /api/evaluations/{id}  実行 1 件を削除
+func handleEvaluations(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/evaluations"), "/")
+	switch {
+	case r.Method == http.MethodGet && id == "":
+		evalMu.Lock()
+		h := loadEvalHistory()
+		evalMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(h)
+	case r.Method == http.MethodDelete && validID(id):
+		evalMu.Lock()
+		h := loadEvalHistory()
+		kept := h.Runs[:0]
+		found := false
+		for _, run := range h.Runs {
+			if run.ID == id {
+				found = true
+				continue
+			}
+			kept = append(kept, run)
+		}
+		if found {
+			h.Runs = kept
+			saveEvalHistory(h)
+		}
+		evalMu.Unlock()
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "id": id})
+	default:
+		http.NotFound(w, r)
+	}
+}

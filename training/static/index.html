@@ -158,7 +158,40 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <button class="tab-btn active" id="tab-btn-input" onclick="switchTab('input')">入力</button>
   <button class="tab-btn" id="tab-btn-analyze" onclick="switchTab('analyze')">解析</button>
   <button class="tab-btn" id="tab-btn-history" onclick="switchTab('history')">履歴</button>
+  <button class="tab-btn" id="tab-btn-eval" onclick="switchTab('eval')">評価</button>
   <button class="tab-btn" id="tab-btn-api" onclick="switchTab('api')">API</button>
+</div>
+
+<div id="tab-eval" style="display:none;max-width:860px;margin:0 auto 20px">
+  <div style="font-size:12px;color:#888;line-height:1.8;margin-bottom:12px">
+    保存済み局面の正解 SFEN と突き合わせて認識率を測り、実行ごとに記録します。
+    モデルや認識ロジックを変えたあとに実行すると、前回との差が下の表に並びます。
+  </div>
+
+  <div style="background:#16213e;border:1px solid #2a3a5e;border-radius:4px;padding:12px;margin-bottom:12px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <input type="text" id="eval-label" placeholder="ラベル（例: v5 外接矩形 / 中継3局面追加）"
+        style="flex:1;background:#0f3460;border:1px solid #2a3a5e;color:#eee;padding:6px 8px;border-radius:4px;font-size:12px">
+      <button id="btn-evaluate" onclick="runEvaluation()"
+        style="font-size:12px;background:#2d6a4f;color:#eee;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">評価を実行</button>
+    </div>
+    <label style="font-size:12px;color:#bbb;display:flex;align-items:center;gap:6px;cursor:pointer"
+      title="評価する局面を学習データから外して k-NN を組み直します。局面数に比例して時間がかかります">
+      <input type="checkbox" id="eval-holdout" checked> leave-one-out も測る（未知の局面に対する実力。数分かかります）
+    </label>
+    <div style="font-size:11px;color:#777;margin:6px 0 0 22px;line-height:1.7">
+      チェックを外すと起動中の推論器そのままで測ります。数秒で終わりますが、
+      <b>評価する局面が学習済みなら高く出る</b>ので絶対値は信用できません（版どうしの相対比較には使えます）。
+    </div>
+    <div id="eval-status" style="font-size:12px;color:#888;margin-top:8px"></div>
+  </div>
+
+  <div style="font-size:12px;color:#888;margin-bottom:4px">
+    <b style="color:#bbb">手動</b> = 保存してある盤面座標を与えたときの認識率（認識器そのものの成績）。
+    <b style="color:#bbb">自動</b> = 検出から通した端から端まで。<b>盤面を検出できなかった局面は 0/81</b> として数えます。
+  </div>
+  <div id="eval-runs" style="overflow-x:auto"></div>
+  <div id="eval-detail" style="margin-top:12px"></div>
 </div>
 
 <div id="tab-api" style="display:none;max-width:600px;margin:0 auto 20px">
@@ -1145,13 +1178,15 @@ async function updateHandSummary() {
 //   入力 = 画像を登録して自動認識の結果を見る
 //   解析 = マス目をラベリングして保存する
 //   履歴 = 保存済み局面を選んで学習する
+//   評価 = 保存済み局面の正解と突き合わせて認識率を測り、実行ごとに残す
 //   API  = 外部からの訓練データ登録の設定
 function switchTab(name) {
-  for (const t of ['input', 'analyze', 'history', 'api']) {
+  for (const t of ['input', 'analyze', 'history', 'eval', 'api']) {
     document.getElementById('tab-' + t).style.display = name === t ? '' : 'none';
     document.getElementById('tab-btn-' + t).className = 'tab-btn' + (name === t ? ' active' : '');
   }
   if (name === 'history') refreshHistory();
+  if (name === 'eval') refreshEvaluations();
   if (name === 'api') loadApiSettings();
 }
 
@@ -1218,9 +1253,35 @@ async function refreshApiInfo() {
 // 履歴
 const processedHistory = new Set(); // このセッション中に読み込んだ履歴ID（永続化しない）
 
+// 履歴の各行に、最後に測った認識率を出す。
+// 評価タブは実行単位の集計なので、どの局面が読めていないのかは一覧で見たい
+async function latestEvalByEntry() {
+  try {
+    const data = await (await fetch('/api/evaluations')).json();
+    const run = (data.runs || [])[0];
+    if (!run) return null;
+    const map = {};
+    (run.entries || []).forEach(e => { map[e.id] = e; });
+    return { label: run.label, at: run.created_at, map };
+  } catch (_) { return null; }
+}
+
+function historyScoreHTML(latest, id) {
+  const e = latest && latest.map[id];
+  if (!e || e.error) return '';
+  const m = e.auto_holdout || e.auto;
+  const det = '検出 ' + detectHTML(e.detect || {});
+  const rate = m && m.cells
+    ? `<span style="color:${m.ok === m.cells ? '#74c69d' : '#bbb'}">自動 ${m.ok}/${m.cells}</span>` : '';
+  return `<div style="font-size:11px;color:#666"
+    title="${escapeHTML(latest.at + ' ' + latest.label)} の評価${e.auto_holdout ? '（leave-one-out）' : ''}">
+    ${det} · ${rate}</div>`;
+}
+
 async function refreshHistory() {
   const res = await fetch('/api/history');
   const data = await res.json();
+  const latest = await latestEvalByEntry();
   const list = document.getElementById('history-list');
   if (!data.entries || data.entries.length === 0) {
     list.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:10px">保存した局面はありません</div>';
@@ -1242,6 +1303,7 @@ async function refreshHistory() {
           unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。行をクリックして解析タブで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
         <div style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
              title="${e.sfen}">${e.sfen}</div>
+        ${historyScoreHTML(latest, e.id)}
       </div>
       <span style="font-size:11px;color:#4cc9f0;white-space:nowrap">再入力 ›</span>
       <button class="hist-del" data-id="${e.id}" title="この局面を削除する"
@@ -1635,6 +1697,154 @@ function renderPieceCounts(v) {
   const el = document.getElementById('piece-counts');
   el.innerHTML = tbl;
   el.style.display = 'block';
+}
+
+// ---- 評価タブ ----
+// 実行ごとの認識率を並べて、モデルを更新したときの新旧を比べる。
+// 数字は 3 系統: 盤面検出 / 手動座標での認識 / 自動座標での認識（端から端まで）。
+
+let evalRuns = [];
+
+function pct(ok, total) {
+  if (!total) return '—';
+  return (100 * ok / total).toFixed(1) + '%';
+}
+
+// 認識率のセル。割合と生の数を両方出す（母数が変われば割合の意味も変わるため）
+function rateCell(m) {
+  if (!m || !m.cells) return '<td style="color:#555">—</td>';
+  const miss = m.no_board ? ` <span style="color:#ff8080" title="盤面を検出できず 0/81 とした局面">検出不可 ${m.no_board}</span>` : '';
+  return `<td style="white-space:nowrap">${pct(m.ok, m.cells)}
+    <span style="color:#666;font-size:11px">${m.ok}/${m.cells}</span>${miss}</td>`;
+}
+
+async function refreshEvaluations() {
+  const data = await (await fetch('/api/evaluations')).json();
+  evalRuns = data.runs || [];
+  const el = document.getElementById('eval-runs');
+  if (evalRuns.length === 0) {
+    el.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:10px">評価の記録はありません</div>';
+    document.getElementById('eval-detail').innerHTML = '';
+    return;
+  }
+  let html = `<table class="piece-table" style="font-size:12px">
+    <tr><th>日時</th><th>ラベル</th><th>局面</th><th title="手動座標との差が 0.5マス以内だった局面">検出</th>
+    <th>手動</th><th>自動</th><th title="評価する局面を学習から外した k-NN">LOO 手動</th><th>LOO 自動</th><th></th></tr>`;
+  html += evalRuns.map((r, i) => {
+    const d = r.detect_summary || {};
+    return `<tr class="eval-run" data-i="${i}" style="cursor:pointer">
+      <td style="white-space:nowrap;color:#888">${r.created_at}</td>
+      <td style="text-align:left;color:#4cc9f0">${escapeHTML(r.label)}</td>
+      <td>${(r.manual && r.manual.boards) || 0}${r.skipped ? `<span style="color:#f0a030" title="画像・正解SFEN・盤面座標が揃っていない局面"> +${r.skipped}</span>` : ''}</td>
+      <td style="white-space:nowrap">${pct(d.aligned, d.boards)}
+        <span style="color:#666;font-size:11px">${d.aligned || 0}/${d.boards || 0}</span></td>
+      ${rateCell(r.manual)}${rateCell(r.auto)}${rateCell(r.manual_holdout)}${rateCell(r.auto_holdout)}
+      <td><button class="eval-del" data-id="${r.id}" title="この記録を削除する"
+        style="font-size:11px;background:none;border:1px solid #6a2d3a;color:#ff8080;padding:1px 6px;border-radius:3px;cursor:pointer">×</button></td>
+    </tr>`;
+  }).join('');
+  html += '</table>';
+  el.innerHTML = html;
+  showEvalDetail(0);
+}
+
+function escapeHTML(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// 盤面検出の結果。**棄却された候補もずれと信頼度つきで出す。**
+// 「検出できず」だけだと、惜しかったのか全然違う場所を見ていたのかが分からず、
+// 次の版で盤が拾えるようになったかを追えない
+function detectHTML(d) {
+  if (!d.candidate) return '<span style="color:#ff8080">候補なし</span>';
+  const shift = `${d.max_shift.toFixed(2)}マス`;
+  const conf = `<span style="color:#666;font-size:11px">conf ${(d.confidence * 100).toFixed(0)}%${
+    d.source === 'whole' ? ' / 画像全体' : ''}</span>`;
+  if (!d.found) {
+    return `<span style="color:#ff8080">棄却 ${shift}</span> ${conf}`;
+  }
+  return `<span style="color:${d.aligned ? '#74c69d' : '#ff8080'}">${shift}</span> ${conf}`;
+}
+
+// 局面ごとの内訳。**外した局面をずれ幅つきで残す**のがここの主眼で、
+// 「あの画像の盤が拾えるようになったか」を後から追えるようにしてある
+function showEvalDetail(i) {
+  const r = evalRuns[i];
+  const el = document.getElementById('eval-detail');
+  if (!r) { el.innerHTML = ''; return; }
+  const rows = (r.entries || []).map(e => {
+    if (e.error) {
+      return `<tr><td style="font-family:monospace">${e.id.slice(0, 8)}</td>
+        <td colspan="5" style="text-align:left;color:#f0a030">${escapeHTML(e.error)}</td></tr>`;
+    }
+    const det = detectHTML(e.detect || {});
+    const cell = m => m && m.cells
+      ? `<td style="white-space:nowrap">${m.ok}/${m.cells}</td>` : '<td style="color:#555">—</td>';
+    return `<tr><td style="font-family:monospace">${e.id.slice(0, 8)}</td>
+      <td style="text-align:left">${det}</td>
+      ${cell(e.manual)}${cell(e.auto)}${cell(e.manual_holdout)}${cell(e.auto_holdout)}</tr>`;
+  }).join('');
+  const m = r.manual_holdout || r.manual;
+  el.innerHTML = `<div style="font-size:12px;color:#888;margin-bottom:4px">
+      <b style="color:#bbb">${escapeHTML(r.label)}</b> の内訳 —
+      ${escapeHTML(r.engine || '?')} / ${r.samples} サンプル / <code>${escapeHTML(r.data_file || '')}</code> /
+      ${r.seconds ? r.seconds.toFixed(1) + '秒' : ''}
+      ${m ? `<br>誤りの内訳（${r.manual_holdout ? 'LOO ' : ''}手動座標）: 空→駒 ${m.empty_as_piece} / 駒→空 ${m.piece_as_empty} /
+        向きの反転 ${m.orient_flip} / 駒種違い ${m.type_miss} / 駒マスの駒種 ${pct(m.piece_ok, m.piece_cells)}` : ''}
+    </div>
+    <table class="piece-table" style="font-size:12px">
+      <tr><th>局面</th><th title="手動座標との差（マス）">検出のずれ</th><th>手動</th><th>自動</th><th>LOO 手動</th><th>LOO 自動</th></tr>
+      ${rows}</table>`;
+}
+
+document.getElementById('eval-runs').addEventListener('click', async e => {
+  const del = e.target.closest('.eval-del');
+  if (del) {
+    e.stopPropagation();
+    if (!confirm('この評価の記録を削除しますか？')) return;
+    await fetch('/api/evaluations/' + del.dataset.id, { method: 'DELETE' });
+    refreshEvaluations();
+    return;
+  }
+  const row = e.target.closest('.eval-run');
+  if (row) showEvalDetail(Number(row.dataset.i));
+});
+
+async function runEvaluation() {
+  const btn = document.getElementById('btn-evaluate');
+  const status = document.getElementById('eval-status');
+  const holdout = document.getElementById('eval-holdout').checked;
+  btn.disabled = true;
+  btn.style.opacity = '0.4';
+  status.innerHTML = holdout
+    ? '評価中です。局面ごとに k-NN を組み直すので数分かかります（進行状況はサーバのログに出ます）…'
+    : '評価中です…';
+  try {
+    const res = await fetch('/api/evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: document.getElementById('eval-label').value, holdout }),
+    });
+    if (!res.ok) {
+      let msg = await res.text();
+      try { msg = JSON.parse(msg).error; } catch (_) {}
+      status.innerHTML = '<span style="color:#ff8080">評価に失敗しました: ' + escapeHTML(msg) + '</span>';
+      return;
+    }
+    const run = await res.json();
+    const d = run.detect_summary || {};
+    status.innerHTML = `<span style="color:#74c69d">評価完了</span> — ${run.manual.boards} 局面 / ` +
+      `検出 ${d.aligned}/${d.boards} / 手動 ${pct(run.manual.ok, run.manual.cells)} / ` +
+      `自動 ${pct(run.auto.ok, run.auto.cells)}（${run.seconds.toFixed(1)}秒）`;
+    document.getElementById('eval-label').value = '';
+    refreshEvaluations();
+  } catch (err) {
+    status.innerHTML = '<span style="color:#ff8080">エラー: ' + escapeHTML(err.message) + '</span>';
+  } finally {
+    btn.disabled = false;
+    btn.style.opacity = '1';
+  }
 }
 
 </script>

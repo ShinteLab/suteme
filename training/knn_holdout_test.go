@@ -1,15 +1,12 @@
 package training
 
 import (
-	"fmt"
 	"image"
 	_ "image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/ShinteLab/core/sfen"
 
 	"github.com/ShinteLab/suteme"
 )
@@ -49,37 +46,9 @@ func chdirToData(t *testing.T) bool {
 	return false
 }
 
-// wantGrid は正解 SFEN を「マスごとのラベル」に展開する。空マスは EmptyLabel
-func wantGrid(s string) (*[9][9]string, error) {
-	var g [9][9]string
-	for r := range g {
-		for c := range g[r] {
-			g[r][c] = suteme.EmptyLabel
-		}
-	}
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return nil, fmt.Errorf("SFEN が空です")
-	}
-	err := sfen.ParseBoard(fields[0], func(rank, file, base int, black, promoted bool) {
-		// 保存済み SFEN が壊れている場合に備える
-		if rank < 0 || rank >= 9 || file < 0 || file >= 9 {
-			return
-		}
-		label := sfen.Letter(base)
-		if label == "None" {
-			return
-		}
-		if promoted {
-			label = "+" + label
-		}
-		if !black {
-			label = "-" + label
-		}
-		g[rank][file] = label
-	})
-	return &g, err
-}
+// wantGrid は正解 SFEN を「マスごとのラベル」に展開する。空マスは EmptyLabel。
+// 実体は evaluate.go の boardGrid（評価タブと同じ展開を使う）
+func wantGrid(s string) (*[9][9]string, error) { return boardGrid(s) }
 
 // predictCell は RecognizeBoard と同じ判断でマスのラベルを返す
 func predictCell(cell image.Image, bc uint8, p suteme.Predictor) string {
