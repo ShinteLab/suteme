@@ -133,6 +133,14 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .hist-row:hover { background: #16213e; }
 .hist-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; border: 1px solid #2a3a5e; flex-shrink: 0; }
 .hist-check { width: 20px; text-align: center; color: #74c69d; font-weight: bold; font-size: 14px; flex-shrink: 0; }
+/* 局面 ID。**不具合の事例を人に伝えるときの呼び名**なので、日付時刻だけで
+   指し示さずに済むよう履歴・解析タブの両方に出す。クリックで全桁をコピーする */
+.id-chip {
+  font-family: monospace; font-size: 11px; color: #4cc9f0;
+  background: #16213e; border: 1px solid #2a3a5e; border-radius: 3px;
+  padding: 0 5px; cursor: pointer; user-select: all;
+}
+.id-chip:hover { background: #0f3460; }
 /* チェック欄。当たり判定が小さいと行選択(解析タブへの遷移)を誤爆するので、
    行の高さいっぱい・左端までを当たり判定にする */
 .hist-sel-cell {
@@ -351,6 +359,10 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   盤の左上から右下へドラッグしてください。指定すればそのまま認識・ラベリングに進めます。
   <button class="action-btn" style="float:none;margin-left:8px" onclick="startBoardSelect()">盤面を手動指定</button>
 </div>
+
+<!-- いま編集している局面の ID。保存済み（履歴から再入力した / 一度保存した）ときだけ出る。
+     不具合の事例を人に伝えるときは、日付時刻ではなくこの ID で指す -->
+<div id="analyze-id" style="display:none;font-size:12px;color:#888;margin-bottom:10px"></div>
 
 <div class="pipeline" id="pipeline" style="display:none">
   <div class="card">
@@ -625,7 +637,7 @@ async function analyze(file) {
   // 前の画像の入力を持ち越さない。SFEN 欄が残っていると次の画像の
   // ラベリング中も古い局面が画面に居座って紛らわしい
   document.getElementById('sfen-input').value = '';
-  currentHistoryId = null; // 履歴からの再入力なら、この後で呼び出し側が入れ直す
+  setCurrentHistoryId(null); // 履歴からの再入力なら、この後で呼び出し側が入れ直す
   // 手番・持ち駒も持ち越さない（前の局面の駒台が残ると別画像の正解データが汚れる）
   currentMoveNumber = null;
   setTurn(''); // 不明
@@ -953,6 +965,24 @@ function applyLabel(r, c, pieceId, displayHtml, bgColor) {
     enableSaveButton();
   }
 }
+
+// 編集中の局面を差し替える。ID は保存先（上書きか新規か）であると同時に
+// **その事例の呼び名**なので、代入と同時に画面にも出す
+function setCurrentHistoryId(id) {
+  currentHistoryId = id || null;
+  const el = document.getElementById('analyze-id');
+  if (!el) return;
+  el.style.display = currentHistoryId ? '' : 'none';
+  el.innerHTML = currentHistoryId
+    ? '局面 ID: ' + idChipHTML(currentHistoryId, 'margin:0 4px') +
+      '<span style="color:#555">（この局面の呼び名。クリックで全桁をコピー）</span>'
+    : '';
+}
+
+document.getElementById('analyze-id').addEventListener('click', async e => {
+  const chip = e.target.closest('.id-chip');
+  if (chip) await copyIDChip(chip);
+});
 
 // 上書きになるのか新規登録になるのかはボタンの文言で分かるようにする
 function saveButtonLabel() {
@@ -1329,7 +1359,7 @@ async function refreshHistory() {
       <span class="hist-check">${done ? '○' : ''}</span>
       <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
       <div style="flex:1;min-width:0">
-        <div style="font-size:11px;color:#888">${e.created_at}${
+        <div style="font-size:11px;color:#888">${idChipHTML(e.id, 'margin-right:6px')}${e.created_at}${
           unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。行をクリックして解析タブで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
         <div style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
              title="${e.sfen}">${e.sfen}</div>
@@ -1418,6 +1448,13 @@ async function trainFromHistory() {
 }
 
 document.getElementById('history-list').addEventListener('click', async e => {
+  // ID のコピーは行を開く操作より先に見る（再入力に流さない）
+  const chip = e.target.closest('.id-chip');
+  if (chip) {
+    e.stopPropagation();
+    await copyIDChip(chip);
+    return;
+  }
   // チェックは「学習に使う」選択。行を開く操作とは別なので、
   // チェックボックス本体だけでなく欄全体のクリックをここで止める
   const selCell = e.target.closest('.hist-sel-cell');
@@ -1451,7 +1488,7 @@ document.getElementById('history-list').addEventListener('click', async e => {
   // analyze() が SFEN 欄をクリアするので、復元は analyze の後に行う
   await analyze(file);
   // 再入力なので、保存は新規登録ではなくこの履歴の上書きにする
-  currentHistoryId = id;
+  setCurrentHistoryId(id);
   resetSaveButton();
 
   // 保存した盤面座標を復元
@@ -1494,7 +1531,7 @@ async function deleteHistory(id) {
   processedHistory.delete(id);
   if (currentHistoryId === id) {
     // 上書き先が無くなったので、次の保存は新規登録に戻す
-    currentHistoryId = null;
+    setCurrentHistoryId(null);
     const btn = document.getElementById('btn-save-session');
     if (!btn.disabled) btn.textContent = saveButtonLabel();
   }
@@ -1539,7 +1576,7 @@ async function saveSession() {
   const data = await res.json();
   if (data.status === 'ok') {
     // 以後の保存も同じ履歴を上書きする（直すたびに別データが増えないように）
-    currentHistoryId = data.id;
+    setCurrentHistoryId(data.id);
     btn.textContent = data.overwrote ? '上書き済' : '保存済';
     btn.disabled = true;
     btn.style.opacity = '0.4';
@@ -1763,7 +1800,7 @@ function negativeDetailHTML(n) {
   const rows = (n.results || []).slice().sort((a, b) => b.confidence - a.confidence).map(x => {
     const conf = (x.confidence * 100).toFixed(0) + '%';
     const where = x.source ? `${x.x1},${x.y1}-${x.x2},${x.y2}${x.source === 'whole' ? '（画像全体）' : ''}` : '候補なし';
-    return `<tr><td style="font-family:monospace">${x.id.slice(0, 8)}</td>
+    return `<tr><td>${idChipHTML(x.id)}</td>
       <td style="color:${x.detected ? '#ff8080' : '#74c69d'}">${x.detected ? '誤検出' : '棄却'}</td>
       <td>conf ${conf}</td><td style="text-align:left;color:#888;font-size:11px">${where}</td></tr>`;
   }).join('');
@@ -1789,10 +1826,13 @@ async function refreshNegatives() {
           style="height:64px;border-radius:3px;display:block;border:1px solid #2a3a5e">
         <button class="negative-del" data-id="${id}" title="この負例を削除する"
           style="position:absolute;top:2px;right:2px;font-size:10px;line-height:1;background:#6a2d3a;color:#fff;border:none;padding:2px 4px;border-radius:3px;cursor:pointer">×</button>
+        <div style="text-align:center;margin-top:2px">${idChipHTML(id)}</div>
       </div>`).join('');
 }
 
 document.getElementById('negative-list').addEventListener('click', async e => {
+  const chip = e.target.closest('.id-chip');
+  if (chip) { await copyIDChip(chip); return; }
   const del = e.target.closest('.negative-del');
   if (!del) return;
   if (!confirm('この負例を削除しますか？')) return;
@@ -1823,7 +1863,9 @@ async function markCurrentAsNegative() {
     let msg = await res.text();
     try { msg = JSON.parse(msg); } catch (_) { msg = { error: msg }; }
     if (!res.ok) { alert('登録できませんでした: ' + msg.error); return; }
-    btn.textContent = msg.duplicate ? '登録済みの負例です' : '負例として登録しました';
+    // ID も出す。この画像の話をするときの呼び名になる
+    const short = msg.id ? '（ID ' + String(msg.id).slice(0, 8) + '）' : '';
+    btn.textContent = (msg.duplicate ? '登録済みの負例です' : '負例として登録しました') + short;
     btn.style.background = '#2d6a4f';
   } finally { btn.disabled = false; }
 }
@@ -1866,6 +1908,29 @@ function escapeHTML(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
+// 局面 ID の表示。**先頭 8 桁で呼ぶ**（CLAUDE.md の実測値も `26e06136` のように
+// 8 桁で局面を指している）。日付時刻しか手掛かりが無いと事例を人に伝えられないので、
+// 履歴の行・評価の内訳・解析タブの見出しで同じ書き方に揃える。
+// クリックすると全桁をクリップボードへ入れる（行クリックの再入力には流さない）
+function idChipHTML(id, style) {
+  return `<span class="id-chip" data-copy-id="${escapeHTML(id)}"
+    title="局面 ID ${escapeHTML(id)}（クリックでコピー）"
+    style="${style || ''}">${escapeHTML(String(id).slice(0, 8))}</span>`;
+}
+
+// コピーできたことが分かるよう、一瞬だけ表示を差し替えて戻す
+async function copyIDChip(el) {
+  const id = el.dataset.copyId;
+  const shown = el.textContent;
+  try {
+    await navigator.clipboard.writeText(id);
+    el.textContent = 'コピーしました';
+  } catch (_) {
+    el.textContent = id; // クリップボードが使えない環境では全桁を出して手で選ばせる
+  }
+  setTimeout(() => { el.textContent = shown; }, 1200);
+}
+
 // 盤面検出の結果。**棄却された候補もずれと信頼度つきで出す。**
 // 「検出できず」だけだと、惜しかったのか全然違う場所を見ていたのかが分からず、
 // 次の版で盤が拾えるようになったかを追えない
@@ -1888,13 +1953,13 @@ function showEvalDetail(i) {
   if (!r) { el.innerHTML = ''; return; }
   const rows = (r.entries || []).map(e => {
     if (e.error) {
-      return `<tr><td style="font-family:monospace">${e.id.slice(0, 8)}</td>
+      return `<tr><td>${idChipHTML(e.id)}</td>
         <td colspan="5" style="text-align:left;color:#f0a030">${escapeHTML(e.error)}</td></tr>`;
     }
     const det = detectHTML(e.detect || {});
     const cell = m => m && m.cells
       ? `<td style="white-space:nowrap">${m.ok}/${m.cells}</td>` : '<td style="color:#555">—</td>';
-    return `<tr><td style="font-family:monospace">${e.id.slice(0, 8)}</td>
+    return `<tr><td>${idChipHTML(e.id)}</td>
       <td style="text-align:left">${det}</td>
       ${cell(e.manual)}${cell(e.auto)}${cell(e.manual_holdout)}${cell(e.auto_holdout)}</tr>`;
   }).join('');
@@ -1911,6 +1976,12 @@ function showEvalDetail(i) {
       ${rows}</table>
     ${negativeDetailHTML(r.negative)}`;
 }
+
+// 内訳の表の ID もクリックでコピーできるようにする
+document.getElementById('eval-detail').addEventListener('click', async e => {
+  const chip = e.target.closest('.id-chip');
+  if (chip) await copyIDChip(chip);
+});
 
 document.getElementById('eval-runs').addEventListener('click', async e => {
   const del = e.target.closest('.eval-del');
