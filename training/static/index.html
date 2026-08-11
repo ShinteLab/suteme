@@ -141,8 +141,8 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   padding: 0 5px; cursor: pointer; user-select: all;
 }
 .id-chip:hover { background: #0f3460; }
-/* チェック欄。当たり判定が小さいと行選択(解析タブへの遷移)を誤爆するので、
-   行の高さいっぱい・左端までを当たり判定にする */
+/* チェック欄。行のどこを押しても選択は切り替わるが、チェックボックスそのものを
+   狙って押す人のために当たり判定を行の高さいっぱい・左端までに広げてある */
 .hist-sel-cell {
   flex-shrink: 0; display: flex; align-items: center; justify-content: center;
   align-self: stretch; padding: 0 10px; margin: -8px 0 -8px -10px; cursor: pointer;
@@ -300,7 +300,8 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
     </div>
   </div>
   <div style="font-size:12px;color:#888;margin-bottom:6px">
-    学習するだけならチェックを付けて「選択した局面で学習」。行をクリックすると解析タブで再入力できます。
+    行をクリックすると学習に使う局面として選べます（「選択した局面で学習」）。
+    ラベルを直すときは行末の「再入力」から解析タブへ。
   </div>
   <label style="font-size:12px;color:#888;display:flex;align-items:center;gap:5px;cursor:pointer;margin-bottom:6px"
     title="認識に使うのは k-NN で、これは学習データを保存した時点で更新されます。NN は /api/recognize の比較用 SFEN にしか使いません。学習には累積サンプル数に比例した時間（現状で 10 分以上）がかかります">
@@ -1360,12 +1361,13 @@ async function refreshHistory() {
       <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
       <div style="flex:1;min-width:0">
         <div style="font-size:11px;color:#888">${idChipHTML(e.id, 'margin-right:6px')}${e.created_at}${
-          unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。行をクリックして解析タブで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
+          unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。「再入力」で解析タブに読み込んで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
         <div style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
              title="${e.sfen}">${e.sfen}</div>
         ${historyScoreHTML(latest, e.id)}
       </div>
-      <span style="font-size:11px;color:#4cc9f0;white-space:nowrap">再入力 ›</span>
+      <button class="hist-reenter" data-id="${e.id}" title="解析タブに読み込んでラベルを直す"
+        style="font-size:11px;background:none;border:1px solid #2a5a6a;color:#4cc9f0;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap">再入力 ›</button>
       <button class="hist-del" data-id="${e.id}" title="この局面を削除する"
         style="margin-left:8px;font-size:11px;background:none;border:1px solid #6a2d3a;color:#ff8080;padding:2px 8px;border-radius:3px;cursor:pointer">削除</button>
     </div>`;
@@ -1447,38 +1449,50 @@ async function trainFromHistory() {
   }
 }
 
+// 履歴の行のクリックは**選択（学習に使う）**。解析タブへ移るのは
+// 「再入力」を押したときだけにしてある。学習の対象を選ぶほうが操作として多く、
+// 行のどこを押しても画像の読み込みが走ると誤爆したときの戻りが重い
 document.getElementById('history-list').addEventListener('click', async e => {
-  // ID のコピーは行を開く操作より先に見る（再入力に流さない）
+  // ID のコピー
   const chip = e.target.closest('.id-chip');
   if (chip) {
     e.stopPropagation();
     await copyIDChip(chip);
     return;
   }
-  // チェックは「学習に使う」選択。行を開く操作とは別なので、
-  // チェックボックス本体だけでなく欄全体のクリックをここで止める
-  const selCell = e.target.closest('.hist-sel-cell');
-  if (selCell) {
-    const box = selCell.querySelector('.hist-sel');
-    // 欄の余白を押した場合はこちらでトグルする
-    if (box && e.target !== box) box.checked = !box.checked;
-    document.getElementById('hist-select-all').checked =
-      document.querySelectorAll('.hist-sel').length === historySelection().length;
-    updateTrainHistoryButton();
-    return;
-  }
-  // 削除は行を開く操作より先に見る（行クリックの再入力に流さない）
+  // 削除
   const del = e.target.closest('.hist-del');
   if (del) {
     e.stopPropagation();
     await deleteHistory(del.dataset.id);
     return;
   }
-  const btn = e.target.closest('.hist-row');
-  if (!btn) return;
-  const id = btn.dataset.id;
-  const sfen = btn.dataset.sfen;
-  const bounds = btn.dataset.bounds ? JSON.parse(btn.dataset.bounds) : null;
+  // 再入力（解析タブへ）は明示的に押したときだけ
+  const re = e.target.closest('.hist-reenter');
+  if (re) {
+    e.stopPropagation();
+    await reenterHistory(re.closest('.hist-row'));
+    return;
+  }
+  // それ以外はどこを押しても選択のトグル。
+  // チェックボックス本体はブラウザが切り替えるので触らない
+  const row = e.target.closest('.hist-row');
+  if (!row) return;
+  const box = row.querySelector('.hist-sel');
+  if (!box || box.disabled) return; // 未確認の局面は学習に使えないので選択もさせない
+  if (e.target !== box) box.checked = !box.checked;
+  document.getElementById('hist-select-all').checked =
+    document.querySelectorAll('.hist-sel').length === historySelection().length;
+  updateTrainHistoryButton();
+});
+
+// 保存済み局面を解析タブに読み込んで直す。画像・盤面座標・SFEN を戻し、
+// 保存は新規登録ではなくこの履歴の上書きにする
+async function reenterHistory(row) {
+  if (!row) return;
+  const id = row.dataset.id;
+  const sfen = row.dataset.sfen;
+  const bounds = row.dataset.bounds ? JSON.parse(row.dataset.bounds) : null;
 
   const res = await fetch('/api/history/' + id + '/image');
   if (!res.ok) { alert('画像の読み込みに失敗しました'); return; }
@@ -1519,7 +1533,7 @@ document.getElementById('history-list').addEventListener('click', async e => {
   }
   // 再入力が目的なので、復元し終えてから解析タブに移る
   switchTab('analyze');
-});
+}
 
 // 履歴の削除（エントリと保存画像の両方をサーバから消す）。
 // 学習データ（training_data_v3.json）に取り込み済みの分は消えないので、
@@ -1911,7 +1925,7 @@ function escapeHTML(s) {
 // 局面 ID の表示。**先頭 8 桁で呼ぶ**（CLAUDE.md の実測値も `26e06136` のように
 // 8 桁で局面を指している）。日付時刻しか手掛かりが無いと事例を人に伝えられないので、
 // 履歴の行・評価の内訳・解析タブの見出しで同じ書き方に揃える。
-// クリックすると全桁をクリップボードへ入れる（行クリックの再入力には流さない）
+// クリックすると全桁をクリップボードへ入れる（行クリックの選択には流さない）
 function idChipHTML(id, style) {
   return `<span class="id-chip" data-copy-id="${escapeHTML(id)}"
     title="局面 ID ${escapeHTML(id)}（クリックでコピー）"
