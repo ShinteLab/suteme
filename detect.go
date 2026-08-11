@@ -39,7 +39,7 @@ func DetectBoard(img image.Image) *BoardRegion {
 	best := detectBoardIn(edges, img.Bounds())
 	bestConf := ValidateBoard(img, best)
 	if bestConf >= segSkipConfidence {
-		return best
+		return unslipRegion(img, best)
 	}
 
 	for _, roi := range boardROIs(blurred) {
@@ -52,7 +52,68 @@ func DetectBoard(img image.Image) *BoardRegion {
 			best, bestConf = cand, conf
 		}
 	}
-	return best
+	return unslipRegion(img, best)
+}
+
+// unslipRegion は画像からはみ出した検出領域を1マス内側へ戻す。
+//
+// **盤の外枠線を切り落とした画像では、検出器から見て一番外の縦線が
+// 1本目の内側の線になり、周期は正しいまま窓が1マス滑る**
+// （CLAUDE.md「盤面検出」の `pickTaper` の項）。滑った窓は格子線には
+// 乗っているので `gridAlignment` では見分けられず、**信頼度 1.00 のまま
+// 通る**という質の悪い壊れ方をする。
+//
+// 見分けが付くのは**画像からはみ出すこと**。保存済み 89 局面で調べると、
+// はみ出したのは滑った 2 件（`576b34e8` `c4a7e592`）だけで、
+// 正しく検出できている 87 件は 0 件だった。しかも 1マス戻すと
+// **両方とも信頼度 1.00 のまま正解に収まる**:
+//
+//	576b34e8  dx=+0.97 / はみ出し 52px  →  0.09マス
+//	c4a7e592  dx=+0.94 / はみ出し 41px  →  0.14マス
+//
+// **信頼度が下がらない限り戻したほうを採る**（同点でも戻す）。滑りは
+// `gridAlignment` に不変なので同点になるのが普通で、勝たないと採れない
+// 条件にすると一度も発動しない。盤が本当に画面外へ続いている中継なら
+// 戻した窓は格子線から外れて信頼度が落ちるので、そちらは元のまま残る。
+// **はみ出したままの領域はどのみち `ExtractCell` が画像外を読む**ので、
+// 収まる候補が同点なら収まるほうが良い。
+func unslipRegion(img image.Image, br *BoardRegion) *BoardRegion {
+	if br == nil {
+		return nil
+	}
+	b := img.Bounds()
+	if br.Bounds.In(b) {
+		return br
+	}
+
+	cw, ch := br.Bounds.Dx()/9, br.Bounds.Dy()/9
+	var dx, dy int
+	switch {
+	case br.Bounds.Max.X > b.Max.X:
+		dx = -cw
+	case br.Bounds.Min.X < b.Min.X:
+		dx = cw
+	}
+	switch {
+	case br.Bounds.Max.Y > b.Max.Y:
+		dy = -ch
+	case br.Bounds.Min.Y < b.Min.Y:
+		dy = ch
+	}
+	if dx == 0 && dy == 0 {
+		return br
+	}
+
+	// 戻しても収まらない（＝盤が画像より大きい）なら手の出しようが無い
+	r := br.Bounds.Add(image.Pt(dx, dy))
+	if !r.In(b) {
+		return br
+	}
+	cand := BoardRegionFromRect(r.Min.X, r.Min.Y, r.Max.X, r.Max.Y)
+	if ValidateBoard(img, cand) < ValidateBoard(img, br) {
+		return br
+	}
+	return cand
 }
 
 // refineRegion は外枠を整合度が最大になる位置に寄せ、その領域と信頼度を返す。

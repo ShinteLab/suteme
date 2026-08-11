@@ -54,6 +54,12 @@ func TestDetectBoardMatchesManual(t *testing.T) {
 			t.Logf("%s: 検出できず", e.ID)
 			continue
 		}
+		// 画像からはみ出した領域を返さない（`unslipRegion`）。
+		// はみ出しは「窓が1マス滑った」印であると同時に、
+		// そのままでは ExtractCell が画像外を読む
+		if !det.Bounds.In(img.Bounds()) {
+			t.Errorf("%s: 検出 %v が画像 %v からはみ出している", e.ID, det.Bounds, img.Bounds())
+		}
 		dx := float64(det.Bounds.Min.X-man.Min.X) / cw
 		dy := float64(det.Bounds.Min.Y-man.Min.Y) / ch
 		dw := float64(det.Bounds.Dx()-man.Dx()) / cw
