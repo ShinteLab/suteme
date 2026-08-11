@@ -186,6 +186,25 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     <div id="eval-status" style="font-size:12px;color:#888;margin-top:8px"></div>
   </div>
 
+  <!-- 盤面が写っていない画像（負例）。ラベルは置き場所（data/negative/）そのもので、
+       SFEN も座標も要らない。**誤検出率はここでしか測れない**（他の系統はどれも
+       「盤がある画像」が前提なので、盤の無い画像に信頼度 1.00 を返しても数字に出ない） -->
+  <div style="background:#16213e;border:1px solid #2a3a5e;border-radius:4px;padding:12px;margin-bottom:12px">
+    <div style="font-size:12px;color:#bbb;margin-bottom:8px">
+      <b>盤面なし画像（負例）</b>
+      <span style="color:#888">— 盤が写っていない画像を置いておくと、評価のたびに
+      「盤として採用してしまわないか」を測ります。正解 SFEN も座標も要りません。</span>
+      <span id="negative-count" style="color:#888;float:right"></span>
+    </div>
+    <div id="negative-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+    <div style="font-size:11px;color:#777;margin-top:8px;line-height:1.7">
+      効くのは枚数ではなく中身です。本命は<b>盤に似た格子を持つ絵</b>（表・カレンダー・ターミナル・
+      棋譜の一覧・罫線の並んだ UI パネル）で、無関係な写真は簡単に落ちるので情報量がありません。
+      10〜20 枚で十分です。入力タブで画像を開いて「この画像に盤面は無い」を押すか、
+      <code>data/negative/</code> に PNG を直接コピーしても同じです。
+    </div>
+  </div>
+
   <div style="font-size:12px;color:#888;margin-bottom:4px">
     <b style="color:#bbb">手動</b> = 保存してある盤面座標を与えたときの認識率（認識器そのものの成績）。
     <b style="color:#bbb">自動</b> = 検出から通した端から端まで。<b>盤面を検出できなかった局面は 0/81</b> として数えます。
@@ -291,6 +310,13 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
 
 <div class="loading" id="loading">解析中...</div>
 <div class="stats" id="stats"></div>
+
+<!-- 盤が写っていないのに検出が通っている、と気付くのは必ずこの画面（信頼度が出ている）。
+     その場で負例にできるようにしておく。誤検出率は負例でしか測れない -->
+<div id="negative-mark" style="display:none;margin:0 0 12px">
+  <button class="action-btn" id="btn-negative" style="float:none;background:#4a2d3a" onclick="markCurrentAsNegative()">この画像に盤面は無い（負例として登録）</button>
+  <span style="font-size:11px;color:#777;margin-left:8px">評価タブで「盤として採用してしまわないか」を測る材料になります</span>
+</div>
 
 <!-- 画像を登録すると自動で認識まで走らせ、読み取れた盤面をここに出す -->
 <div id="recog-section" class="cells-section" style="display:none">
@@ -605,6 +631,7 @@ async function analyze(file) {
   setTurn(''); // 不明
   setHands('-');
   resetSaveButton();
+  resetNegativeButton();
   document.getElementById('loading').classList.add('active');
   document.getElementById('pipeline').style.display = 'none';
   document.getElementById('cells-section').style.display = 'none';
@@ -623,6 +650,9 @@ async function analyze(file) {
     const res = await fetch('/api/analyze', { method: 'POST', body: form });
     const data = await res.json();
     currentSessionId = data.id;
+    // 盤が検出できたかに関わらず出す。**誤検出のほうが問題**なので、
+    // 「信頼度 100% で通っているが盤は写っていない」をここで拾えるようにする
+    document.getElementById('negative-mark').style.display = '';
 
     const t = Date.now();
     document.getElementById('img-original').src = '/api/images/' + data.id + '/original?' + t;
@@ -1718,7 +1748,88 @@ function rateCell(m) {
     <span style="color:#666;font-size:11px">${m.ok}/${m.cells}</span>${miss}</td>`;
 }
 
+// 負例の棄却率。**1 枚でも通っていれば赤**にする。誤検出は割合ではなく
+// 「通る絵があるかどうか」が問題で、平均に薄めると気付けない
+function negativeCell(n) {
+  if (!n || !n.images) return '<td style="color:#555">—</td>';
+  return `<td style="white-space:nowrap;color:${n.rejected === n.images ? '#74c69d' : '#ff8080'}">
+    ${n.rejected}/${n.images}</td>`;
+}
+
+// 負例の内訳。棄却できたものも信頼度つきで出す（閾値ぎりぎりで
+// 落ちているだけなのか余裕があるのかが、これでないと分からない）
+function negativeDetailHTML(n) {
+  if (!n || !n.images) return '';
+  const rows = (n.results || []).slice().sort((a, b) => b.confidence - a.confidence).map(x => {
+    const conf = (x.confidence * 100).toFixed(0) + '%';
+    const where = x.source ? `${x.x1},${x.y1}-${x.x2},${x.y2}${x.source === 'whole' ? '（画像全体）' : ''}` : '候補なし';
+    return `<tr><td style="font-family:monospace">${x.id.slice(0, 8)}</td>
+      <td style="color:${x.detected ? '#ff8080' : '#74c69d'}">${x.detected ? '誤検出' : '棄却'}</td>
+      <td>conf ${conf}</td><td style="text-align:left;color:#888;font-size:11px">${where}</td></tr>`;
+  }).join('');
+  return `<div style="font-size:12px;color:#888;margin:12px 0 4px">
+      <b style="color:#bbb">負例</b> — ${n.images} 枚中 ${n.rejected} 枚を棄却
+      ${n.images - n.rejected ? `<span style="color:#ff8080">／ 誤検出 ${n.images - n.rejected} 件</span>` : ''}
+    </div>
+    <table class="piece-table" style="font-size:12px">
+      <tr><th>画像</th><th>判定</th><th title="ValidateBoard の値">信頼度</th><th>盤とみなした範囲</th></tr>
+      ${rows}</table>`;
+}
+
+// 負例の一覧（サムネイル）。ラベルを持たないので、出せるのは画像と削除だけ
+async function refreshNegatives() {
+  const el = document.getElementById('negative-list');
+  const data = await (await fetch('/api/negative')).json();
+  const ids = data.ids || [];
+  document.getElementById('negative-count').textContent = `${ids.length} / ${data.max} 枚`;
+  el.innerHTML = ids.length === 0
+    ? '<div style="color:#555;font-size:12px">まだ登録されていません</div>'
+    : ids.map(id => `<div style="position:relative">
+        <img src="/api/negative/${id}/image" title="${id}"
+          style="height:64px;border-radius:3px;display:block;border:1px solid #2a3a5e">
+        <button class="negative-del" data-id="${id}" title="この負例を削除する"
+          style="position:absolute;top:2px;right:2px;font-size:10px;line-height:1;background:#6a2d3a;color:#fff;border:none;padding:2px 4px;border-radius:3px;cursor:pointer">×</button>
+      </div>`).join('');
+}
+
+document.getElementById('negative-list').addEventListener('click', async e => {
+  const del = e.target.closest('.negative-del');
+  if (!del) return;
+  if (!confirm('この負例を削除しますか？')) return;
+  await fetch('/api/negative/' + del.dataset.id, { method: 'DELETE' });
+  refreshNegatives();
+});
+
+// 入力タブから「今見ている画像には盤面が無い」を登録する。
+// 誤検出に気付くのは必ずこの画面（信頼度が出ているのに盤が無い）なので、
+// その場で負例にできるようにしてある
+function resetNegativeButton() {
+  const btn = document.getElementById('btn-negative');
+  btn.textContent = 'この画像に盤面は無い（負例として登録）';
+  btn.style.background = '#4a2d3a';
+  document.getElementById('negative-mark').style.display = 'none';
+}
+
+async function markCurrentAsNegative() {
+  if (!currentSessionId) return;
+  const btn = document.getElementById('btn-negative');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/negative', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: currentSessionId }),
+    });
+    let msg = await res.text();
+    try { msg = JSON.parse(msg); } catch (_) { msg = { error: msg }; }
+    if (!res.ok) { alert('登録できませんでした: ' + msg.error); return; }
+    btn.textContent = msg.duplicate ? '登録済みの負例です' : '負例として登録しました';
+    btn.style.background = '#2d6a4f';
+  } finally { btn.disabled = false; }
+}
+
 async function refreshEvaluations() {
+  refreshNegatives();
   const data = await (await fetch('/api/evaluations')).json();
   evalRuns = data.runs || [];
   const el = document.getElementById('eval-runs');
@@ -1729,7 +1840,8 @@ async function refreshEvaluations() {
   }
   let html = `<table class="piece-table" style="font-size:12px">
     <tr><th>日時</th><th>ラベル</th><th>局面</th><th title="手動座標との差が 0.5マス以内だった局面">検出</th>
-    <th>手動</th><th>自動</th><th title="評価する局面を学習から外した k-NN">LOO 手動</th><th>LOO 自動</th><th></th></tr>`;
+    <th>手動</th><th>自動</th><th title="評価する局面を学習から外した k-NN">LOO 手動</th><th>LOO 自動</th>
+    <th title="盤面が写っていない画像を盤として採用しなかった割合">負例</th><th></th></tr>`;
   html += evalRuns.map((r, i) => {
     const d = r.detect_summary || {};
     return `<tr class="eval-run" data-i="${i}" style="cursor:pointer">
@@ -1739,6 +1851,7 @@ async function refreshEvaluations() {
       <td style="white-space:nowrap">${pct(d.aligned, d.boards)}
         <span style="color:#666;font-size:11px">${d.aligned || 0}/${d.boards || 0}</span></td>
       ${rateCell(r.manual)}${rateCell(r.auto)}${rateCell(r.manual_holdout)}${rateCell(r.auto_holdout)}
+      ${negativeCell(r.negative)}
       <td><button class="eval-del" data-id="${r.id}" title="この記録を削除する"
         style="font-size:11px;background:none;border:1px solid #6a2d3a;color:#ff8080;padding:1px 6px;border-radius:3px;cursor:pointer">×</button></td>
     </tr>`;
@@ -1795,7 +1908,8 @@ function showEvalDetail(i) {
     </div>
     <table class="piece-table" style="font-size:12px">
       <tr><th>局面</th><th title="手動座標との差（マス）">検出のずれ</th><th>手動</th><th>自動</th><th>LOO 手動</th><th>LOO 自動</th></tr>
-      ${rows}</table>`;
+      ${rows}</table>
+    ${negativeDetailHTML(r.negative)}`;
 }
 
 document.getElementById('eval-runs').addEventListener('click', async e => {
@@ -1834,9 +1948,13 @@ async function runEvaluation() {
     }
     const run = await res.json();
     const d = run.detect_summary || {};
+    const n = run.negative;
+    const neg = n && n.images
+      ? ` / <span style="color:${n.rejected === n.images ? '#74c69d' : '#ff8080'}">負例 ${n.rejected}/${n.images} 棄却</span>`
+      : '';
     status.innerHTML = `<span style="color:#74c69d">評価完了</span> — ${run.manual.boards} 局面 / ` +
       `検出 ${d.aligned}/${d.boards} / 手動 ${pct(run.manual.ok, run.manual.cells)} / ` +
-      `自動 ${pct(run.auto.ok, run.auto.cells)}（${run.seconds.toFixed(1)}秒）`;
+      `自動 ${pct(run.auto.ok, run.auto.cells)}${neg}（${run.seconds.toFixed(1)}秒）`;
     document.getElementById('eval-label').value = '';
     refreshEvaluations();
   } catch (err) {

@@ -15,6 +15,9 @@ package training
 //   - **手動座標での認識率**: 座標を与えたときの成績＝認識器そのものの実力
 //   - **自動座標での認識率**: 検出から通した端から端まで。**盤面を検出できなかった
 //     局面は 0/81 として数える**（それが手入力なしで動かしたときの実力）
+//   - **負例（盤面が写っていない画像）に対する誤検出**: data/negative/ に置いた
+//     画像を盤として採用してしまわないか。**これだけは正解データからは測れない**
+//     （上の 3 つはどれも「盤がある画像」が前提）。詳細は negative.go
 //
 // それぞれを 2 通りの推論器で測る。
 //
@@ -152,6 +155,9 @@ type EvalRun struct {
 	Holdout bool    `json:"holdout"`
 
 	DetectSummary EvalDetectSummary `json:"detect_summary"`
+	// Negative は data/negative/ の「盤面が写っていない画像」に対する誤検出。
+	// **正解データからは測れない唯一の系統**（negative.go）。負例が無ければ nil
+	Negative *NegativeEval `json:"negative,omitempty"`
 	Manual        EvalMetrics       `json:"manual"`
 	Auto          EvalMetrics       `json:"auto"`
 	ManualHoldout *EvalMetrics      `json:"manual_holdout,omitempty"`
@@ -498,6 +504,8 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 		log.Printf("evaluate [%d/%d] %s: 手動 %d/81 自動 %d/81 検出 %s",
 			i+1, len(targets), t.entry.ID, res.Manual.OK, res.Auto.OK, det)
 	}
+	// 盤面が写っていない画像。**誤検出はここでしか測れない**
+	run.Negative = evaluateNegatives(p)
 	run.Seconds = time.Since(start).Seconds()
 	if run.Label == "" {
 		run.Label = fmt.Sprintf("%s / %d サンプル", run.DataFile, run.Samples)
@@ -546,9 +554,13 @@ func handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		httpJSONError(w, http.StatusInternalServerError, "評価結果を保存できませんでした: "+err.Error())
 		return
 	}
-	log.Printf("evaluate: %s 手動 %d/%d 自動 %d/%d 検出 %d/%d (%.1fs)",
+	neg := ""
+	if run.Negative != nil {
+		neg = fmt.Sprintf(" 負例 %d/%d 棄却", run.Negative.Rejected, run.Negative.Images)
+	}
+	log.Printf("evaluate: %s 手動 %d/%d 自動 %d/%d 検出 %d/%d%s (%.1fs)",
 		run.Label, run.Manual.OK, run.Manual.Cells, run.Auto.OK, run.Auto.Cells,
-		run.DetectSummary.Aligned, run.DetectSummary.Boards, run.Seconds)
+		run.DetectSummary.Aligned, run.DetectSummary.Boards, neg, run.Seconds)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(run)
 }
