@@ -77,8 +77,8 @@ func TestSegmentSpansFindsBoardWidth(t *testing.T) {
 	want1, want2 := sceneX, sceneX+sceneCellW*9
 	found := false
 	for i, s := range spans {
-		t.Logf("span%d = %d..%d", i, s[0], s[1])
-		if absInt(s[0]-want1) <= sceneCellW/2 && absInt(s[1]-want2) <= sceneCellW/2 {
+		t.Logf("span%d = %d..%d（並び %d..%d）", i, s.lo, s.hi, s.from, s.to)
+		if absInt(s.lo-want1) <= sceneCellW/2 && absInt(s.hi-want2) <= sceneCellW/2 {
 			found = true
 		}
 	}
@@ -94,8 +94,8 @@ func TestSegmentSpansFindsBoardHeight(t *testing.T) {
 	want1, want2 := sceneY, sceneY+sceneCellH*9
 	found := false
 	for i, s := range spans {
-		t.Logf("span%d = %d..%d", i, s[0], s[1])
-		if absInt(s[0]-want1) <= sceneCellH/2 && absInt(s[1]-want2) <= sceneCellH/2 {
+		t.Logf("span%d = %d..%d（並び %d..%d）", i, s.lo, s.hi, s.from, s.to)
+		if absInt(s.lo-want1) <= sceneCellH/2 && absInt(s.hi-want2) <= sceneCellH/2 {
 			found = true
 		}
 	}

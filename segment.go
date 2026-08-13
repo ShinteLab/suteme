@@ -83,27 +83,55 @@ const segROIMargin = 0.03
 // **片方だけでは足りない。** 実測では x を絞ると横方向は合うようになるが、
 // 盤の上下に UI や駒台があると行の投影がそちらの罫線を拾って 1〜1.5マスずれる
 // （`b858741` / `baeac294`）。y も絞ると `b858741` が信頼度 1.00 で通る。
+//
+// **同じクラスタの線が「どこからどこまで並んでいるか」もそのまま候補にする**
+// （`segSpan.from/to`）。横線のクラスタは盤の x 範囲を与えるが、その線が
+// 並んでいる y の範囲は**盤の上下端そのもの**なので、縦線のクラスタが
+// y 範囲を出せなくても盤を四方から囲める。
+//
+// これが無いと、x だけ絞った ROI（＝画像の高さいっぱい）で
+// **`findPeaks` が盤の格子線を 1 本も返さない**ことがある。ピークの判定は
+// 投影の最大値に対する相対値なので、盤の外にある強い罫線（画面下部の UI など）が
+// 最大値を吊り上げると、盤の格子線がしきい値を下回って消える。
+// 実測（`525c544f`、盤が画像の右 36%）:
+//
+//	ROI (635,0)-(1139,745)  ピーク6本 [3 612 658 659 704 743]  → 検出できず
+//	ROI (635,34)-(1139,568) ピーク15本（盤の格子線が出る）     → conf 1.00
+//
+// 上の y 範囲 34..568 が、x=635..1139 に揃った横線の並びそのもの。
 func boardROIs(blurred *image.Gray) []image.Rectangle {
 	b := blurred.Bounds()
 	xs := segmentSpans(blurred, segMaxCandidates)
 	ys := segmentSpans(transposeGray(blurred), segMaxCandidates)
 
-	rois := make([]image.Rectangle, 0, len(xs)*(len(ys)+1)+len(ys))
+	rois := make([]image.Rectangle, 0, len(xs)*(len(ys)+2)+2*len(ys))
 	for _, xr := range xs {
-		rois = append(rois, image.Rect(xr[0], b.Min.Y, xr[1], b.Max.Y))
+		// 線分の並びから四方を囲んだ候補。最も的を絞れているので先に置く
+		rois = append(rois, image.Rect(xr.lo, xr.from, xr.hi, xr.to))
+		rois = append(rois, image.Rect(xr.lo, b.Min.Y, xr.hi, b.Max.Y))
 		for _, yr := range ys {
-			rois = append(rois, image.Rect(xr[0], yr[0], xr[1], yr[1]))
+			rois = append(rois, image.Rect(xr.lo, yr.lo, xr.hi, yr.hi))
 		}
 	}
 	for _, yr := range ys {
-		rois = append(rois, image.Rect(b.Min.X, yr[0], b.Max.X, yr[1]))
+		// 縦線のクラスタ側も同じ。lo/hi が y 範囲、from/to が x 範囲
+		rois = append(rois, image.Rect(yr.from, yr.lo, yr.to, yr.hi))
+		rois = append(rois, image.Rect(b.Min.X, yr.lo, b.Max.X, yr.hi))
 	}
 	return rois
 }
 
+// segSpan は線分のクラスタ 1 つ。横線に使うと lo/hi が x 範囲、
+// from/to がその線が並んでいる y 範囲（縦線では入れ替わる）。
+type segSpan struct {
+	lo, hi   int
+	from, to int
+}
+
 // segmentSpans は横方向の線分の x 範囲をクラスタにして返す（良い順）。
+// あわせて、その線分が並んでいる y の範囲も返す（`segSpan.from/to`）。
 // 縦線に使うときは transposeGray した画像を渡す
-func segmentSpans(blurred *image.Gray, max int) [][2]int {
+func segmentSpans(blurred *image.Gray, max int) []segSpan {
 	b := blurred.Bounds()
 	lines := horizontalLines(blurred)
 	if len(lines) == 0 {
@@ -117,6 +145,7 @@ func segmentSpans(blurred *image.Gray, max int) [][2]int {
 
 	type cluster struct {
 		x1, x2 int
+		y1, y2 int
 		count  int
 	}
 	clusters := make([]cluster, 0, len(lines))
@@ -126,7 +155,7 @@ func segmentSpans(blurred *image.Gray, max int) [][2]int {
 			continue
 		}
 		used[i] = true
-		c := cluster{x1: l.start, x2: l.end, count: 1}
+		c := cluster{x1: l.start, x2: l.end, y1: l.pos, y2: l.pos, count: 1}
 		for j := i + 1; j < len(lines); j++ {
 			if used[j] {
 				continue
@@ -134,6 +163,12 @@ func segmentSpans(blurred *image.Gray, max int) [][2]int {
 			if absInt(lines[j].start-l.start) <= tol && absInt(lines[j].end-l.end) <= tol {
 				used[j] = true
 				c.count++
+				if lines[j].pos < c.y1 {
+					c.y1 = lines[j].pos
+				}
+				if lines[j].pos > c.y2 {
+					c.y2 = lines[j].pos
+				}
 			}
 		}
 		clusters = append(clusters, c)
@@ -147,7 +182,7 @@ func segmentSpans(blurred *image.Gray, max int) [][2]int {
 		return clusters[i].x2-clusters[i].x1 > clusters[j].x2-clusters[j].x1
 	})
 
-	spans := make([][2]int, 0, max)
+	spans := make([]segSpan, 0, max)
 	for _, c := range clusters {
 		if len(spans) >= max {
 			break
@@ -163,7 +198,14 @@ func segmentSpans(blurred *image.Gray, max int) [][2]int {
 		if x2-x1 < 9*3 {
 			continue
 		}
-		spans = append(spans, [2]int{x1, x2})
+		// 線の並びの側も同じだけ広げる。クラスタが拾うのは格子線であって
+		// 外枠とは限らないため（実測では余白 0〜10px のどちらでも通る）
+		pm := int(float64(c.y2-c.y1) * segROIMargin)
+		spans = append(spans, segSpan{
+			lo: x1, hi: x2,
+			from: maxInt(c.y1-pm, b.Min.Y),
+			to:   minInt(c.y2+pm+1, b.Max.Y),
+		})
 	}
 	return spans
 }
