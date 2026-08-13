@@ -123,6 +123,7 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .eval-rate { white-space: nowrap; }
 .eval-rate .sub { display: block; color: #666; font-size: 11px; }
 .eval-rate .miss { display: block; color: #ff8080; font-size: 11px; }
+.eval-rate .piece { display: block; color: #89b4d0; font-size: 11px; }
 .count-warn { color: #d00000 !important; font-weight: bold; }
 .cell-preview { width: 64px; height: 64px; object-fit: contain; border: 1px solid #333; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
 .tab-bar { display: flex; gap: 4px; max-width: 600px; margin: 0 auto 16px; border-bottom: 2px solid #2a3a5e; }
@@ -227,6 +228,9 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <div style="font-size:12px;color:#888;margin-bottom:4px">
     <b style="color:#bbb">手動</b> = 保存してある盤面座標を与えたときの認識率（認識器そのものの成績）。
     <b style="color:#bbb">自動</b> = 検出から通した端から端まで。<b>盤面を検出できなかった局面は 0/81</b> として数えます。
+    <br>大きい数字は<b>全81マス</b>の一致（空マス込み）、下の <span style="color:#89b4d0">駒 ○○%</span> は
+    <b>正解が駒のマスだけ</b>の向き・駒種の一致。<b>マスの約6割は空</b>で空判定はほぼ当たるので、
+    全マスのほうは駒の成績が薄まります。版どうしの比較は<b>駒の側</b>を見てください。
   </div>
   <div id="eval-runs" style="overflow-x:auto"></div>
   <div id="eval-detail" style="margin-top:12px"></div>
@@ -1804,11 +1808,19 @@ function pct(ok, total) {
 
 // 認識率のセル。割合と生の数を両方出す（母数が変われば割合の意味も変わるため）。
 // 横に並べると列が広がるので改行して積む
+//
+// **駒マスの駒種も必ず併記する。全マス一致だけでは駒の成績が見えない。**
+// マスの約 6 割は空で、空判定はほぼ 100% 当たるので、駒側が落ちても
+// 全マス一致は薄まって動かない（実測で全マス 94.7% 対 駒種 87.5% と 7pt 開く）。
+// 空が当たっているのは大前提であって、版ごとに見たいのは駒のほう
 function rateCell(m) {
   if (!m || !m.cells) return '<td style="color:#555">—</td>';
   const miss = m.no_board ? `<span class="miss" title="盤面を検出できず 0/81 とした局面">検出不可 ${m.no_board}</span>` : '';
+  const piece = m.piece_cells
+    ? `<span class="piece" title="正解が駒のマスのうち向き・駒種まで一致した割合（${m.piece_ok}/${m.piece_cells}）">駒 ${pct(m.piece_ok, m.piece_cells)}</span>`
+    : '';
   return `<td class="eval-rate">${pct(m.ok, m.cells)}
-    <span class="sub">${m.ok}/${m.cells}</span>${miss}</td>`;
+    <span class="sub">${m.ok}/${m.cells}</span>${piece}${miss}</td>`;
 }
 
 // 負例の棄却率。**1 枚でも通っていれば赤**にする。誤検出は割合ではなく
@@ -1983,19 +1995,26 @@ function showEvalDetail(i) {
         <td colspan="5" style="text-align:left;color:#f0a030">${escapeHTML(e.error)}</td></tr>`;
     }
     const det = detectHTML(e.detect || {});
+    // 局面ごとも駒マスを併記する（全マスの分母は空が 6 割なので、
+    // どの局面の駒が読めていないのかは ok/cells では見えない）
     const cell = m => m && m.cells
-      ? `<td style="white-space:nowrap">${m.ok}/${m.cells}</td>` : '<td style="color:#555">—</td>';
+      ? `<td class="eval-rate">${m.ok}/${m.cells}${m.piece_cells
+          ? `<span class="piece" title="駒マスの向き・駒種">駒 ${m.piece_ok}/${m.piece_cells}</span>` : ''}</td>`
+      : '<td style="color:#555">—</td>';
     return `<tr><td>${idChipHTML(e.id)}</td>
       <td style="text-align:left">${det}</td>
       ${cell(e.manual)}${cell(e.auto)}${cell(e.manual_holdout)}${cell(e.auto_holdout)}</tr>`;
   }).join('');
   const m = r.manual_holdout || r.manual;
+  const a = r.auto_holdout || r.auto;
   el.innerHTML = `<div style="font-size:12px;color:#888;margin-bottom:4px">
       <b style="color:#bbb">${escapeHTML(r.label)}</b> の内訳 —
       ${escapeHTML(r.engine || '?')} / ${r.samples} サンプル / <code>${escapeHTML(r.data_file || '')}</code> /
       ${r.seconds ? r.seconds.toFixed(1) + '秒' : ''}
       ${m ? `<br>誤りの内訳（${r.manual_holdout ? 'LOO ' : ''}手動座標）: 空→駒 ${m.empty_as_piece} / 駒→空 ${m.piece_as_empty} /
         向きの反転 ${m.orient_flip} / 駒種違い ${m.type_miss} / 駒マスの駒種 ${pct(m.piece_ok, m.piece_cells)}` : ''}
+      ${a && a.piece_cells ? `<br>同（${r.auto_holdout ? 'LOO ' : ''}自動座標）: 空→駒 ${a.empty_as_piece} / 駒→空 ${a.piece_as_empty} /
+        向きの反転 ${a.orient_flip} / 駒種違い ${a.type_miss} / 駒マスの駒種 ${pct(a.piece_ok, a.piece_cells)}` : ''}
     </div>
     <table class="piece-table" style="font-size:12px">
       <tr><th>局面</th><th title="手動座標との差（マス）">検出のずれ</th><th>手動</th><th>自動</th><th>LOO 手動</th><th>LOO 自動</th></tr>
@@ -2049,9 +2068,12 @@ async function runEvaluation() {
     const neg = n && n.images
       ? ` / <span style="color:${n.rejected === n.images ? '#74c69d' : '#ff8080'}">負例 ${n.rejected}/${n.images} 棄却</span>`
       : '';
+    // 全マス一致と駒マスの駒種を並べて出す（空が分母の 6 割を占めるので、
+    // 全マスだけだと駒の成績が薄まって見えない）
+    const rate = m => `${pct(m.ok, m.cells)}（駒 ${pct(m.piece_ok, m.piece_cells)}）`;
     status.innerHTML = `<span style="color:#74c69d">評価完了</span> — ${run.manual.boards} 局面 / ` +
-      `検出 ${d.aligned}/${d.boards} / 手動 ${pct(run.manual.ok, run.manual.cells)} / ` +
-      `自動 ${pct(run.auto.ok, run.auto.cells)}${neg}（${run.seconds.toFixed(1)}秒）`;
+      `検出 ${d.aligned}/${d.boards} / 手動 ${rate(run.manual)} / ` +
+      `自動 ${rate(run.auto)}${neg}（${run.seconds.toFixed(1)}秒）`;
     document.getElementById('eval-label').value = '';
     refreshEvaluations();
   } catch (err) {
