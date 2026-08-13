@@ -2007,10 +2007,18 @@ function showEvalDetail(i) {
   }).join('');
   const m = r.manual_holdout || r.manual;
   const a = r.auto_holdout || r.auto;
+  // **マス単位の割合は体感と食い違う。** 88% と聞くと上出来に見えるが、
+  // 1 盤に駒は 34 マス前後あるので 4 マス直すことになり、完全一致は 6 盤に 1 盤しかない。
+  // 「1盤あたり何マス直すか」と「そのまま使える盤の割合」を併記する
+  const perBoard = x => x && x.boards
+    ? `そのまま使える盤 ${x.boards_perfect}/${x.boards}（${pct(x.boards_perfect, x.boards)}） /
+       1盤あたりの誤り ${((x.cells - x.ok) / x.boards).toFixed(1)}マス（うち駒 ${((x.piece_cells - x.piece_ok) / x.boards).toFixed(1)}）`
+    : '';
   el.innerHTML = `<div style="font-size:12px;color:#888;margin-bottom:4px">
       <b style="color:#bbb">${escapeHTML(r.label)}</b> の内訳 —
       ${escapeHTML(r.engine || '?')} / ${r.samples} サンプル / <code>${escapeHTML(r.data_file || '')}</code> /
       ${r.seconds ? r.seconds.toFixed(1) + '秒' : ''}
+      ${a ? `<br><b style="color:#bbb">${r.auto_holdout ? 'LOO ' : ''}自動</b>: ${perBoard(a)}` : ''}
       ${m ? `<br>誤りの内訳（${r.manual_holdout ? 'LOO ' : ''}手動座標）: 空→駒 ${m.empty_as_piece} / 駒→空 ${m.piece_as_empty} /
         向きの反転 ${m.orient_flip} / 駒種違い ${m.type_miss} / 駒マスの駒種 ${pct(m.piece_ok, m.piece_cells)}` : ''}
       ${a && a.piece_cells ? `<br>同（${r.auto_holdout ? 'LOO ' : ''}自動座標）: 空→駒 ${a.empty_as_piece} / 駒→空 ${a.piece_as_empty} /
