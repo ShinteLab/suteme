@@ -112,6 +112,17 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .piece-table .row-sente td:not(.row-label) { color: #74c69d; }
 .piece-table .row-gote td:not(.row-label) { color: #e07070; }
 .piece-table .row-hand td:not(.row-label) { color: #f0a030; }
+/* 評価の実行一覧。10 列あるので横に伸ばさない。
+   日時とラベルは 1 列に重ね、割合と生の数（97.1% / 100/103）も縦に積む。
+   ラベルは任意の文字列なので幅で切る（全文は title で読める） */
+.eval-when { color: #888; white-space: nowrap; }
+.eval-when .label {
+  display: block; max-width: 160px; margin: 0 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #4cc9f0;
+}
+.eval-rate { white-space: nowrap; }
+.eval-rate .sub { display: block; color: #666; font-size: 11px; }
+.eval-rate .miss { display: block; color: #ff8080; font-size: 11px; }
 .count-warn { color: #d00000 !important; font-weight: bold; }
 .cell-preview { width: 64px; height: 64px; object-fit: contain; border: 1px solid #333; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
 .tab-bar { display: flex; gap: 4px; max-width: 600px; margin: 0 auto 16px; border-bottom: 2px solid #2a3a5e; }
@@ -1791,12 +1802,13 @@ function pct(ok, total) {
   return (100 * ok / total).toFixed(1) + '%';
 }
 
-// 認識率のセル。割合と生の数を両方出す（母数が変われば割合の意味も変わるため）
+// 認識率のセル。割合と生の数を両方出す（母数が変われば割合の意味も変わるため）。
+// 横に並べると列が広がるので改行して積む
 function rateCell(m) {
   if (!m || !m.cells) return '<td style="color:#555">—</td>';
-  const miss = m.no_board ? ` <span style="color:#ff8080" title="盤面を検出できず 0/81 とした局面">検出不可 ${m.no_board}</span>` : '';
-  return `<td style="white-space:nowrap">${pct(m.ok, m.cells)}
-    <span style="color:#666;font-size:11px">${m.ok}/${m.cells}</span>${miss}</td>`;
+  const miss = m.no_board ? `<span class="miss" title="盤面を検出できず 0/81 とした局面">検出不可 ${m.no_board}</span>` : '';
+  return `<td class="eval-rate">${pct(m.ok, m.cells)}
+    <span class="sub">${m.ok}/${m.cells}</span>${miss}</td>`;
 }
 
 // 負例の棄却率。**1 枚でも通っていれば赤**にする。誤検出は割合ではなく
@@ -1895,17 +1907,17 @@ async function refreshEvaluations() {
     return;
   }
   let html = `<table class="piece-table" style="font-size:12px">
-    <tr><th>日時</th><th>ラベル</th><th>局面</th><th title="手動座標との差が 0.5マス以内だった局面">検出</th>
+    <tr><th title="実行した日時とラベル">日時 / ラベル</th><th>局面</th><th title="手動座標との差が 0.5マス以内だった局面">検出</th>
     <th>手動</th><th>自動</th><th title="評価する局面を学習から外した k-NN">LOO 手動</th><th>LOO 自動</th>
     <th title="盤面が写っていない画像を盤として採用しなかった割合">負例</th><th></th></tr>`;
   html += evalRuns.map((r, i) => {
     const d = r.detect_summary || {};
     return `<tr class="eval-run" data-i="${i}" style="cursor:pointer">
-      <td style="white-space:nowrap;color:#888">${r.created_at}</td>
-      <td style="text-align:left;color:#4cc9f0">${escapeHTML(r.label)}</td>
+      <td class="eval-when">${r.created_at}
+        <span class="label" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span></td>
       <td>${(r.manual && r.manual.boards) || 0}${r.skipped ? `<span style="color:#f0a030" title="画像・正解SFEN・盤面座標が揃っていない局面"> +${r.skipped}</span>` : ''}</td>
-      <td style="white-space:nowrap">${pct(d.aligned, d.boards)}
-        <span style="color:#666;font-size:11px">${d.aligned || 0}/${d.boards || 0}</span></td>
+      <td class="eval-rate">${pct(d.aligned, d.boards)}
+        <span class="sub">${d.aligned || 0}/${d.boards || 0}</span></td>
       ${rateCell(r.manual)}${rateCell(r.auto)}${rateCell(r.manual_holdout)}${rateCell(r.auto_holdout)}
       ${negativeCell(r.negative)}
       <td><button class="eval-del" data-id="${r.id}" title="この記録を削除する"
