@@ -39,7 +39,7 @@ func DetectBoard(img image.Image) *BoardRegion {
 	best := detectBoardIn(edges, img.Bounds())
 	bestConf := ValidateBoard(img, best)
 	if bestConf >= segSkipConfidence {
-		return unslipRegion(img, best)
+		return snapToOuterFrame(img, unslipRegion(img, best))
 	}
 
 	for _, roi := range boardROIs(blurred) {
@@ -52,7 +52,119 @@ func DetectBoard(img image.Image) *BoardRegion {
 			best, bestConf = cand, conf
 		}
 	}
-	return unslipRegion(img, best)
+	return snapToOuterFrame(img, unslipRegion(img, best))
+}
+
+// snapMargin は snapToOuterFrame が窓を1マス動かすのに要求する
+// `weakestLineRatio` の勝ち幅。
+//
+// **同点や小差で動かしてはいけない。** 保存済み 103 局面で 0.1 にすると
+// `baeac294`（もともと 0.34マスで合っていた）が 0.87マスへ動いて壊れる。
+// 0.3 なら**滑った 1 件だけが動く**（103 件中 1 件。他は候補が margin を
+// 越えないのでそのまま）。
+const snapMargin = 0.3
+
+// snapToOuterFrame は1マス滑った窓を外枠へ寄せ直す。
+//
+// **`gridAlignment` は全マスシフトに対して不変**なので（CLAUDE.md
+// 「盤面検出の検証」）、周期が正しいまま窓が1マス滑った検出は
+// 信頼度 1.00 のまま通る。`unslipRegion` が拾えるのは画像からはみ出した
+// 場合だけで、**収まったまま滑る**ものは見分けられなかった。
+//
+// 見分けるのは「10本の境界線のうち**いちばん弱い線**」
+// （`weakestLineRatio`）。滑った窓は 9 本が本物の格子線に乗る代わりに、
+// 外側の 1 本が**線の無い所**に来る。合計やパリティの和ではこの 1 本が
+// 埋もれるが、最小を採れば表に出る。実測（`2d7bfedf`、列方向）:
+// 滑った窓は最弱の線が off と同じ（比 -0.12）なのに対し、
+// 1マス戻した窓は 0.87。
+//
+// 候補は ±1マスの平行移動 9 通りで、それぞれ `refineAxis` で
+// 原点±半マス・間隔±10% を詰め直してから測る（滑った窓は間隔も
+// 誤った線に合わせてあるので、平行移動だけでは正解に届かない）。
+// **`snapMargin` を越える候補が無ければ動かさない**うえ、
+// 乗り換えは `ValidateBoard` が下がらない場合に限る。
+//
+// 実測（保存済み 103 局面、手動座標との最大ずれ）:
+//
+//	2d7bfedf  0.91マス（conf 0.90 で採用）→ **0.06マス**（conf 0.96）
+//	他 102 件  変化なし
+//
+// **これで直らない滑りが 2 件残る**（`c611e647` `11f95abb`）。どちらも
+// 正しい位置のほうが最弱の線が弱い（盤の下端の線が薄い / 盤の上の UI の
+// 罫線が格子線と同じだけ強い）ため、この指標では順位が付かない。
+func snapToOuterFrame(img image.Image, br *BoardRegion) *BoardRegion {
+	if br == nil {
+		return nil
+	}
+	cw, ch := br.Bounds.Dx()/9, br.Bounds.Dy()/9
+	if cw < 3 || ch < 3 {
+		return br
+	}
+
+	// 候補（±1マス）とその微調整の余地（±半マス）が収まる範囲で投影を取る。
+	// **候補どうしを同じ投影の上で比べる**（別々に取ると中央値がずれる）
+	pad := image.Rect(
+		br.Bounds.Min.X-cw*3/2, br.Bounds.Min.Y-ch*3/2,
+		br.Bounds.Max.X+cw*3/2, br.Bounds.Max.Y+ch*3/2,
+	).Intersect(img.Bounds())
+	if pad.Dx() < 9*3 || pad.Dy() < 9*3 {
+		return br
+	}
+	sub := image.NewRGBA(image.Rect(0, 0, pad.Dx(), pad.Dy()))
+	for y := pad.Min.Y; y < pad.Max.Y; y++ {
+		for x := pad.Min.X; x < pad.Max.X; x++ {
+			sub.Set(x-pad.Min.X, y-pad.Min.Y, img.At(x, y))
+		}
+	}
+	row, col := lineProjections(BoxBlur(ConvertGray(sub), 2))
+
+	score := func(r image.Rectangle) float64 {
+		v := weakestLineRatio(row, float64(r.Min.Y-pad.Min.Y), float64(r.Dy())/9)
+		h := weakestLineRatio(col, float64(r.Min.X-pad.Min.X), float64(r.Dx())/9)
+		if v < h {
+			return v
+		}
+		return h
+	}
+
+	best := br
+	bestScore := score(br.Bounds)
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			if dx == 0 && dy == 0 {
+				continue
+			}
+			r := br.Bounds.Add(image.Pt(dx*cw, dy*ch))
+			if !r.In(img.Bounds()) {
+				continue
+			}
+			oy, sy := refineAxis(row, float64(r.Min.Y-pad.Min.Y), float64(r.Dy())/9)
+			ox, sx := refineAxis(col, float64(r.Min.X-pad.Min.X), float64(r.Dx())/9)
+			r = image.Rect(
+				pad.Min.X+int(math.Round(ox)), pad.Min.Y+int(math.Round(oy)),
+				pad.Min.X+int(math.Round(ox+sx*9)), pad.Min.Y+int(math.Round(oy+sy*9)),
+			)
+			if !r.In(img.Bounds()) {
+				continue
+			}
+			cand := BoardRegionFromRect(r.Min.X, r.Min.Y, r.Max.X, r.Max.Y)
+			if !plausibleAspect(cand) {
+				continue
+			}
+			if s := score(r); s > bestScore+snapMargin {
+				best, bestScore = cand, s
+			}
+		}
+	}
+	if best == br {
+		return br
+	}
+	// 乗り換えるのは信頼度を下げないときだけ（滑りを直すなら普通は上がる。
+	// 実測 `2d7bfedf` は 0.90 → 0.96）
+	if ValidateBoard(img, best) < ValidateBoard(img, br) {
+		return br
+	}
+	return best
 }
 
 // unslipRegion は画像からはみ出した検出領域を1マス内側へ戻す。

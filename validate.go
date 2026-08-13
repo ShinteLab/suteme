@@ -272,6 +272,53 @@ func axisAlignment(proj []float64, origin, span float64) float64 {
 	return (on - off) / (on + off)
 }
 
+// weakestLineRatio は10本の境界線のうち**いちばん弱い線**と off レベルの比を
+// -1.0〜1.0 で返す。`axisAlignment` と同じ (on-off)/(on+off) だが、
+// on を「最小」で採る。
+//
+// **これは信頼度に使ってはいけない。候補どうしの比較専用。**
+// 「10本すべてが線に乗っていること」を最も厳しく測る形なので、格子線が薄い
+// 実盤の中継画像では正しい座標でも値が落ちる（CLAUDE.md「今後の課題」に
+// パリティごとの中央値でさえ正解が -0.33 まで落ちた記録がある）。
+// 絶対値にしきい値を置く用途には耐えない。
+//
+// **一方で、同じ画像・同じ軸の候補どうしを比べるなら効く。** 1マス滑った窓は
+// 9 本が本物の格子線に乗る代わりに外側の 1 本が線の無い所に来るので、
+// 最弱の線だけが off に並ぶ。`axisAlignment` の和ではこの 1 本が
+// 埋もれてしまう（実測 `2d7bfedf` の列方向: 整合度は 0.88 対 0.90 と
+// ほぼ同じなのに、最弱の線の比は -0.12 対 0.87）。
+// 使い手は `snapToOuterFrame`。
+func weakestLineRatio(proj []float64, origin, span float64) float64 {
+	peak := func(pos float64) float64 {
+		best := 0.0
+		p := int(pos)
+		for d := -gridPeakTol; d <= gridPeakTol; d++ {
+			if i := p + d; i >= 0 && i < len(proj) && proj[i] > best {
+				best = proj[i]
+			}
+		}
+		return best
+	}
+
+	on := math.Inf(1)
+	for i := 0; i <= 9; i++ {
+		if v := peak(origin + span*float64(i)); v < on {
+			on = v
+		}
+	}
+	off := 0.0
+	for i := 0; i < 9; i++ {
+		for _, fr := range offFractions {
+			off += peak(origin + span*(float64(i)+fr))
+		}
+	}
+	off /= float64(9 * len(offFractions))
+	if on+off == 0 {
+		return 0
+	}
+	return (on - off) / (on + off)
+}
+
 func medianBrightness(img image.Image) uint8 {
 	bounds := img.Bounds()
 	pixels := make([]int, 0, bounds.Dx()*bounds.Dy())
