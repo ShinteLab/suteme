@@ -164,8 +164,10 @@ func TestKNNHoldout(t *testing.T) {
 						missEmpty++
 						emptyAsPiece++
 					}
-					// 分類器だけで判定した場合（従来の挙動）
-					if suteme.ClassifyCellWith(cell, bc) != suteme.CellEmpty {
+					// 推論器を使わず分類器（画像処理）だけで判定した場合。
+					// 空判定の境目は盤ごとに決まる（BoardEmptyCover）ので、
+					// マス単位の ClassifyCellWith ではなく bo に nil を渡す
+					if cat, _ := bo.Classify(cell, bc, nil); cat != suteme.CellEmpty {
 						missEmptyClassifier++
 						emptyAsPieceByClassifier++
 					}
@@ -178,7 +180,7 @@ func TestKNNHoldout(t *testing.T) {
 				if got == suteme.EmptyLabel {
 					pieceAsEmpty++
 				}
-				if suteme.ClassifyCellWith(cell, bc) == suteme.CellEmpty {
+				if cat, _ := bo.Classify(cell, bc, nil); cat == suteme.CellEmpty {
 					pieceAsEmptyByClassifier++
 				}
 				// 向きの反転。回転照合（OrientMarginMin）が効いているかを見る
@@ -186,7 +188,7 @@ func TestKNNHoldout(t *testing.T) {
 				if got != suteme.EmptyLabel && strings.HasPrefix(got, "-") != wantDown {
 					orientFlips++
 				}
-				if cat := suteme.ClassifyCellWith(cell, bc); cat != suteme.CellEmpty &&
+				if cat, _ := bo.Classify(cell, bc, nil); cat != suteme.CellEmpty &&
 					(cat == suteme.CellPieceDown) != wantDown {
 					orientFlipsByClassifier++
 				}
@@ -295,7 +297,7 @@ func TestKNNCellHoldout(t *testing.T) {
 						missEmpty++
 						emptyAsPiece++
 					}
-					if suteme.ClassifyCellWith(cell, bc) != suteme.CellEmpty {
+					if cat, _ := bo.Classify(cell, bc, nil); cat != suteme.CellEmpty {
 						missClassifier++
 						emptyAsPieceByClassifier++
 					}
