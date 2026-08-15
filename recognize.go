@@ -412,39 +412,41 @@ const OrientMarginQuantile = 0.25
 //
 // 盤の全マスの確信度を先に見て、下から `OrientMarginQuantile` 分を
 // 「回転照合で決め直すマス」として切る境目を持つ。
+// あわせて空判定の境目（`BoardEmptyCover`）も盤ごとに決める。
 type BoardOrient struct {
 	marginMin float64
+	emptyMax  float64
 }
 
 // NewBoardOrient は盤の全マスの確信度から決め直す境目を求める。
 // 駒マスが無ければ既定値（`OrientMarginMin`）にしておく。
 func NewBoardOrient(img image.Image, br *BoardRegion, boardColor uint8) *BoardOrient {
 	if img == nil || br == nil {
-		return &BoardOrient{marginMin: OrientMarginMin}
+		return &BoardOrient{marginMin: OrientMarginMin, emptyMax: emptyCoverMax}
 	}
+	// 確信度は空マスでは 0 なので、先に空判定の境目を決めてから拾う
+	// （境目が動くと駒として拾うマスも変わる）。
+	works, emptyMax := boardCells(img, br, boardColor)
 	margins := make([]float64, 0, 81)
-	for r := 0; r < 9; r++ {
-		for c := 0; c < 9; c++ {
-			cell := br.ExtractCell(img, r, c)
-			if cell == nil {
-				continue
-			}
-			if cat, margin := ClassifyCellDetail(cell, boardColor); cat != CellEmpty {
-				margins = append(margins, margin)
-			}
+	for _, w := range works {
+		if cat, margin := classifyCellMask(w.img, boardColor, w.local, w.mask, emptyMax); cat != CellEmpty {
+			margins = append(margins, margin)
 		}
 	}
 	if len(margins) == 0 {
-		return &BoardOrient{marginMin: OrientMarginMin}
+		return &BoardOrient{marginMin: OrientMarginMin, emptyMax: emptyMax}
 	}
 	sort.Float64s(margins)
-	return &BoardOrient{marginMin: margins[int(OrientMarginQuantile*float64(len(margins)-1))]}
+	return &BoardOrient{
+		marginMin: margins[int(OrientMarginQuantile*float64(len(margins)-1))],
+		emptyMax:  emptyMax,
+	}
 }
 
 // Classify はマスを 空/先手/後手 に分類する。
 // byMatch は向きを回転照合で決め直したかどうか（観測用。`CellDebug.OrientBy`）。
 func (bo *BoardOrient) Classify(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
-	return classifyCellMargin(cell, boardColor, bo.marginMin, m)
+	return classifyCellMargin(cell, boardColor, bo.marginMin, bo.emptyMax, m)
 }
 
 // ClassifyCellFor は推論器も使ってマスを 空/先手/後手 に分類する。
@@ -457,11 +459,11 @@ func (bo *BoardOrient) Classify(cell image.Image, boardColor uint8, m Predictor)
 // 盤全体を扱えるなら `NewBoardOrient` のほうが精度が高い（`OrientMarginQuantile`）。
 // こちらは 1 マスだけを見るので定数のしきい値で切るしかない。
 func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
-	return classifyCellMargin(cell, boardColor, OrientMarginMin, m)
+	return classifyCellMargin(cell, boardColor, OrientMarginMin, emptyCoverMax, m)
 }
 
-func classifyCellMargin(cell image.Image, boardColor uint8, marginMin float64, m Predictor) (CellCategory, bool) {
-	cat, margin := ClassifyCellDetail(cell, boardColor)
+func classifyCellMargin(cell image.Image, boardColor uint8, marginMin, emptyMax float64, m Predictor) (CellCategory, bool) {
+	cat, margin := classifyCellDetail(cell, boardColor, emptyMax)
 	if cat == CellEmpty || margin >= marginMin {
 		return cat, false
 	}

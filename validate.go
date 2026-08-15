@@ -29,12 +29,16 @@ func ValidateBoard(img image.Image, br *BoardRegion) float64 {
 }
 
 // cellUniformity は81マスの背景色（中央値）のうち、
-// 盤の基準色に近いものの割合を返す
+// 盤の基準色に近いものの割合を返す。
+//
+// **マスの切り出しは `extractCellUnclipped`（盤の外枠より外も含める版）を使う。**
+// ここは「この領域が本当に盤か」を測る場所で、領域が間違っている前提で呼ばれる。
+// 外枠で切ると外れた候補も自分の箱の中しか見なくなり、均一に見えてしまう。
 func cellUniformity(img image.Image, br *BoardRegion) float64 {
 	medians := make([]uint8, 0, 81)
 	for r := 0; r < 9; r++ {
 		for c := 0; c < 9; c++ {
-			cell := br.ExtractCell(img, r, c)
+			cell := br.extractCellUnclipped(img, r, c)
 			if cell == nil {
 				return 0
 			}

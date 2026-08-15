@@ -648,7 +648,48 @@ func BoardRegionFromRect(x1, y1, x2, y2 int) *BoardRegion {
 // cellPadding はセル抽出時に各辺に加える余白の割合（0.15 = 15%）
 const cellPadding = 0.15
 
+// ExtractCell はマス画像を切り出す。cellPadding 分だけ外側まで含めるが、
+// **盤の外枠より外へは出さない。**
+//
+// 余白を含めるのは `cellBoardColor`（マス画像の中央値＝局所地色）のためで、
+// 駒がマスの大半を覆っていても地色の画素が中央値を取れる程度に残るようにしている。
+// ところが**外周のマスでは、その余白が盤の外（枠線・盤外の背景）を読んでいた。**
+// 枠が暗ければ局所地色ごと暗いほうへ引きずられ、許容帯（±`pieceDiffFrac`）の
+// 中心が盤の地色から外れる。すると**盤の木地も駒も両方「地色と異なる画素」に
+// なり**、被覆率が跳ね上がって `pieceSideOf` のマスクが濁る。
+//
+// 実測（桜の絵柄の盤 `ad2394e4`、盤の地色 165）: 1 段目のマスの局所地色が
+// 127〜147 まで落ち、被覆率が 0.73（正常な駒は 0.45〜0.65）になって
+// **後手の駒 7 枚が先手に反転**していた。空→駒 の誤りも外周に偏る。
+//
+// 盤の外枠で切ると、外周マスは内側にしか余白が付かなくなる。
+// 実測（保存済み 118 局面 / 9558 マス、手動座標・分類器のみ）:
+// 空→駒 26 → 16 件、向きの反転 242 → 233 件。
+// `BoardEmptyCover` と合わせて 97.11% → 97.39%。
+//
+// **なお `cellBoardColor` 自体を「余白を除いた範囲」で取るのは駄目**（試した）。
+// 駒がマスの大半を覆うマスで中央値が駒の色になり、マスクが全反転する。
+// 向きの反転が 242 → 623 件に増える。
+//
+// **外周マスの入力ベクトルが変わるので、学習データの版を上げること**
+// （v5 → v6。CLAUDE.md「シフト不変性」の末尾）。
 func (br *BoardRegion) ExtractCell(src image.Image, row, col int) image.Image {
+	return br.extractCell(src, row, col, true)
+}
+
+// extractCellUnclipped は盤の外枠より外も含めてマスを切り出す。
+//
+// **`ValidateBoard` の `cellUniformity` はこちらを使う。安易に `ExtractCell` へ
+// 寄せないこと。** そちらは「この領域が本当に盤か」を測るもので、**領域が
+// 間違っている前提**で呼ばれる。外枠で切ると外れた候補も自分の箱の中しか
+// 見なくなり、盤の外の畳や UI が写り込んでいても均一に見えてしまう。
+// 実測（`5795bf16`）: クリップした版で測ると、正しい候補（dx=0.00）ではなく
+// 1.01マスずれた候補が信頼度 1.00 で選ばれるようになる。
+func (br *BoardRegion) extractCellUnclipped(src image.Image, row, col int) image.Image {
+	return br.extractCell(src, row, col, false)
+}
+
+func (br *BoardRegion) extractCell(src image.Image, row, col int, clip bool) image.Image {
 	cell := br.Cells[row][col]
 	pad := int(float64(cell.Dx()) * cellPadding)
 	expanded := image.Rect(
@@ -656,6 +697,9 @@ func (br *BoardRegion) ExtractCell(src image.Image, row, col int) image.Image {
 		cell.Max.X+pad, cell.Max.Y+pad,
 	)
 	rect := expanded.Intersect(src.Bounds())
+	if clip {
+		rect = rect.Intersect(br.Bounds)
+	}
 	if rect.Empty() {
 		return nil
 	}

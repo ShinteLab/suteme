@@ -16,6 +16,7 @@ import (
 // **入力ベクトルの作り方（CellToInput / resizeGray）を変えたら版を上げること。**
 // MergeSamples は入力の内容でマージするので、表現の違うサンプルを同じファイルに
 // 混ぜると古いものが消えずに残り続ける。
+// v6: ExtractCell の余白を盤の外枠でクリップした（外周 32 マスの切り出しが変わる）
 // v5: 駒の外接矩形に切り揃えてから 24x24 に落とすようにした（CellToInput 参照）
 // v4: 入力ベクトルを float32 の精度へ丸め、ファイルもバイナリにした
 //
@@ -23,16 +24,16 @@ import (
 //
 // v3: リサイズを最近傍法から面積平均に変更（v2 は標準化・回転正規化・空クラス対応）
 const (
-	DefaultDataFile  = "training_data_v5.bin"
-	DefaultModelFile = "model_v5.json"
+	DefaultDataFile  = "training_data_v6.bin"
+	DefaultModelFile = "model_v6.json"
 )
 
 // LegacyDataFiles は既定のファイルが無いときに読みにいく旧版の学習データ。
 //
-// **v4 以前は入れない。** v5 で入力ベクトルの作り方が変わったので、
+// **v5 以前は入れない。** v6 で外周マスの切り出しが変わったので、
 // 古いファイルのベクトルは今の `CellToInput` の出力と別物になっている。
 // 学習データは `data/history.json` の画像と正解 SFEN から作り直せるので、
-// 履歴タブで全件を選んで学習し直せば v5 のファイルができる。
+// 履歴タブで全件を選んで学習し直せば v6 のファイルができる。
 var LegacyDataFiles []string
 
 // minBoardConfidence は盤面領域を採用する最低信頼度（ValidateBoard の値）。
@@ -122,7 +123,7 @@ func defaultPredictor() (Predictor, error) {
 // 持ち駒や検証結果も要るなら Recognize を使う。
 //
 // 駒種の推論器はカレントディレクトリ、次に実行ファイルのディレクトリから
-// 自動で読み込む（training_data_v4.bin → k-NN 優先、無ければ model_v4.json）。
+// 自動で読み込む（training_data_v6.bin → k-NN 優先、無ければ model_v6.json）。
 // 明示的に指定する場合は SetPredictor / WithPredictor を使う。
 //
 // 既定では盤面の検証は行うがエラーにはしない。おかしい盤面をエラーにしたい場合は

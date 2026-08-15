@@ -59,6 +59,10 @@ const (
 	// 0.12 でも同等だが、木目の盤の駒の下限が 0.130 なので余裕が 1 割も無い。
 	// 空マス側は 0.10 まで上げても 1 件しか増えないので、下限から離せる 0.10 を採る。
 	emptyCoverMax = 0.10
+	// emptyCoverGap / emptyCoverHigh は盤ごとに空/駒の境目を引き直すための帯。
+	// 詳細は adaptiveEmptyCover。
+	emptyCoverGap  = 0.10
+	emptyCoverHigh = 0.30
 	// gridLineFrac はこの割合以上を占める行・列をグリッド線／盤外と見なして除外する。
 	// グリッド線は行または列の全体を貫くが、駒はマスの端まで届かない
 	gridLineFrac = 0.90
@@ -95,9 +99,22 @@ func ClassifyCellWith(cell image.Image, boardColor uint8) CellCategory {
 // 呼び出し側はこれを見て別の手掛かり（`recognize.go` の回転照合など）に
 // 切り替えられる。
 func ClassifyCellDetail(cell image.Image, boardColor uint8) (CellCategory, float64) {
+	return classifyCellDetail(cell, boardColor, emptyCoverMax)
+}
+
+// classifyCellDetail は空判定のしきい値を差し替えられる ClassifyCellDetail。
+// 盤全体を扱えるなら adaptiveEmptyCover で求めた値を渡す。
+func classifyCellDetail(cell image.Image, boardColor uint8, emptyMax float64) (CellCategory, float64) {
 	local := cellBoardColor(cell)
-	m := newCellMaskSign(cell, local, boardColor, signBoth)
-	if m == nil || m.cover < emptyCoverMax {
+	return classifyCellMask(cell, boardColor, local,
+		newCellMaskSign(cell, local, boardColor, signBoth), emptyMax)
+}
+
+// classifyCellMask は一次マスク（signBoth）を作り終えたところから先。
+// 盤ごとのしきい値を決めるために被覆率を先に取る呼び出し側
+// （`NewBoardOrient`）が、同じマスクを作り直さずに済むように分けてある。
+func classifyCellMask(cell image.Image, boardColor, local uint8, m *cellMask, emptyMax float64) (CellCategory, float64) {
+	if m == nil || m.cover < emptyMax {
 		return CellEmpty, 0
 	}
 	if m = pieceSideOf(cell, local, boardColor); m == nil {
@@ -167,15 +184,113 @@ func ClassifyCell(cell image.Image) CellCategory {
 func ClassifyBoard(img image.Image, br *BoardRegion) [9][9]CellCategory {
 	var result [9][9]CellCategory
 	bc := BoardColor(img, br)
+	cells, emptyMax := boardCells(img, br, bc)
+	for _, w := range cells {
+		result[w.row][w.col], _ = classifyCellMask(w.img, bc, w.local, w.mask, emptyMax)
+	}
+	return result
+}
+
+// cellWork は 1 マス分の「切り出した画像・局所地色・一次マスク」。
+// 空判定の境目を決めるには全マスの被覆率が要るので、
+// 先に 81 マスぶんを作ってから 2 周目で分類する。
+type cellWork struct {
+	row, col int
+	img      image.Image
+	local    uint8
+	mask     *cellMask
+}
+
+// boardCells は盤の全マスを 1 回だけ切り出し、あわせて
+// 空判定の境目（`BoardEmptyCover` と同じもの）を返す。
+func boardCells(img image.Image, br *BoardRegion, boardColor uint8) ([]cellWork, float64) {
+	if img == nil || br == nil {
+		return nil, emptyCoverMax
+	}
+	works := make([]cellWork, 0, 81)
+	cov := make([]float64, 0, 81)
 	for r := 0; r < 9; r++ {
 		for c := 0; c < 9; c++ {
 			cell := br.ExtractCell(img, r, c)
-			if cell != nil {
-				result[r][c] = ClassifyCellWith(cell, bc)
+			if cell == nil {
+				continue
+			}
+			local := cellBoardColor(cell)
+			m := newCellMaskSign(cell, local, boardColor, signBoth)
+			works = append(works, cellWork{r, c, cell, local, m})
+			if m != nil {
+				cov = append(cov, m.cover)
 			}
 		}
 	}
-	return result
+	return works, adaptiveEmptyCover(cov)
+}
+
+// BoardEmptyCover は盤ごとの「空マスと見なす被覆率の上限」を求める。
+//
+// **定数 `emptyCoverMax`(0.10) は空マスの側に近すぎる。** 空マスの被覆率は
+// どの盤でもほぼ 0 だが、木目・グリッド線・盤に描かれた模様があると 0.10〜0.14 まで
+// 上がる。実測（桜の絵柄の盤 3 局面）で、空マスの最大 0.126〜0.142 に対し
+// 駒マスの最小は 0.404〜0.407 と**大きく開いている**のに、境目が 0.10 に
+// 固定されているせいで空 15 マスが駒に化けていた。
+//
+// **かといって定数を上げてはいけない。** 駒の色が盤の地色とほぼ同じ木目の盤では
+// 駒の被覆率が 0.13〜0.27 まで落ちる（`emptyCoverMax` の項）。0.15 にすると
+// 保存済み 118 局面で駒→空が 8 → 71 件になる。
+//
+// そこで**その盤の 81 マスの被覆率を並べ、`emptyCoverMax` から
+// `emptyCoverHigh`(0.30) までの帯の中で最も広い空隙**を探す。
+// 空隙が `emptyCoverGap`(0.10) 以上あればその中点を境目にし、
+// 無ければ `emptyCoverMax` のまま。空と駒が分かれている盤だけ境目が動く。
+//
+// 実測（保存済み 118 局面 / 9558 マス、手動座標・分類器のみ）:
+//
+//	                        全体     空→駒  駒→空  向き
+//	現行                   97.11%     26     8    242
+//	**適応しきい値**       97.30%    **6**   10   242
+//	余白のクリップ         97.29%     16     10   233
+//	**両方**             **97.39%**  **6**   10  **233**
+//
+// **上限 `emptyCoverHigh` を 0.35 に緩めてはいけない。** 木目の盤の駒が
+// 境目の下に入り、駒→空が 10 → 114 件に崩れる。0.30 と 0.35 の間が崖。
+func BoardEmptyCover(img image.Image, br *BoardRegion, boardColor uint8) float64 {
+	_, emptyMax := boardCells(img, br, boardColor)
+	return emptyMax
+}
+
+// adaptiveEmptyCover は被覆率の並びから空/駒の境目を返す（`BoardEmptyCover`）。
+func adaptiveEmptyCover(cov []float64) float64 {
+	v := make([]float64, 0, len(cov))
+	for _, x := range cov {
+		if x > emptyCoverMax {
+			v = append(v, x)
+		}
+	}
+	sort.Float64s(v)
+
+	best, bestGap := emptyCoverMax, 0.0
+	prev := emptyCoverMax
+	for _, x := range v {
+		hi := x
+		if hi > emptyCoverHigh {
+			hi = emptyCoverHigh
+		}
+		if g := hi - prev; g > bestGap {
+			bestGap, best = g, (prev+hi)/2
+		}
+		if x >= emptyCoverHigh {
+			break
+		}
+		prev = x
+	}
+	// 帯の中に値が 1 つも無ければ、帯全体がそのまま空隙になる
+	if g := emptyCoverHigh - prev; g > bestGap {
+		bestGap, best = g, (prev+emptyCoverHigh)/2
+	}
+	if bestGap < emptyCoverGap {
+		return emptyCoverMax
+	}
+	return best
 }
 
 // BoardColor は盤の地色（グレースケール明度）を推定する。

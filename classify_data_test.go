@@ -102,14 +102,16 @@ func TestClassifyAccuracy(t *testing.T) {
 		}
 
 		br := BoardRegionFromRect(e.Bounds.X1, e.Bounds.Y1, e.Bounds.X2, e.Bounds.Y2)
-		bc := BoardColor(img, br)
 		want := sfenBoardToCategory(e.SFEN)
+		// 空判定の境目は盤ごとに決まる（BoardEmptyCover）ので、
+		// マス単位の ClassifyCellWith ではなく盤単位で通す
+		cats := ClassifyBoard(img, br)
 
 		var view strings.Builder
 		ok := 0
 		for r := 0; r < 9; r++ {
 			for c := 0; c < 9; c++ {
-				got := ClassifyCellWith(br.ExtractCell(img, r, c), bc)
+				got := cats[r][c]
 				confusion[want[r][c]][got]++
 				total++
 				if got == want[r][c] {
