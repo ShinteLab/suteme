@@ -129,13 +129,41 @@ func gridAlignment(img image.Image, br *BoardRegion) float64 {
 	rowProj, colProj := lineProjections(BoxBlur(ConvertGray(sub), 2))
 
 	// br.Bounds は画像からはみ出しうるので、投影の添字は b.Min からの相対にする
-	v := axisAlignment(rowProj, float64(br.Bounds.Min.Y-b.Min.Y), float64(br.Bounds.Dy())/9)
-	h := axisAlignment(colProj, float64(br.Bounds.Min.X-b.Min.X), float64(br.Bounds.Dx())/9)
+	v, vOn := axisAlignmentOn(rowProj, float64(br.Bounds.Min.Y-b.Min.Y), float64(br.Bounds.Dy())/9)
+	h, hOn := axisAlignmentOn(colProj, float64(br.Bounds.Min.X-b.Min.X), float64(br.Bounds.Dx())/9)
+
+	// **線が無い軸は比では落ちない。絶対量で落とす。**
+	if vOn < minLineStrength || hOn < minLineStrength {
+		return 0
+	}
+
 	if v < h {
 		return v
 	}
 	return h
 }
+
+// minLineStrength は「その軸に格子線がある」と認めるための on の下限。
+// 単位は lineProjections の値＝行/列ごとの |勾配| の中央値（0..255）。
+//
+// **`axisAlignment` の比 (on-off)/(on+off) は線の有無を測れない。**
+// 自己校正のために off で割っているので、**線が 1 本も無い軸は
+// off も 0 になり、比が +1 に張り付く**。実測（9本の縞模様だけの画像
+// `d112c258`）: 縞に直交する軸が on=0.8 / off=0.0 で整合度 +1.00、
+// 均一性 0.78 と掛けて**信頼度 0.78 で盤として採用**されていた。
+// 縞と平行な軸（on=27.2）だけが本物で、直交する軸には何も無い。
+//
+// 比は候補どうしの順位付けには効くが、「そもそも格子か」は測れない。
+// **絶対量で測るのはここだけ**（CLAUDE.md の「絶対量で測ってはいけない」は
+// 領域どうしの比較の話で、この下限は解像度・駒数では動かない
+// ＝中央値なので面積に比例せず、コントラストだけで決まる）。
+//
+// 実測（保存済み 138 局面の手動指定座標、悪いほうの軸の on）:
+// 最小 12.6 / 下位 5% 26.8 / 中央値 68.2。負例側は 0.2〜0.8 なので
+// 桁で離れている。8 は最も弱い正解の 1.6 分の 1。
+//
+// **`lineProjections` を変えたらこの値も測り直すこと。**
+const minLineStrength = 8
 
 // lineProjections は「その行/列にどれだけ線が通っているか」の投影を返す。
 //
@@ -244,6 +272,14 @@ var offFractions = []float64{0.25, 0.5, 0.75}
 // 比が +1 に張り付く穴は塞がるが、格子線が薄い実盤の中継画像で正解座標が
 // **−0.33** まで落ちて使えなくなる（実測。CLAUDE.md「今後の課題」参照）。
 func axisAlignment(proj []float64, origin, span float64) float64 {
+	a, _ := axisAlignmentOn(proj, origin, span)
+	return a
+}
+
+// axisAlignmentOn は axisAlignment の値と、その元になった on を返す。
+// on は「境界線の位置にどれだけ線があるか」の絶対量で、
+// 線の無い軸を落とすのに使う（minLineStrength）。
+func axisAlignmentOn(proj []float64, origin, span float64) (float64, float64) {
 	peak := func(pos float64) float64 {
 		best := 0.0
 		p := int(pos)
@@ -271,9 +307,9 @@ func axisAlignment(proj []float64, origin, span float64) float64 {
 	on := math.Min(even, odd) / 5
 	off /= float64(9 * len(offFractions))
 	if on+off == 0 {
-		return 0
+		return 0, on
 	}
-	return (on - off) / (on + off)
+	return (on - off) / (on + off), on
 }
 
 // weakestLineRatio は10本の境界線のうち**いちばん弱い線**と off レベルの比を
