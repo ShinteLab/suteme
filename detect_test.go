@@ -106,3 +106,44 @@ func TestWeakestLineRatio(t *testing.T) {
 		t.Errorf("1本欠けているのに %.2f", v)
 	}
 }
+
+// 信頼度が同点で並んだ候補は「別々の ROI から同じ窓が出た数」（票）で割る。
+//
+// **`gridAlignment` は全マスシフトに対して不変**なので、正しい窓と1マス滑った
+// 窓がどちらも 1.00 で並ぶ。以前は先に評価された候補がそのまま残っていた。
+// 実測（`26a22911`）: 正 (573,196)-(1146,830) 票2 に対し
+// 誤 (578,267)-(1139,890) 票1 で、先に来る誤ったほうが採用されていた。
+func TestCandidateSetBreaksTieByVotes(t *testing.T) {
+	slipped := BoardRegionFromRect(578, 267, 1139, 890)
+	correct := BoardRegionFromRect(573, 196, 1146, 830)
+
+	s := &candidateSet{}
+	s.add(slipped, 1.0) // 先に来る誤った窓
+	s.add(correct, 1.0)
+	s.add(correct, 1.0) // 別の ROI からも同じ窓
+	if got := s.best(); got.br.Bounds != correct.Bounds {
+		t.Errorf("同点で票の少ない窓が残った: %v（期待 %v）", got.br.Bounds, correct.Bounds)
+	}
+
+	// 信頼度が上なら票は関係ない。**票は同点のときだけの材料**
+	s = &candidateSet{}
+	s.add(slipped, 1.0)
+	s.add(slipped, 1.0)
+	s.add(correct, 0.9)
+	if got := s.best(); got.br.Bounds != slipped.Bounds {
+		t.Errorf("信頼度の低い窓が票で勝った: %v", got.br.Bounds)
+	}
+
+	// 数px の違いは同じ窓として畳み、位置は信頼度が高いほうを残す。
+	// **先勝ちにすると数px の詰めを捨てることになる**（実測で 3 局面が
+	// 0.00マスから 0.91〜1.27マスへ壊れた）
+	s = &candidateSet{}
+	s.add(BoardRegionFromRect(573, 196, 1146, 830), 0.95)
+	s.add(BoardRegionFromRect(575, 198, 1148, 832), 1.0)
+	if len(s.cands) != 1 {
+		t.Fatalf("ほぼ同じ窓が %d 個に分かれた", len(s.cands))
+	}
+	if got := s.best(); got.br.Bounds.Min.X != 575 || got.votes != 2 {
+		t.Errorf("畳んだ結果が %v 票=%d（信頼度の高い位置・票2 のはず）", got.br.Bounds, got.votes)
+	}
+}

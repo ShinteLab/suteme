@@ -30,29 +30,138 @@ const segSkipConfidence = 0.9
 // 絞ってから**同じ検出をやり直す（`segment.go`）。キャプチャは駒台まで含めて
 // 撮る想定なので、盤以外が写るのは例外ではなく常態であり、投影を全幅で取ると
 // 盤外の罫線に負ける。候補は ValidateBoard が最も高いものを採り、
-// 同点なら画像全体の結果を優先する。
+// **同点なら「別々の ROI から同じ窓が出た数」（票）が多いほう**を採り、
+// それも同じなら先に見つけたものを残す（`candidateSet`）。
 func DetectBoard(img image.Image) *BoardRegion {
 	gray := ConvertGray(img)
 	blurred := BoxBlur(gray, 2)
 	edges := Sobel(blurred)
 
-	best := detectBoardIn(edges, img.Bounds())
-	bestConf := ValidateBoard(img, best)
-	if bestConf >= segSkipConfidence {
-		return snapToOuterFrame(img, unslipRegion(img, best))
+	whole := detectBoardIn(edges, img.Bounds())
+	wholeConf := ValidateBoard(img, whole)
+	if wholeConf >= segSkipConfidence {
+		return snapToOuterFrame(img, unslipRegion(img, whole))
 	}
 
+	set := &candidateSet{}
+	set.add(whole, wholeConf)
 	for _, roi := range boardROIs(blurred) {
 		cand := detectBoardIn(edges, roi)
 		if cand == nil || !plausibleAspect(cand) {
 			continue
 		}
-		cand, conf := refineRegion(img, cand)
-		if conf > bestConf {
-			best, bestConf = cand, conf
+		set.add(refineRegion(img, cand))
+	}
+	best := set.best()
+	if best == nil {
+		return nil
+	}
+	// **票で選ばれた窓でも `snapToOuterFrame` は通す。** 「複数の ROI が合意
+	// しているなら 1マス動かさない」も試したが、`snapToOuterFrame` が本来
+	// 直すはずの局面（`2d7bfedf` `9eb72770`）が 0.91〜1.09マスへ戻り、
+	// 135 局面で 131 → 130 と差し引き悪くなる。
+	// なお `e0302032` は逆に、票で選んだ正しい窓 (473,166)-(1082,854)（0.44マス）を
+	// snap が (465,101)-(1081,756)（0.72マス）へ動かしてしまう例（後述の課題）
+	return snapToOuterFrame(img, unslipRegion(img, best.br))
+}
+
+// candTolCells は 2 つの候補を「同じ窓」とみなす差（マス単位）。
+// ROI が違えば投影に載る画素も少し変わるので、数px の差は同じ窓とみなす
+const candTolCells = 1.0 / 3.0
+
+// candidate は検出候補 1 つと、その窓を出した ROI の数。
+type candidate struct {
+	br    *BoardRegion
+	conf  float64
+	votes int
+}
+
+// candidateSet は検出候補を集めて 1 つ選ぶ。
+//
+// **信頼度が同点で並ぶ候補があり、そこで負けていた。** `gridAlignment` は
+// 全マスシフトに対して不変なので（CLAUDE.md「盤面検出の検証」）、正しい窓と
+// 1マス滑った窓が **どちらも 1.00** で並ぶ。以前の実装は `conf > bestConf` の
+// 狭義比較だったため、**先に評価された候補がそのまま残っていた**。
+// 必要なのは信頼度の改善ではなく**同点を割る材料**（CLAUDE.md「今後の課題」）。
+//
+// 材料は「**別々の ROI から同じ窓が出たか**」。盤の格子線は複数の絞り込み方
+// （横線のクラスタ / 縦線のクラスタ / その組み合わせ）から同じ位置に出るのに対し、
+// 滑った窓は特定の ROI でしか成立しないことが多い。実測（人が座標を引いた
+// 11 局面の候補、conf 0.9 以上）:
+//
+//	26a22911  正 (573,196)-(1146,830) 票2  対  誤 (578,267)-(1139,890) 票1
+//	c611e647  正 (330,111)-(999,847)  票4  対  誤 (330,38)-(997,764)   票1
+//	e0302032  正 (473,166)-(1082,854) 票2  対  誤 (465,257)-(1085,894) 票1
+//	11f95abb  正 (84,70)-(517,538)    票2  対  誤 (81,15)-(521,490)    票2  ← 割れない
+//
+// **他に試して駄目だったもの**（同じ道を再訪しないための記録。上と同じ 11 局面）:
+//
+//	窓のすぐ外側と内側の色差（四辺の最小）  26a22911 が 1.0 対 1.0 で同点、
+//	                                        fa37bb49 は誤ったほうが高い（3.0 対 1.0）
+//	`weakestLineRatio`                      26a22911 は誤 +0.17 対 正 +0.14 で逆
+//	駒の外接矩形のマス内での偏り            全マスシフトでは駒はマス中央に残るので原理的に無効
+//	窓の 1マス外側に格子線が続いていないか  正しい窓の外にも駒台・UI の線があり分離しない
+//
+// **票が同じなら順序を変えない**（画像全体 → `boardROIs` の順）。同点で
+// 動かすと、これまで通っていた局面が理由なく別の窓に移る。
+// 画像全体から得た候補を同点で特別扱いする案も試したが、135 局面で成績は
+// 変わらなかったので**特別扱いは置いていない**（概念を増やさない）。
+type candidateSet struct {
+	cands []candidate
+}
+
+// add は候補を足す。既にある窓とほぼ同じなら票を足し、
+// **位置は信頼度が高いほうを残す**。
+//
+// **ここで先に入ったほうの位置を残してはいけない。** ほぼ同じ窓でも数px の差で
+// 整合度は変わり、以前の実装（`conf > bestConf` なら丸ごと差し替え）は
+// 高いほうの位置を採っていた。先勝ちにすると、その数px を捨てることになる。
+// 実測でこれをやると `22a8f6e2` `f8ddbeee` `4deb69f4` が 0.00マスから
+// 0.91〜1.27マスへ壊れる。
+func (s *candidateSet) add(br *BoardRegion, conf float64) {
+	if br == nil {
+		return
+	}
+	for i := range s.cands {
+		if sameWindow(s.cands[i].br.Bounds, br.Bounds) {
+			s.cands[i].votes++
+			if conf > s.cands[i].conf {
+				s.cands[i].br, s.cands[i].conf = br, conf
+			}
+			return
 		}
 	}
-	return snapToOuterFrame(img, unslipRegion(img, best))
+	s.cands = append(s.cands, candidate{br: br, conf: conf, votes: 1})
+}
+
+// best は信頼度 → 票 の順で最も良い候補を返す。
+func (s *candidateSet) best() *candidate {
+	var best *candidate
+	for i := range s.cands {
+		c := &s.cands[i]
+		switch {
+		case best == nil, c.conf > best.conf:
+		case c.conf < best.conf:
+			continue
+		case c.votes > best.votes:
+		default:
+			continue
+		}
+		best = c
+	}
+	return best
+}
+
+// sameWindow は 2 つの窓を同じとみなしてよいかを返す（`candTolCells`）。
+func sameWindow(a, b image.Rectangle) bool {
+	cw := float64(a.Dx()) / 9
+	ch := float64(a.Dy()) / 9
+	if cw <= 0 || ch <= 0 {
+		return false
+	}
+	tolW, tolH := cw*candTolCells, ch*candTolCells
+	return math.Abs(float64(a.Min.X-b.Min.X)) < tolW && math.Abs(float64(a.Min.Y-b.Min.Y)) < tolH &&
+		math.Abs(float64(a.Dx()-b.Dx())) < tolW && math.Abs(float64(a.Dy()-b.Dy())) < tolH
 }
 
 // snapMargin は snapToOuterFrame が窓を1マス動かすのに要求する

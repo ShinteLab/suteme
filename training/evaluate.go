@@ -189,11 +189,11 @@ type EvalRun struct {
 	DetectBySource []EvalSourceDetect `json:"detect_by_source,omitempty"`
 	// Negative は data/negative/ の「盤面が写っていない画像」に対する誤検出。
 	// **正解データからは測れない唯一の系統**（negative.go）。負例が無ければ nil
-	Negative *NegativeEval `json:"negative,omitempty"`
-	Manual        EvalMetrics       `json:"manual"`
-	Auto          EvalMetrics       `json:"auto"`
-	ManualHoldout *EvalMetrics      `json:"manual_holdout,omitempty"`
-	AutoHoldout   *EvalMetrics      `json:"auto_holdout,omitempty"`
+	Negative      *NegativeEval `json:"negative,omitempty"`
+	Manual        EvalMetrics   `json:"manual"`
+	Auto          EvalMetrics   `json:"auto"`
+	ManualHoldout *EvalMetrics  `json:"manual_holdout,omitempty"`
+	AutoHoldout   *EvalMetrics  `json:"auto_holdout,omitempty"`
 
 	Entries []EvalEntry `json:"entries"`
 	// Skipped は評価に入れられなかった局面数（座標が無い・未確認など）
