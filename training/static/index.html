@@ -1455,7 +1455,8 @@ async function trainFromHistory() {
       (data.duplicates ? ' / 重複除去 ' + data.duplicates + '件' : '') + '）';
     // NN を回していない場合、比較用 SFEN は古いモデルの出力になる
     if (data.nn_stale) {
-      html += '<br><span style="color:#888">NN（比較用）は学習していないので model_v3.json は古いままです。</span>';
+      html += '<br><span style="color:#888">NN（比較用）は学習していないので ' +
+        (data.model_file || 'NN モデル') + ' は古いままです。</span>';
     }
     if (ngList.length > 0) {
       html += '<br><span style="color:#ff8080">失敗 ' + ngList.length + '件: ' +
@@ -1557,7 +1558,7 @@ async function reenterHistory(row) {
 }
 
 // 履歴の削除（エントリと保存画像の両方をサーバから消す）。
-// 学習データ（training_data_v3.json）に取り込み済みの分は消えないので、
+// 学習データに取り込み済みの分は消えないので、
 // 誤りを取り除きたい場合は削除してから学習をやり直す
 async function deleteHistory(id) {
   if (!confirm('この局面を履歴から削除します。画像も消えます。よろしいですか？')) return;

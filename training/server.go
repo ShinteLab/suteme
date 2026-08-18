@@ -123,7 +123,9 @@ var (
 )
 
 // Serve はラベリング・学習用のWebサーバを起動する
-// 起動時にカレントディレクトリの model_v3.json / training_data_v3.json を自動ロードする
+// 起動時にカレントディレクトリの学習データ（suteme.DefaultDataFile）と
+// NN モデル（suteme.DefaultModelFile）を自動ロードする。
+// **ファイル名を直に書かないこと**（版が上がると嘘になる）
 func Serve(port string) error {
 	loadSettings()
 	// 学習データがあれば k-NN を構築（学習処理は不要）
@@ -1040,12 +1042,16 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 	}
 
 	if !trainNN {
-		// **既存の model_v3.json は残るが、学習データより古くなる。**
+		// **既存の NN モデルは残るが、学習データより古くなる。**
 		// 比較用 SFEN を「今の学習データの NN」だと誤読させないための印
 		modelLock.Lock()
 		nnStale = model != nil
 		modelLock.Unlock()
 		res["nn_stale"] = nnStale
+		// 画面にファイル名を出すのはここから渡す。
+		// **UI 側に名前を書かないこと**（版が上がると嘘になる。実際
+		// v6 になっても「model_v3.json は古いままです」と出ていた）
+		res["model_file"] = modelFile
 		log.Printf("Training data updated (%d samples), NN training skipped", len(data.Samples))
 		return res, nil
 	}
