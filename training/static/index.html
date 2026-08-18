@@ -124,6 +124,12 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .eval-rate .sub { display: block; color: #666; font-size: 11px; }
 .eval-rate .miss { display: block; color: #ff8080; font-size: 11px; }
 .eval-rate .piece { display: block; color: #89b4d0; font-size: 11px; }
+.eval-src {
+  display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 3px;
+  font-size: 10px; border: 1px solid #2a3a5e; color: #888;
+}
+.eval-src.ui { color: #74c69d; border-color: #2d6a4f; }
+.eval-src.exact { color: #f0a030; border-color: #6a4a1a; }
 .count-warn { color: #d00000 !important; font-weight: bold; }
 .cell-preview { width: 64px; height: 64px; object-fit: contain; border: 1px solid #333; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
 .tab-bar { display: flex; gap: 4px; max-width: 600px; margin: 0 auto 16px; border-bottom: 2px solid #2a3a5e; }
@@ -1919,7 +1925,7 @@ async function refreshEvaluations() {
     return;
   }
   let html = `<table class="piece-table" style="font-size:12px">
-    <tr><th title="実行した日時とラベル">日時 / ラベル</th><th>局面</th><th title="手動座標との差が 0.5マス以内だった局面">検出</th>
+    <tr><th title="実行した日時とラベル">日時 / ラベル</th><th>局面</th><th title="保存座標との差が 0.5マス以内だった局面。橙の数字は「その座標が検出器の出力そのもの」だった件数で、突き合わせても何も測れていない（出所別の内訳は行をクリック）">検出</th>
     <th>手動</th><th>自動</th><th title="評価する局面を学習から外した k-NN">LOO 手動</th><th>LOO 自動</th>
     <th title="盤面が写っていない画像を盤として採用しなかった割合">負例</th><th></th></tr>`;
   html += evalRuns.map((r, i) => {
@@ -1929,7 +1935,8 @@ async function refreshEvaluations() {
         <span class="label" title="${escapeHTML(r.label)}">${escapeHTML(r.label)}</span></td>
       <td>${(r.manual && r.manual.boards) || 0}${r.skipped ? `<span style="color:#f0a030" title="画像・正解SFEN・盤面座標が揃っていない局面"> +${r.skipped}</span>` : ''}</td>
       <td class="eval-rate">${pct(d.aligned, d.boards)}
-        <span class="sub">${d.aligned || 0}/${d.boards || 0}</span></td>
+        <span class="sub">${d.aligned || 0}/${d.boards || 0}${d.exact
+          ? `<span style="color:#f0a030" title="保存座標が検出結果そのものだった局面。自己充足なので検出の成績には数えられない"> ＝検出 ${d.exact}</span>` : ''}</span></td>
       ${rateCell(r.manual)}${rateCell(r.auto)}${rateCell(r.manual_holdout)}${rateCell(r.auto_holdout)}
       ${negativeCell(r.negative)}
       <td><button class="eval-del" data-id="${r.id}" title="この記録を削除する"
@@ -1969,6 +1976,29 @@ async function copyIDChip(el) {
   setTimeout(() => { el.textContent = shown; }, 1200);
 }
 
+// 局面の出所の表示名。**検出の評価では出所で意味が変わる**ので画面にも出す。
+// ikkyoku は盤の座標が無いと登録できないので API 経由は「検出できた局面」ばかり、
+// 人が座標を引くのは「検出が外れた時」なので ui は難しい局面ばかりになる。
+// どちらも偏った標本で、混ぜた比率は実力ではない
+function sourceLabel(src) {
+  return { ui: '手引き', api: 'ikkyoku', '': '旧' }[src || ''] || src;
+}
+
+// 検出の集計を出所ごとに並べる。**「座標＝検出出力」の件数を併記する。**
+// その局面は突き合わせても同じ結果が出るだけ（自己充足）で、
+// 検出が当たった証拠にならない
+function detectBySourceHTML(run) {
+  const list = run.detect_by_source || [];
+  if (list.length < 2) return '';
+  const parts = list.map(d => {
+    const exact = d.exact
+      ? `<span style="color:#f0a030" title="保存されている座標が検出結果と px 単位で一致した局面。突き合わせても同じ結果が出るだけで、検出が当たった証拠にはならない">（うち ${d.exact} は座標＝検出出力）</span>`
+      : '';
+    return `${sourceLabel(d.source)} <b style="color:#bbb">${d.aligned}/${d.boards}</b>${exact}`;
+  });
+  return `<br><b style="color:#bbb">検出（出所別）</b>: ${parts.join(' / ')}`;
+}
+
 // 盤面検出の結果。**棄却された候補もずれと信頼度つきで出す。**
 // 「検出できず」だけだと、惜しかったのか全然違う場所を見ていたのかが分からず、
 // 次の版で盤が拾えるようになったかを追えない
@@ -1991,7 +2021,8 @@ function showEvalDetail(i) {
   if (!r) { el.innerHTML = ''; return; }
   const rows = (r.entries || []).map(e => {
     if (e.error) {
-      return `<tr><td>${idChipHTML(e.id)}</td>
+      return `<tr><td style="white-space:nowrap">${idChipHTML(e.id)}
+          <span class="eval-src ${e.source === 'ui' ? 'ui' : ''}">${sourceLabel(e.source)}</span></td>
         <td colspan="5" style="text-align:left;color:#f0a030">${escapeHTML(e.error)}</td></tr>`;
     }
     const det = detectHTML(e.detect || {});
@@ -2001,7 +2032,12 @@ function showEvalDetail(i) {
       ? `<td class="eval-rate">${m.ok}/${m.cells}${m.piece_cells
           ? `<span class="piece" title="駒マスの向き・駒種">駒 ${m.piece_ok}/${m.piece_cells}</span>` : ''}</td>`
       : '<td style="color:#555">—</td>';
-    return `<tr><td>${idChipHTML(e.id)}</td>
+    const src = `<span class="eval-src ${e.source === 'ui' ? 'ui' : ''}"
+      title="この局面の座標の出所">${sourceLabel(e.source)}</span>` +
+      ((e.detect || {}).exact
+        ? `<span class="eval-src exact" title="保存されている座標が検出結果そのもの。突き合わせても何も測れていない">＝検出</span>`
+        : '');
+    return `<tr><td style="white-space:nowrap">${idChipHTML(e.id)}${src}</td>
       <td style="text-align:left">${det}</td>
       ${cell(e.manual)}${cell(e.auto)}${cell(e.manual_holdout)}${cell(e.auto_holdout)}</tr>`;
   }).join('');
@@ -2018,6 +2054,7 @@ function showEvalDetail(i) {
       <b style="color:#bbb">${escapeHTML(r.label)}</b> の内訳 —
       ${escapeHTML(r.engine || '?')} / ${r.samples} サンプル / <code>${escapeHTML(r.data_file || '')}</code> /
       ${r.seconds ? r.seconds.toFixed(1) + '秒' : ''}
+      ${detectBySourceHTML(r)}
       ${a ? `<br><b style="color:#bbb">${r.auto_holdout ? 'LOO ' : ''}自動</b>: ${perBoard(a)}` : ''}
       ${m ? `<br>誤りの内訳（${r.manual_holdout ? 'LOO ' : ''}手動座標）: 空→駒 ${m.empty_as_piece} / 駒→空 ${m.piece_as_empty} /
         向きの反転 ${m.orient_flip} / 駒種違い ${m.type_miss} / 駒マスの駒種 ${pct(m.piece_ok, m.piece_cells)}` : ''}

@@ -115,6 +115,15 @@ type EvalDetect struct {
 	MaxShift float64 `json:"max_shift"`
 	// Aligned は MaxShift が alignedMaxShift 以内か
 	Aligned bool `json:"aligned"`
+	// Exact は保存座標が検出結果と px 単位で一致したか。
+	//
+	// **一致した局面は「検出が当たった」証拠にならない。** 座標そのものが
+	// この検出器の出力だったという意味なので、突き合わせても同じ結果が
+	// 出るだけ（自己充足）。ikkyoku は盤の座標が無いと `/api/register` に
+	// 送れないので、API 経由の局面は構造的にここに寄る。
+	// 実測（133 局面）: api 83 件のうち 73 件、出所なしの 39 件のうち 24 件が
+	// px 完全一致で、外した局面は 0 件だった
+	Exact bool `json:"exact"`
 }
 
 // EvalDetectSummary は盤面検出の集計。
@@ -123,11 +132,31 @@ type EvalDetectSummary struct {
 	Found   int `json:"found"`   // 信頼度を満たして領域が採用された
 	Aligned int `json:"aligned"` // うち手動座標と 0.5マス以内
 	Whole   int `json:"whole"`   // 「画像全体が盤面」フォールバックで通った
+	Exact   int `json:"exact"`   // 保存座標が検出結果と px 単位で一致（自己充足）
+}
+
+// EvalSourceDetect は盤面検出の集計を局面の出所ごとに分けたもの。
+//
+// **全件をまとめた数字だけを見てはいけない。** 検出の評価は「保存されている
+// 座標」を正解として突き合わせるが、その座標がどこから来たかで意味が変わる。
+//
+//	api      ikkyoku が送ってきた座標。**盤を検出できた時しか送れない**ので、
+//	         成功した局面ばかりが集まる。しかも多くは検出器の出力そのもの（Exact）
+//	ui       画面で人がドラッグして引いた座標。**検出が外れた時に人が引く**ので、
+//	         難しい局面ばかりが集まる
+//
+// **どちらも偏った標本**であって、混ぜた比率は「実力」ではない。
+// 出所ごとに分けて、版を上げたときに同じ母集団どうしで比べられるようにする。
+type EvalSourceDetect struct {
+	Source string `json:"source"` // "ui" / "api" / ""（旧エントリ）
+	EvalDetectSummary
 }
 
 // EvalEntry は局面 1 件の評価結果。
 type EvalEntry struct {
 	ID string `json:"id"`
+	// Source は履歴エントリの出所（`EvalSourceDetect` の説明を見ること）
+	Source string `json:"source,omitempty"`
 	// Error があればその局面は評価できていない（画像が無い・SFEN が壊れている等）
 	Error  string     `json:"error,omitempty"`
 	Detect EvalDetect `json:"detect"`
@@ -155,6 +184,9 @@ type EvalRun struct {
 	Holdout bool    `json:"holdout"`
 
 	DetectSummary EvalDetectSummary `json:"detect_summary"`
+	// DetectBySource は同じ集計を局面の出所ごとに分けたもの。
+	// **混ぜた比率は実力ではない**（`EvalSourceDetect`）
+	DetectBySource []EvalSourceDetect `json:"detect_by_source,omitempty"`
 	// Negative は data/negative/ の「盤面が写っていない画像」に対する誤検出。
 	// **正解データからは測れない唯一の系統**（negative.go）。負例が無ければ nil
 	Negative *NegativeEval `json:"negative,omitempty"`
@@ -346,6 +378,8 @@ func gradeDetect(r image.Rectangle, src suteme.RegionSource, conf float64, found
 		}
 	}
 	res.Aligned = res.MaxShift <= alignedMaxShift
+	// 保存座標が検出結果そのものなら、突き合わせても何も測れていない
+	res.Exact = r.Min.X == b.X1 && r.Min.Y == b.Y1 && r.Max.X == b.X2 && r.Max.Y == b.Y2
 	return res
 }
 
@@ -442,8 +476,9 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 		run.AutoHoldout = &EvalMetrics{}
 	}
 
+	bySource := map[string]*EvalDetectSummary{}
 	for i, t := range targets {
-		res := EvalEntry{ID: t.entry.ID}
+		res := EvalEntry{ID: t.entry.ID, Source: t.entry.Source}
 
 		// 手動座標。認識器そのものの成績
 		if g, _, err := recognizeGrid(t.img, p, suteme.WithRect(t.rect.X1, t.rect.Y1, t.rect.X2, t.rect.Y2)); err == nil {
@@ -483,14 +518,25 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 
 		run.Manual.add(res.Manual)
 		run.Auto.add(res.Auto)
-		run.DetectSummary.Boards++
-		if res.Detect.Found {
-			run.DetectSummary.Found++
+		src := bySource[res.Source]
+		if src == nil {
+			src = &EvalDetectSummary{}
+			bySource[res.Source] = src
+		}
+		for _, d := range []*EvalDetectSummary{&run.DetectSummary, src} {
+			d.Boards++
+			if res.Detect.Exact {
+				d.Exact++
+			}
+			if !res.Detect.Found {
+				continue
+			}
+			d.Found++
 			if res.Detect.Aligned {
-				run.DetectSummary.Aligned++
+				d.Aligned++
 			}
 			if res.Detect.Source == string(suteme.RegionFromWholeImage) {
-				run.DetectSummary.Whole++
+				d.Whole++
 			}
 		}
 		run.Entries = append(run.Entries, res)
@@ -504,6 +550,18 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 		log.Printf("evaluate [%d/%d] %s: 手動 %d/81 自動 %d/81 検出 %s",
 			i+1, len(targets), t.entry.ID, res.Manual.OK, res.Auto.OK, det)
 	}
+	// **人が引いた座標（ui）を先頭に置く。** 検出の実力に近いのはこちらで、
+	// api は「検出できた局面だけ」が集まる標本なので後ろでよい
+	for _, src := range []string{SourceUI, SourceAPI, ""} {
+		if d := bySource[src]; d != nil {
+			run.DetectBySource = append(run.DetectBySource, EvalSourceDetect{Source: src, EvalDetectSummary: *d})
+			delete(bySource, src)
+		}
+	}
+	for src, d := range bySource { // 将来増えた出所も落とさない
+		run.DetectBySource = append(run.DetectBySource, EvalSourceDetect{Source: src, EvalDetectSummary: *d})
+	}
+
 	// 盤面が写っていない画像。**誤検出はここでしか測れない**
 	run.Negative = evaluateNegatives(p)
 	run.Seconds = time.Since(start).Seconds()

@@ -3,8 +3,11 @@ package training
 import (
 	"encoding/json"
 	"image"
+	"image/color"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -247,5 +250,85 @@ func TestRunEvaluationSkipsIncomplete(t *testing.T) {
 	_, err := runEvaluation(nil, "", false)
 	if err == nil || !strings.Contains(err.Error(), "評価できる局面がありません") {
 		t.Fatalf("座標の無い局面だけで評価が通った: %v", err)
+	}
+}
+
+// 保存されている座標が検出結果そのものだったら印を付ける。
+//
+// **一致は「検出が当たった」証拠ではない。** ikkyoku は盤の座標が無いと
+// 登録できないので、API 経由の局面は構造的に「検出できた局面」ばかりになり、
+// その座標の多くは検出器の出力そのもの。混ぜて平均すると実力より良く見える
+func TestGradeDetectMarksExactAsSelfFulfilling(t *testing.T) {
+	b := &BoardBounds{X1: 100, Y1: 200, X2: 190, Y2: 380}
+	same := image.Rect(100, 200, 190, 380)
+	if got := gradeDetect(same, suteme.RegionFromDetect, 1.0, true, b); !got.Exact {
+		t.Errorf("座標が検出結果と同じなのに Exact=false: %+v", got)
+	}
+	// 1px でも違えば独立した正解として扱う
+	off := image.Rect(101, 200, 191, 380)
+	if got := gradeDetect(off, suteme.RegionFromDetect, 1.0, true, b); got.Exact {
+		t.Errorf("1px ずれているのに Exact=true: %+v", got)
+	}
+}
+
+// 盤面検出の集計を局面の出所ごとに分ける。
+//
+// **全件をまとめた比率は実力ではない**（`EvalSourceDetect`）。
+// 人が引いた座標（ui）を先頭に置き、版を上げたときに同じ母集団どうしで
+// 比べられるようにする
+func TestEvalGroupsDetectBySource(t *testing.T) {
+	chdirTemp(t)
+	entries := []HistoryEntry{
+		{ID: "1111111111111111", SFEN: "9/9/9/9/9/9/9/9/9", Source: SourceAPI,
+			BoardBounds: &BoardBounds{X1: 10, Y1: 10, X2: 100, Y2: 110}},
+		{ID: "2222222222222222", SFEN: "9/9/9/9/9/9/9/9/9", Source: SourceUI,
+			BoardBounds: &BoardBounds{X1: 10, Y1: 10, X2: 100, Y2: 110}},
+	}
+	os.MkdirAll(dataDir, 0755)
+	for _, e := range entries {
+		if err := os.WriteFile(filepath.Join(dataDir, e.ID+".png"), testImage(t, 120, 130, color.RGBA{180, 150, 100, 255}), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	historyMu.Lock()
+	saveHistoryFile(&HistoryData{Entries: entries})
+	historyMu.Unlock()
+
+	modelLock.Lock()
+	saved := knn
+	knn = suteme.NewKNN([]suteme.TrainingSample{
+		{Input: make([]float64, suteme.InputSize), Label: suteme.ClassEmpty},
+	})
+	modelLock.Unlock()
+	t.Cleanup(func() {
+		modelLock.Lock()
+		knn = saved
+		modelLock.Unlock()
+	})
+
+	run, err := runEvaluation(nil, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.DetectBySource) != 2 {
+		t.Fatalf("出所の数が %d（ui と api の 2 つのはず）: %+v", len(run.DetectBySource), run.DetectBySource)
+	}
+	// 人が引いた座標を先頭に置く（検出の実力に近いのはこちら）
+	if run.DetectBySource[0].Source != SourceUI || run.DetectBySource[1].Source != SourceAPI {
+		t.Errorf("並び順が違う: %+v", run.DetectBySource)
+	}
+	for _, d := range run.DetectBySource {
+		if d.Boards != 1 {
+			t.Errorf("%s の局面数が %d（1 のはず）", d.Source, d.Boards)
+		}
+	}
+	if run.DetectSummary.Boards != 2 {
+		t.Errorf("全体の局面数が %d（2 のはず）", run.DetectSummary.Boards)
+	}
+	// 局面ごとの内訳にも出所を残す（画面のバッジがここを見る）
+	for _, e := range run.Entries {
+		if e.Source == "" {
+			t.Errorf("%s に出所が入っていない", e.ID)
+		}
 	}
 }
