@@ -64,6 +64,13 @@ type HistoryEntry struct {
 	// Hash は登録された画像そのもののハッシュ。API のリトライで同じ局面が
 	// 増えないようにするためだけに使う
 	Hash string `json:"hash,omitempty"`
+	// Look は**人が付けた「盤の見た目」の名前**（同じ中継・同じゲーム画面なら同じ名前）。
+	//
+	// 認識率は局面数より「同じ見た目が何枚あるか」で決まるので、集まり方を測るには
+	// 見た目で束ねる必要がある。**機械には決められない**（画像サイズは撮るたびに
+	// 変わるので当てにならず、同じ放送でも実盤・大盤・ゲーム画面は別の見た目）。
+	// 空なら未判定で、`coverage.go` が署名から候補を出すだけ
+	Look string `json:"look,omitempty"`
 }
 
 // IsVerified は学習に使ってよいエントリかを返す。
@@ -174,6 +181,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/evaluations", handleEvaluations)
 	mux.HandleFunc("/api/evaluations/", handleEvaluations)
 	mux.HandleFunc("/api/coverage", handleCoverage)
+	mux.HandleFunc("/api/look", handleLook)
 	mux.HandleFunc("/api/negative", handleNegatives)
 	mux.HandleFunc("/api/negative/", handleNegativeItem)
 	mux.HandleFunc("/api/status", handleStatus)
@@ -585,6 +593,9 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 		// API 経由で入った未確認の局面はここを通ると確認済みになる
 		Verified: true,
 		Hash:     prev.Hash,
+		// 見た目の判定は人が付けたもので、保存し直しても失わせない
+		// （持ち駒・手番を引き継ぐのと同じ理由。`mergeSFEN` の項）
+		Look: prev.Look,
 	}
 	if overwrite && prev.Source != "" {
 		entry.Source = prev.Source

@@ -1,80 +1,152 @@
 package training
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
 	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // 盤の見た目ごとの厚み（coverage.go）。
 //
-// 守りたいのは 3 つ。
-//   - 同じ画像サイズの局面が 1 つの見た目に束ねられること
+// 守りたいのは 4 つ。
+//   - **人が付けた見た目（`HistoryEntry.Look`）が最優先**。機械の候補で上書きしない
+//   - 未判定のものだけ署名で候補を出し、似ていないものを混ぜないこと
 //   - **薄いものが先、その中で読めていない順**（＝次に集める価値が高い順）に並ぶこと
 //   - 一致率は最新の評価実行から取り、leave-one-out があればそちらを使うこと
 
-// saveLook は指定サイズの画像を持つ履歴エントリを作る
-func saveLook(t *testing.T, id string, w, h int) {
+// lookImage は「見た目」の違う盤の画像を作る。
+//
+// 署名は空マスの見た目（木目・格子線）から作るので、**一様な板では駄目**
+// （`CellToInput` が標準化するので、色だけ違う平坦な画像は同じ署名になる）。
+// pattern でマスの中の模様を変えて別の見た目にする。
+func lookImage(t *testing.T, pattern int) []byte {
+	t.Helper()
+	const size = 180 // 9 マス × 20px
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			v := 200
+			cx, cy := x%20, y%20 // マスの中での位置
+			switch pattern {
+			case 0: // マスの上のほうが暗い盤
+				if cy < 7 {
+					v = 120
+				}
+			case 1: // 同じ形（少しだけ濃さが違う＝同じ見た目のつもり）
+				if cy < 7 {
+					v = 110
+				}
+			case 2: // マスの左のほうが暗い盤（別の見た目）
+				if cx < 7 {
+					v = 120
+				}
+			}
+			if x%20 == 0 || y%20 == 0 { // 格子線
+				v = 40
+			}
+			img.Set(x, y, color.RGBA{uint8(v), uint8(v), uint8(v), 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// saveLook は空の盤（9x9 すべて空マス）の履歴エントリを作る
+func saveLook(t *testing.T, id string, pattern int) HistoryEntry {
 	t.Helper()
 	os.MkdirAll(dataDir, 0755)
-	raw := testImage(t, w, h, color.RGBA{30, 30, 40, 255})
-	if err := os.WriteFile(filepath.Join(dataDir, id+".png"), raw, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dataDir, id+".png"), lookImage(t, pattern), 0644); err != nil {
 		t.Fatal(err)
+	}
+	return HistoryEntry{
+		ID:          id,
+		SFEN:        "9/9/9/9/9/9/9/9/9 b - 1",
+		BoardBounds: &BoardBounds{0, 0, 180, 180},
 	}
 }
 
-func TestCoverageGroupsByLook(t *testing.T) {
+// **人が付けた見た目が正解。** 機械の候補はそれを上書きしない
+func TestCoverageUsesHumanLook(t *testing.T) {
 	chdirTemp(t)
-	saveLook(t, "1111111111111111", 40, 30)
-	saveLook(t, "2222222222222222", 40, 30)
-	saveLook(t, "3333333333333333", 50, 30)
-	h := &HistoryData{Entries: []HistoryEntry{
-		{ID: "1111111111111111"}, {ID: "2222222222222222"}, {ID: "3333333333333333"},
-	}}
+	a := saveLook(t, "1111111111111111", 0)
+	b := saveLook(t, "2222222222222222", 1) // 署名は a に近い
+	a.Look, b.Look = "中継A", "ゲーム画面B"        // だが人は別物だと判定した
+	c := saveLook(t, "3333333333333333", 2)
+	c.Look = "中継A"
 
-	rep := coverageReport(h, nil)
+	rep := coverageReport(&HistoryData{Entries: []HistoryEntry{a, b, c}}, nil)
 	if len(rep.Groups) != 2 {
-		t.Fatalf("見た目は 2 通りのはず: %+v", rep.Groups)
+		t.Fatalf("人の判定どおり 2 つに分かれるはず: %+v", rep.Groups)
 	}
-	byLook := map[string]LookGroup{}
 	for _, g := range rep.Groups {
-		byLook[g.Look] = g
+		if g.Proposed {
+			t.Errorf("%s: 人が付けた見た目を候補扱いにしている", g.Look)
+		}
+		if g.Look == "中継A" && g.Count != 2 {
+			t.Errorf("中継A は 2 枚のはず: %+v", g)
+		}
 	}
-	if g := byLook["40x30"]; g.Count != 2 || len(g.IDs) != 2 {
-		t.Errorf("40x30 は 2 枚のはず: %+v", g)
+	if rep.Named != 3 || rep.Total != 3 {
+		t.Errorf("判定済みの数が合わない: named=%d total=%d", rep.Named, rep.Total)
 	}
-	if g := byLook["50x30"]; g.Count != 1 {
-		t.Errorf("50x30 は 1 枚のはず: %+v", g)
+}
+
+// 未判定のものは署名で候補を出す。**似ていないものを混ぜない**
+func TestCoverageProposesBySignature(t *testing.T) {
+	chdirTemp(t)
+	entries := []HistoryEntry{
+		saveLook(t, "1111111111111111", 0),
+		saveLook(t, "2222222222222222", 1),
+		saveLook(t, "3333333333333333", 2),
 	}
-	// 評価がまだ無いので一致率は「未評価」
+	rep := coverageReport(&HistoryData{Entries: entries}, nil)
+	if rep.Named != 0 {
+		t.Fatalf("まだ誰も判定していない: %+v", rep)
+	}
+	var pair, alone int
 	for _, g := range rep.Groups {
-		if g.Rate != -1 {
-			t.Errorf("%s: 評価が無いのに一致率が入っている: %v", g.Look, g.Rate)
+		if !g.Proposed {
+			t.Errorf("未判定なのに候補になっていない: %+v", g)
 		}
-		if !g.Thin {
-			t.Errorf("%s: %d 枚なら薄いはず", g.Look, g.Count)
+		switch g.Count {
+		case 2:
+			pair++
+		case 1:
+			alone++
 		}
+	}
+	if pair != 1 || alone != 1 {
+		t.Fatalf("似た 2 枚が候補にまとまり、違う 1 枚は別になるはず: %+v", rep.Groups)
 	}
 }
 
 // **並び順がこの機能の中身。** 薄いものを先に、その中で読めていない順。
-// 1 枚しかなくてもよく読めている見た目は下へ回る（足す価値が薄いので）。
+// 1 枚しかなくてもよく読めている見た目は下へ回る（足す価値が薄いので）
 func TestCoverageOrdersThinAndWeakFirst(t *testing.T) {
 	chdirTemp(t)
-	// 40x30: 1枚・成績が悪い / 50x30: 1枚・成績が良い / 60x30: 3枚（厚い）・成績が悪い
-	saveLook(t, "1111111111111111", 40, 30)
-	saveLook(t, "2222222222222222", 50, 30)
-	saveLook(t, "3333333333333333", 60, 30)
-	saveLook(t, "4444444444444444", 60, 30)
-	saveLook(t, "5555555555555555", 60, 30)
-	h := &HistoryData{Entries: []HistoryEntry{
-		{ID: "1111111111111111"}, {ID: "2222222222222222"},
-		{ID: "3333333333333333"}, {ID: "4444444444444444"}, {ID: "5555555555555555"},
-	}}
+	mk := func(id string, look string) HistoryEntry {
+		e := saveLook(t, id, 0)
+		e.Look = look
+		return e
+	}
+	entries := []HistoryEntry{
+		mk("1111111111111111", "薄くて弱い"),
+		mk("2222222222222222", "薄いがよく読めている"),
+		mk("3333333333333333", "厚いが弱い"),
+		mk("4444444444444444", "厚いが弱い"),
+		mk("5555555555555555", "厚いが弱い"),
+	}
 	metrics := func(ok int) EvalMetrics { return EvalMetrics{Cells: 81, OK: ok} }
 	runs := []EvalRun{{ID: "aaaa", Entries: []EvalEntry{
 		{ID: "1111111111111111", Manual: metrics(60)},
@@ -84,19 +156,15 @@ func TestCoverageOrdersThinAndWeakFirst(t *testing.T) {
 		{ID: "5555555555555555", Manual: metrics(50)},
 	}}}
 
-	rep := coverageReport(h, runs)
-	got := []string{rep.Groups[0].Look, rep.Groups[1].Look, rep.Groups[2].Look}
-	want := []string{"40x30", "50x30", "60x30"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("並び順が違う: %v (期待 %v)", got, want)
+	rep := coverageReport(&HistoryData{Entries: entries}, runs)
+	want := []string{"薄くて弱い", "薄いがよく読めている", "厚いが弱い"}
+	for i, w := range want {
+		if rep.Groups[i].Look != w {
+			t.Fatalf("並び順が違う: %d 番目が %q（期待 %q）", i, rep.Groups[i].Look, w)
 		}
 	}
 	if rep.Groups[2].Thin {
 		t.Error("3 枚あるものを薄い扱いにしている")
-	}
-	if r := rep.Groups[0].Rate; r < 0.73 || r > 0.75 {
-		t.Errorf("一致率が合わない: %v", r)
 	}
 }
 
@@ -104,8 +172,8 @@ func TestCoverageOrdersThinAndWeakFirst(t *testing.T) {
 // 数字は高く出るので、薄い見た目でも良い成績に見えてしまう
 func TestCoveragePrefersHoldout(t *testing.T) {
 	chdirTemp(t)
-	saveLook(t, "1111111111111111", 40, 30)
-	h := &HistoryData{Entries: []HistoryEntry{{ID: "1111111111111111"}}}
+	e := saveLook(t, "1111111111111111", 0)
+	e.Look = "中継A"
 	loo := EvalMetrics{Cells: 81, OK: 40}
 	runs := []EvalRun{{ID: "aaaa", Holdout: true, Entries: []EvalEntry{{
 		ID:            "1111111111111111",
@@ -113,7 +181,7 @@ func TestCoveragePrefersHoldout(t *testing.T) {
 		ManualHoldout: &loo,
 	}}}}
 
-	rep := coverageReport(h, runs)
+	rep := coverageReport(&HistoryData{Entries: []HistoryEntry{e}}, runs)
 	if r := rep.Groups[0].Rate; r > 0.5 {
 		t.Errorf("leave-one-out ではなく学習済みの数字を使っている: %v", r)
 	}
@@ -122,19 +190,67 @@ func TestCoveragePrefersHoldout(t *testing.T) {
 	}
 }
 
-// 画像が消えている履歴エントリは数えない（見た目が分からないため）
+// 画像が消えている履歴エントリは候補に出せない（見た目が分からないため）。
+// **人が名前を付けてあれば数える**（判定はもう済んでいる）
 func TestCoverageSkipsMissingImage(t *testing.T) {
 	chdirTemp(t)
-	h := &HistoryData{Entries: []HistoryEntry{{ID: "1111111111111111"}}}
-	if rep := coverageReport(h, nil); len(rep.Groups) != 0 {
-		t.Errorf("画像が無いのに数えている: %+v", rep.Groups)
+	entries := []HistoryEntry{{ID: "1111111111111111"}}
+	if rep := coverageReport(&HistoryData{Entries: entries}, nil); len(rep.Groups) != 0 {
+		t.Errorf("画像が無いのに候補にしている: %+v", rep.Groups)
+	}
+	entries[0].Look = "中継A"
+	if rep := coverageReport(&HistoryData{Entries: entries}, nil); len(rep.Groups) != 1 {
+		t.Errorf("人が付けた見た目は画像が無くても数えるべき: %+v", rep.Groups)
+	}
+}
+
+func postLook(t *testing.T, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	handleLook(w, httptest.NewRequest(http.MethodPost, "/api/look", strings.NewReader(body)))
+	return w
+}
+
+// 見た目の付け外し。**空文字で未判定に戻せる**（間違えたときに直せないと困る）
+func TestLookAssignAndClear(t *testing.T) {
+	chdirTemp(t)
+	saveLook(t, "1111111111111111", 0)
+	saveLook(t, "2222222222222222", 1)
+	saveHistoryFile(&HistoryData{Entries: []HistoryEntry{
+		{ID: "1111111111111111"}, {ID: "2222222222222222"},
+	}})
+
+	w := postLook(t, `{"ids":["1111111111111111","2222222222222222"],"look":"中継A"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	for _, e := range loadHistory().Entries {
+		if e.Look != "中継A" {
+			t.Fatalf("%s に見た目が付いていない: %+v", e.ID, e)
+		}
+	}
+	if w := postLook(t, `{"ids":["2222222222222222"],"look":""}`); w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	for _, e := range loadHistory().Entries {
+		want := "中継A"
+		if e.ID == "2222222222222222" {
+			want = ""
+		}
+		if e.Look != want {
+			t.Errorf("%s: 見た目が %q（期待 %q）", e.ID, e.Look, want)
+		}
+	}
+	if w := postLook(t, `{"ids":[],"look":"x"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("ids が空なら 400 のはず: %d", w.Code)
 	}
 }
 
 func TestCoverageHandlerReturnsJSON(t *testing.T) {
 	chdirTemp(t)
-	saveLook(t, "1111111111111111", 40, 30)
-	saveHistoryFile(&HistoryData{Entries: []HistoryEntry{{ID: "1111111111111111"}}})
+	e := saveLook(t, "1111111111111111", 0)
+	e.Look = "中継A"
+	saveHistoryFile(&HistoryData{Entries: []HistoryEntry{e}})
 
 	w := httptest.NewRecorder()
 	handleCoverage(w, httptest.NewRequest(http.MethodGet, "/api/coverage", nil))
@@ -145,7 +261,7 @@ func TestCoverageHandlerReturnsJSON(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rep); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Target != lookTarget || len(rep.Groups) != 1 || rep.Groups[0].Look != "40x30" {
+	if rep.Target != lookTarget || len(rep.Groups) != 1 || rep.Groups[0].Look != "中継A" {
 		t.Fatalf("中身が違う: %+v", rep)
 	}
 }

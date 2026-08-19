@@ -347,6 +347,27 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
     title="認識に使うのは k-NN で、これは学習データを保存した時点で更新されます。NN は /api/recognize の比較用 SFEN にしか使いません。学習には累積サンプル数に比例した時間（現状で 10 分以上）がかかります">
     <input type="checkbox" id="hist-train-nn"> NN（比較用）も学習し直す — 数十分かかります
   </label>
+  <!-- 盤の見た目。**同じ中継・同じゲーム画面かは人にしか決められない**
+       （画像サイズは撮るたびに変わるし、同じ放送でも実盤・大盤・ゲーム画面は別物）。
+       候補は署名から出すが、確定させるのは人（coverage.go） -->
+  <div style="background:#16213e;border:1px solid #2a3a5e;border-radius:4px;padding:10px;margin-bottom:8px">
+    <div style="font-size:12px;color:#bbb;margin-bottom:6px">
+      <b>盤の見た目</b>
+      <span style="color:#888">— 同じ中継・同じゲーム画面には同じ名前を付けてください。
+      認識率は局面数より<b>「同じ見た目が何枚あるか」</b>で決まります。</span>
+      <span id="look-progress" style="color:#888;float:right"></span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+      <input list="look-names" id="look-name" placeholder="見た目の名前（例: NHK杯 大盤 / 中継A の実盤）"
+        style="flex:1;background:#0f3460;border:1px solid #2a3a5e;color:#eee;padding:5px 8px;border-radius:4px;font-size:12px">
+      <datalist id="look-names"></datalist>
+      <button id="btn-look-assign" onclick="assignLook()" disabled
+        title="履歴で選んだ局面に、この名前の見た目を付けます（名前を空にすると未判定に戻します）"
+        style="font-size:12px;background:#2d4a6a;color:#eee;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;white-space:nowrap;opacity:0.4">選択した局面にこの名前を付ける</button>
+    </div>
+    <div id="look-suggest" style="font-size:12px"></div>
+  </div>
+
   <div id="history-list" style="max-height:480px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
   <div id="hist-train-result" style="display:none;margin-top:8px;padding:8px 12px;background:#0f3460;border-radius:4px;font-size:12px;line-height:1.7"></div>
 </div>
@@ -1429,6 +1450,13 @@ function updateTrainHistoryButton() {
   btn.disabled = n === 0;
   btn.style.opacity = n === 0 ? '0.4' : '1';
   btn.textContent = n === 0 ? '選択した局面で学習' : '選択した ' + n + ' 件で学習';
+  // 見た目の判定も同じ選択を使う
+  const look = document.getElementById('btn-look-assign');
+  if (look) {
+    look.disabled = n === 0;
+    look.style.opacity = n === 0 ? '0.4' : '1';
+    look.textContent = n === 0 ? '選択した局面にこの名前を付ける' : `選択した ${n} 件にこの名前を付ける`;
+  }
 }
 
 function toggleAllHistory(on) {
@@ -1950,8 +1978,9 @@ async function refreshCoverage() {
   const groups = data.groups || [];
   coverageByID = {};
   groups.forEach(g => (g.ids || []).forEach(id => {
-    coverageByID[id] = { look: g.look, count: g.count, thin: g.thin };
+    coverageByID[id] = { look: g.look, count: g.count, thin: g.thin, proposed: g.proposed };
   }));
+  renderLookPanel(data);
 
   const el = document.getElementById('coverage-list');
   if (!el) return;
@@ -2009,15 +2038,94 @@ document.getElementById('coverage-list').addEventListener('click', async e => {
   if (chip) await copyIDChip(chip);
 });
 
-// 履歴の行に出す「見た目」バッジ。薄い（lookTarget 未満）ものは橙で目立たせる
+// 履歴の行に出す「見た目」バッジ。
+// 人が付けた名前なら薄い/十分で色分け、未判定なら灰色で「候補」と出す
 function lookBadgeHTML(id) {
   const g = coverageByID[id];
   if (!g) return '';
-  const color = g.thin ? '#f0a030' : '#666';
+  if (g.proposed) {
+    return ` <span style="color:#666;border:1px solid #333;border-radius:3px;padding:0 4px"
+      title="見た目が未判定です。似ている ${g.count} 枚を候補として束ねています（確定させるには名前を付けてください）"
+      >未判定 · 候補${g.count}枚</span>`;
+  }
+  const color = g.thin ? '#f0a030' : '#74c69d';
   return ` <span style="color:${color};border:1px solid #333;border-radius:3px;padding:0 4px"
-    title="同じ見た目（画像サイズ）の局面が ${g.count} 枚。${
-      g.thin ? '薄いので、この盤をあと数枚集めると認識率が上がります' : '厚みは足りています'}"
+    title="同じ見た目の局面が ${g.count} 枚。${
+      g.thin ? 'あと数枚集めるとこの盤の認識率が上がります' : '厚みは足りています'}"
     >${escapeHTML(g.look)} · ${g.count}枚</span>`;
+}
+
+// 見た目の判定パネル（履歴タブ）。
+//
+// **判定は人がやる。** 機械は「似ているかもしれない塊」をサムネイル付きで
+// 並べるだけで、押すと履歴の選択に流し込む。あとは名前を付けて確定させる。
+function renderLookPanel(data) {
+  const prog = document.getElementById('look-progress');
+  if (!prog) return;
+  const groups = data.groups || [];
+  prog.textContent = `判定済み ${data.named} / ${data.total} 局面`;
+  prog.style.color = data.named === data.total ? '#74c69d' : '#f0a030';
+
+  // 既に使った名前は入力補完に出す（表記ゆれで別の見た目に割れないように）
+  document.getElementById('look-names').innerHTML = groups
+    .filter(g => !g.proposed)
+    .map(g => `<option value="${escapeHTML(g.look)}">`).join('');
+
+  // 候補（未判定）を大きい塊から。1 枚だけのものは判断材料が無いので後ろ
+  const proposed = groups.filter(g => g.proposed).sort((a, b) => b.count - a.count);
+  const el = document.getElementById('look-suggest');
+  if (proposed.length === 0) {
+    el.innerHTML = '<div style="color:#74c69d">すべての局面に見た目が付いています。</div>';
+    return;
+  }
+  const shown = proposed.slice(0, lookSuggestShowAll ? proposed.length : 6);
+  el.innerHTML = shown.map(g => `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+      <button class="look-pick" data-ids="${g.ids.join(',')}"
+        title="この ${g.count} 枚を履歴で選択します（違うものが混ざっていたらチェックを外してください）"
+        style="font-size:11px;background:none;border:1px solid #2a5a6a;color:#4cc9f0;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap">${g.count}枚 を選ぶ</button>
+      <div style="display:flex;gap:3px;overflow-x:auto">${
+        g.ids.map(id => `<img src="/api/history/${id}/image" loading="lazy" title="${id}"
+          style="height:40px;border-radius:2px;border:1px solid #2a3a5e">`).join('')}</div>
+    </div>`).join('');
+  if (proposed.length > shown.length || lookSuggestShowAll) {
+    el.innerHTML += `<button id="look-more"
+      style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer;margin-top:4px">${
+        lookSuggestShowAll ? '上位だけ表示' : `残り ${proposed.length - shown.length} 候補も表示`}</button>`;
+    const more = document.getElementById('look-more');
+    if (more) more.onclick = () => { lookSuggestShowAll = !lookSuggestShowAll; refreshCoverage(); };
+  }
+}
+let lookSuggestShowAll = false;
+
+// 候補を履歴の選択に流し込む（学習の選択と同じチェックボックスを使う）
+document.getElementById('look-suggest').addEventListener('click', e => {
+  const btn = e.target.closest('.look-pick');
+  if (!btn) return;
+  const ids = new Set(btn.dataset.ids.split(','));
+  document.querySelectorAll('.hist-sel').forEach(c => { c.checked = ids.has(c.dataset.id); });
+  updateTrainHistoryButton();
+  const first = document.querySelector('.hist-sel:checked');
+  if (first) first.closest('.hist-row').scrollIntoView({ block: 'nearest' });
+  document.getElementById('look-name').focus();
+});
+
+// 選択した局面に見た目の名前を付ける。**名前を空にすると未判定に戻る**
+async function assignLook() {
+  const ids = historySelection();
+  if (ids.length === 0) return;
+  const look = document.getElementById('look-name').value.trim();
+  if (!look && !confirm(`${ids.length} 件の見た目の判定を外しますか？`)) return;
+  const btn = document.getElementById('btn-look-assign');
+  btn.disabled = true;
+  try {
+    await fetch('/api/look', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, look }),
+    });
+  } finally {
+    btn.disabled = false;
+  }
+  await refreshHistory();
 }
 
 async function refreshEvaluations() {

@@ -62,10 +62,27 @@ func TestSameSourceEffect(t *testing.T) {
 		boards = append(boards, bd{e.ID, img, br, suteme.BoardColor(img, br), w,
 			fmt.Sprintf("%dx%d", img.Bounds().Dx(), img.Bounds().Dy())})
 	}
-	// 最も枚数の多いサイズ = 同じ出所のグループ
+	// 同じ出所のグループは `lookGroups` で束ねる（人が付けた見た目が優先、
+	// 無ければ署名の候補）。**画像サイズで代用してはいけない** ——
+	// 撮るたびにサイズが変わるので同じ出所が割れる（`coverage.go` の項）
+	look := map[string]string{}
 	cnt := map[string]int{}
-	for _, b := range boards {
-		cnt[b.size]++
+	named, proposed := lookGroups(h.Entries)
+	for name, ids := range named {
+		for _, id := range ids {
+			look[id] = name
+			cnt[name]++
+		}
+	}
+	for i, ids := range proposed {
+		name := fmt.Sprintf("候補%d", i+1)
+		for _, id := range ids {
+			look[id] = name
+			cnt[name]++
+		}
+	}
+	for i := range boards {
+		boards[i].size = look[boards[i].id]
 	}
 	group := ""
 	for s, n := range cnt {
@@ -73,7 +90,7 @@ func TestSameSourceEffect(t *testing.T) {
 			group = s
 		}
 	}
-	t.Logf("同じ出所とみなすグループ: %s (%d 枚)", group, cnt[group])
+	t.Logf("同じ見た目とみなすグループ: %s (%d 枚)", group, cnt[group])
 
 	eval := func(target bd, train []suteme.TrainingSample) (int, int) {
 		kn := suteme.NewKNN(MergeSamples(train))

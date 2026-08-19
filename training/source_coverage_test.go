@@ -20,14 +20,14 @@ import (
 //
 //	SUTEME_COVERAGE=1 go test -run TestSourceCoverage -timeout 60m -v ./training
 //
-// 出所は画像サイズで代用する（同じ画面をキャプチャすれば一致する。
-// `TestSameSourceEffect` と同じ割り方）。**同じサイズの別物・同じ出所の別サイズは
-// 分けられない**ので、枚数は目安として読むこと。
+// 束ね方は本番と同じ（`lookGroups`）。**人が付けた見た目（`HistoryEntry.Look`）が
+// 優先で、付いていないものは署名の候補**。判定が進んでいないうちは候補ベースの
+// 暫定値なので、数字もそのつもりで読むこと。
 //
 // 2 通りで測る。**1 枚しかない出所ではこの 2 つは同じ値**になる。
 //
-//   - 局面ホールドアウト … その局面だけを学習から外す（同じ出所の他の枚は残る）
-//   - 出所ホールドアウト … 同じサイズの局面を丸ごと外す＝**その盤を初めて見る条件**
+//   - 局面ホールドアウト … その局面だけを学習から外す（同じ見た目の他の枚は残る）
+//   - 見た目ホールドアウト … 同じ見た目の局面を丸ごと外す＝**その盤を初めて見る条件**
 func TestSourceCoverage(t *testing.T) {
 	if os.Getenv("SUTEME_COVERAGE") == "" {
 		t.Skip("SUTEME_COVERAGE が空なのでスキップ（調査用）")
@@ -73,19 +73,37 @@ func TestSourceCoverage(t *testing.T) {
 		byEntry[e.ID] = MergeSamples(s)
 		b := e.BoardBounds
 		boards = append(boards, board{
-			id:     e.ID,
-			img:    img,
-			br:     suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2),
-			want:   want,
-			source: fmt.Sprintf("%dx%d", img.Bounds().Dx(), img.Bounds().Dy()),
+			id:   e.ID,
+			img:  img,
+			br:   suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2),
+			want: want,
 		})
 	}
 
+	// 本番と同じ束ね方。人が付けた名前が優先、無ければ署名の候補
+	named, proposed := lookGroups(h.Entries)
 	source := make(map[string]string, len(boards))
 	count := make(map[string]int, len(boards))
-	for _, b := range boards {
-		source[b.id] = b.source
-		count[b.source]++
+	for look, ids := range named {
+		for _, id := range ids {
+			source[id] = look
+			count[look]++
+		}
+	}
+	for i, ids := range proposed {
+		look := fmt.Sprintf("候補%d", i+1)
+		for _, id := range ids {
+			source[id] = look
+			count[look]++
+		}
+	}
+	for i := range boards {
+		if s, ok := source[boards[i].id]; ok {
+			boards[i].source = s
+		} else {
+			boards[i].source = "（不明）" // 署名が作れなかった局面
+			count["（不明）"]++
+		}
 	}
 
 	// score は指定した局面を、除外条件つきの k-NN で読んだときの一致マス数
@@ -159,11 +177,11 @@ func TestSourceCoverage(t *testing.T) {
 		return pct(a.sourceOK, a.sourceAll) < pct(b.sourceOK, b.sourceAll)
 	})
 
-	t.Logf("局面 %d / 出所 %d", len(boards), len(stats))
-	t.Logf("%-12s %4s %10s %10s", "出所", "枚数", "局面LOO", "出所LOO")
+	t.Logf("局面 %d / 見た目 %d（人が判定済み %d）", len(boards), len(stats), len(named))
+	t.Logf("%-16s %4s %10s %10s", "見た目", "枚数", "局面LOO", "見た目LOO")
 	for _, s := range keys {
 		st := stats[s]
-		t.Logf("%-12s %4d %9.1f%% %9.1f%%", s, st.n,
+		t.Logf("%-16s %4d %9.1f%% %9.1f%%", s, st.n,
 			pct(st.entryOK, st.entryAll), pct(st.sourceOK, st.sourceAll))
 	}
 
@@ -185,7 +203,7 @@ func TestSourceCoverage(t *testing.T) {
 	}
 	sort.Ints(sizes)
 	t.Logf("--- 枚数ごとの平均 ---")
-	t.Logf("%4s %6s %10s %10s", "枚数", "出所数", "局面LOO", "出所LOO")
+	t.Logf("%4s %6s %10s %10s", "枚数", "見た目数", "局面LOO", "見た目LOO")
 	for _, n := range sizes {
 		agg := byCount[n]
 		t.Logf("%4d %6d %9.1f%% %9.1f%%", n, agg.n,
