@@ -16,8 +16,17 @@ const detectTolCells = 0.5
 // 保存済み局面（data/）の手動指定座標を正解として DetectBoard のズレを測る。
 // 位置（左上）と大きさの両方を1マスを単位とした比で見る。
 //
+// **帯の判定器（`unslipByJudge`）は外して測る。** カレントに
+// `strip_data_v1.bin` があるかどうかで結果が変わると、同じテストが
+// 環境によって違う数字を出すことになる。判定器を入れた効果は
+// `training` の `TestUnslipHoldout` が leave-one-out で測る
+// （全件で作った判定器では自分の帯が最近傍に来るので、ここで測っても意味が無い）。
+//
 // data/ は .gitignore 対象なので、無ければスキップする。
 func TestDetectBoardMatchesManual(t *testing.T) {
+	SetStripJudge(nil) // nil = 判定器を使わない
+	t.Cleanup(ResetStripJudge)
+
 	dir := findDataDir()
 	if dir == "" {
 		t.Skip("data/history.json が無いのでスキップ")

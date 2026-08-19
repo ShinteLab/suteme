@@ -118,6 +118,8 @@ var (
 	// （loadExistingTrainingData）。書き出しは常に dataFile。
 	dataFile  = suteme.DefaultDataFile
 	modelFile = suteme.DefaultModelFile
+	// stripFile は盤の縁の帯の教師データ。**駒種の学習データとは別**
+	stripFile = suteme.DefaultStripFile
 	modelLock sync.RWMutex
 	historyMu sync.RWMutex
 )
@@ -134,6 +136,13 @@ func Serve(port string) error {
 		if kn := suteme.NewKNN(data.Samples); kn != nil {
 			knn = kn
 			log.Printf("Built k-NN from %d samples in %s", kn.Len(), dataPath)
+		}
+	}
+	// 盤の縁の帯の判定器（1マス滑りの補正）。無ければ補正しないだけ
+	if ss, err := suteme.LoadStripData(stripFile); err == nil {
+		if j := suteme.NewStripJudge(ss); j != nil {
+			suteme.SetStripJudge(j)
+			log.Printf("Loaded strip judge from %s (%d strips)", stripFile, j.Samples())
 		}
 	}
 	// 起動時に保存済みモデルを読み込む
@@ -1032,9 +1041,23 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 		modelLock.Unlock()
 	}
 
+	// 盤の縁の帯（1マス滑りの判定器）も作り直す。
+	// **選んだ局面ではなく確認済みの全局面から毎回ゼロで作る**
+	// （1 局面あたり 8 本しか無いので数秒。累積すると消した局面の帯が残る）。
+	stripCount, err := rebuildStripData()
+	if err != nil {
+		// **ここで失敗しても学習は成功扱いにする。** 帯データは history から
+		// いつでも作り直せるうえ、無ければ滑りの補正をしないだけで検出は動く
+		log.Printf("Strip data rebuild failed: %v", err)
+	}
+	if stripCount > 0 {
+		log.Printf("Rebuilt strip data: %d strips", stripCount)
+	}
+
 	res := map[string]interface{}{
 		"status":     "ok",
 		"samples":    len(data.Samples),
+		"strips":     stripCount,
 		"duplicates": duplicates,
 		// 分布は生データから出す。NN を回さない場合も学習データの中身は見たい
 		"distribution": ClassDistribution(data.Samples),

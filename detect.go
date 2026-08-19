@@ -40,7 +40,7 @@ func DetectBoard(img image.Image) *BoardRegion {
 	whole := detectBoardIn(edges, img.Bounds())
 	wholeConf := ValidateBoard(img, whole)
 	if wholeConf >= segSkipConfidence {
-		return snapToOuterFrame(img, unslipRegion(img, whole))
+		return finishRegion(img, whole)
 	}
 
 	set := &candidateSet{}
@@ -62,7 +62,20 @@ func DetectBoard(img image.Image) *BoardRegion {
 	// 135 局面で 131 → 130 と差し引き悪くなる。
 	// なお `e0302032` は逆に、票で選んだ正しい窓 (473,166)-(1082,854)（0.44マス）を
 	// snap が (465,101)-(1081,756)（0.72マス）へ動かしてしまう例（後述の課題）
-	return snapToOuterFrame(img, unslipRegion(img, best.br))
+	return finishRegion(img, best.br)
+}
+
+// finishRegion は検出した窓の仕上げ。3 つとも「1マスの滑り」を直すもので、
+// **効く場面が別々なので順に通す**。
+//
+//  1. `unslipRegion` … 画像からはみ出していたら 1マス内側へ戻す（幾何）
+//  2. `snapToOuterFrame` … 10本のうち最弱の線がはっきり強くなるなら乗り換える（線）
+//  3. `unslipByJudge` … 盤の縁の帯が盤らしいほうへ乗り換える（学習）
+//
+// 3 は帯の教師データ（`strip_data_v1.bin`）が無ければ**何もしない**ので、
+// 判定器を置いていない環境の挙動は 1・2 までと変わらない。
+func finishRegion(img image.Image, br *BoardRegion) *BoardRegion {
+	return unslipByJudge(img, snapToOuterFrame(img, unslipRegion(img, br)), defaultStripJudge())
 }
 
 // candTolCells は 2 つの候補を「同じ窓」とみなす差（マス単位）。
