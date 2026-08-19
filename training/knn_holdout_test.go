@@ -183,7 +183,7 @@ func TestKNNHoldout(t *testing.T) {
 				if cat, _ := bo.Classify(cell, bc, nil); cat == suteme.CellEmpty {
 					pieceAsEmptyByClassifier++
 				}
-				// 向きの反転。回転照合（OrientMarginMin）が効いているかを見る
+				// 向きの反転。回転照合が効いているかを見る（分類器のみとの差）
 				wantDown := strings.HasPrefix(want[r][c], "-")
 				if got != suteme.EmptyLabel && strings.HasPrefix(got, "-") != wantDown {
 					orientFlips++

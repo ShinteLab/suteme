@@ -96,8 +96,10 @@ func ClassifyCellWith(cell image.Image, boardColor uint8) CellCategory {
 //
 // **向きを外したマスはこの値が小さいほうに偏る。** 実測（保存済み36局面 /
 // 1202 駒マス）で、値が 0.08 未満の 85 マスに反転 47 件のうち 23 件が入る。
-// 呼び出し側はこれを見て別の手掛かり（`recognize.go` の回転照合など）に
-// 切り替えられる。
+//
+// **かつてはこの値で「回転照合に回すマス」を選んでいたが、いまは使っていない。**
+// 向きは常に回転照合で決める（`classifyCellOrient`）。この確信度は
+// 観測用として残してある。
 func ClassifyCellDetail(cell image.Image, boardColor uint8) (CellCategory, float64) {
 	return classifyCellDetail(cell, boardColor, emptyCoverMax)
 }
@@ -111,8 +113,9 @@ func classifyCellDetail(cell image.Image, boardColor uint8, emptyMax float64) (C
 }
 
 // classifyCellMask は一次マスク（signBoth）を作り終えたところから先。
-// 盤ごとのしきい値を決めるために被覆率を先に取る呼び出し側
-// （`NewBoardOrient`）が、同じマスクを作り直さずに済むように分けてある。
+// 盤ごとのしきい値を決めるために 81 マスの被覆率を先に取る呼び出し側
+// （`ClassifyBoard` / `boardCells`）が、同じマスクを作り直さずに済むように
+// 分けてある。
 func classifyCellMask(cell image.Image, boardColor, local uint8, m *cellMask, emptyMax float64) (CellCategory, float64) {
 	if m == nil || m.cover < emptyMax {
 		return CellEmpty, 0

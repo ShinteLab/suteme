@@ -12,7 +12,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/ShinteLab/core/sfen"
@@ -374,105 +373,94 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 	return bestClass, bestConf
 }
 
-// OrientMarginMin は確信度（`ClassifyCellDetail`）がこの値未満のとき
-// 向きを回転照合で決め直す、という**盤の情報が無いとき用の既定値**。
+// BoardOrient は盤ごとの空判定の境目（`BoardEmptyCover`）を持つ。
 //
-// 盤全体を扱えるなら `NewBoardOrient` を使うこと（そちらは盤ごとに境目を決める）。
-const OrientMarginMin = 0.08
-
-// OrientMarginQuantile は向きを回転照合で決め直すマスの割合。
-//
-// **分類器の向き判定は上下半分の幅の差で決まるので、差が小さいマスだけが
-// 危ない。** ここまでは定数のしきい値（`OrientMarginMin`）で切っていたが、
-// **確信度は盤ごとにスケールが違うので定数では切れない。**
-// 確信度は「上下の幅の差 ÷ 駒の最大幅」なので、駒の五角形の尖りが浅く
-// 描かれた盤では駒がはっきり写っていても値が小さいほうへ寄る。実測で、
-// 橙の中継の駒 110 マスは中央値 0.074・9割が 0.100 以下しかなく、
-// 定数 0.08 だと 75 マス（68%）が回転照合送りになっていた。
-// 回転照合は未知の盤に弱いので、この盤の向き判定は 92.7% → 80.7% に落ちる。
-//
-// そこで**その盤の確信度の分布の下から何割か**を決め直す形にする。
-// 分位点にすれば、確信度が全体に小さい盤でも「その盤の中で弱いマス」だけが
-// 選ばれ、確信度がよく開く盤では逆に多めに拾える。
-// 出所ごと学習から外した実測（51局面 / 駒 1673 マス、向きの誤り件数）:
-//
-//	                     木目   橙   その他   全体
-//	分類器のみ            15    8     69      92
-//	回転照合のみ           2   28     44      74
-//	固定 0.08（旧）       11   21     44      76
-//	盤ごと分位点 0.15      13    7     48      68
-//	**盤ごと分位点 0.25** 12    9     44      65
-//	盤ごと分位点 0.30     10    9     44      63
-//
-// 0.30 まで上げてもわずかに良くなるが、そちらは回転照合の比重が上がって
-// 未知の盤で崩れやすい側に寄る。橙が最も良い 0.15 と合わせて 0.25 を採る。
-const OrientMarginQuantile = 0.25
-
-// BoardOrient は盤ごとの向き判定。
-//
-// 盤の全マスの確信度を先に見て、下から `OrientMarginQuantile` 分を
-// 「回転照合で決め直すマス」として切る境目を持つ。
-// あわせて空判定の境目（`BoardEmptyCover`）も盤ごとに決める。
+// **向きは回転照合（`OrientationMatcher`）で決める。分類器の向き判定は
+// 照合できないときの控えでしかない。** 以前はここに「確信度が盤の下位
+// 25% のマスだけ回転照合に回す」という境目（`OrientMarginQuantile`）を
+// 持っていたが、局面が増えて回転照合が単独で分類器を大きく上回ったので
+// 不要になった（`classifyCellOrient` の実測表）。
 type BoardOrient struct {
-	marginMin float64
-	emptyMax  float64
+	emptyMax float64
 }
 
-// NewBoardOrient は盤の全マスの確信度から決め直す境目を求める。
-// 駒マスが無ければ既定値（`OrientMarginMin`）にしておく。
+// NewBoardOrient は盤ごとの空判定の境目を求める。
 func NewBoardOrient(img image.Image, br *BoardRegion, boardColor uint8) *BoardOrient {
 	if img == nil || br == nil {
-		return &BoardOrient{marginMin: OrientMarginMin, emptyMax: emptyCoverMax}
+		return &BoardOrient{emptyMax: emptyCoverMax}
 	}
-	// 確信度は空マスでは 0 なので、先に空判定の境目を決めてから拾う
-	// （境目が動くと駒として拾うマスも変わる）。
-	works, emptyMax := boardCells(img, br, boardColor)
-	margins := make([]float64, 0, 81)
-	for _, w := range works {
-		if cat, margin := classifyCellMask(w.img, boardColor, w.local, w.mask, emptyMax); cat != CellEmpty {
-			margins = append(margins, margin)
-		}
-	}
-	if len(margins) == 0 {
-		return &BoardOrient{marginMin: OrientMarginMin, emptyMax: emptyMax}
-	}
-	sort.Float64s(margins)
-	return &BoardOrient{
-		marginMin: margins[int(OrientMarginQuantile*float64(len(margins)-1))],
-		emptyMax:  emptyMax,
-	}
+	return &BoardOrient{emptyMax: BoardEmptyCover(img, br, boardColor)}
 }
 
 // Classify はマスを 空/先手/後手 に分類する。
-// byMatch は向きを回転照合で決め直したかどうか（観測用。`CellDebug.OrientBy`）。
+// byMatch は向きを回転照合で決めたかどうか（観測用。`CellDebug.OrientBy`）。
 func (bo *BoardOrient) Classify(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
-	return classifyCellMargin(cell, boardColor, bo.marginMin, bo.emptyMax, m)
+	return classifyCellOrient(cell, boardColor, bo.emptyMax, m)
 }
 
 // ClassifyCellFor は推論器も使ってマスを 空/先手/後手 に分類する。
 //
 // **空/先手/後手 を出すところは必ずこれか `BoardOrient.Classify` を通すこと。**
-// `ClassifyCellWith` は画像処理だけの一次判定で、確信度が足りないマスの向きは
-// 推論器との回転照合で決め直される。素の `ClassifyCellWith` を別途呼ぶと
-// `RecognizeBoard` が返す SFEN と食い違う。
+// `ClassifyCellWith` は画像処理だけの一次判定で、向きは推論器との回転照合で
+// 決め直される。素の `ClassifyCellWith` を別途呼ぶと `RecognizeBoard` が返す
+// SFEN と食い違う。
 //
-// 盤全体を扱えるなら `NewBoardOrient` のほうが精度が高い（`OrientMarginQuantile`）。
-// こちらは 1 マスだけを見るので定数のしきい値で切るしかない。
+// 盤全体を扱えるなら `NewBoardOrient` のほうが精度が高い
+// （空判定の境目を盤ごとに引き直せる）。
 func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
-	return classifyCellMargin(cell, boardColor, OrientMarginMin, emptyCoverMax, m)
+	return classifyCellOrient(cell, boardColor, emptyCoverMax, m)
 }
 
-func classifyCellMargin(cell image.Image, boardColor uint8, marginMin, emptyMax float64, m Predictor) (CellCategory, bool) {
-	cat, margin := classifyCellDetail(cell, boardColor, emptyMax)
-	if cat == CellEmpty || margin >= marginMin {
+// classifyCellOrient は空/駒を分類器で決め、駒の向きは回転照合で決める。
+//
+// **向きは回転照合が主で、分類器（上下半分の幅の差）は照合できないときの控え。**
+// 学習データは後手の駒を `Rotate180` して先手向きに揃えてあるので、
+// そのままのほうが近ければ先手、180度回した版のほうが近ければ後手。
+//
+// **以前は逆で、分類器を主にして「確信度が低いマスだけ」照合に回していた**
+// （`OrientMarginQuantile` = 盤ごとの下位 25%）。**局面が増えたので測り直したら
+// 逆転していた。** 回転照合は同じ駒の絵を一度見ていれば当たるので、
+// 出所ごとの枚数が増えるほど強くなる。一方で分類器は画像処理なので
+// データが増えても変わらない。実測（141局面 / 4761 駒マス、向きの誤り件数。
+// `TestOrientDump` が書き出した材料で数え直したもの）:
+//
+//	                        局面ホールドアウト   出所ホールドアウト
+//	分類器のみ                    275                275
+//	**回転照合のみ（現在）**       41                 60
+//	分位点 0.25（旧）             147                156
+//	どちらも外す（oracle）         22                 28
+//
+// 51局面の頃は「分類器のみ 92 / 回転照合のみ 74 / 分位点 65」で、
+// 混ぜたほうが良かった。**同じ測り方でも局面数が違えば結論が変わる**ので、
+// この表は局面数とセットで読むこと。
+//
+// **確信度を足し合わせる形（`mscore + w * 分類器の確信度`）は測って駄目だった。**
+// 分類器の確信度を盤ごとの分位点に直して足しても、w を上げるほど単調に悪化する
+// （局面ホールドアウトで w=0.05 → 41、0.1 → 44、0.2 → 60、0.5 → 89、1.0 → 118）。
+// 分類器の誤りは回転照合の誤りをほぼ包含していて、足すぶんだけ濁る。
+//
+// **「照合が拮抗しているマスだけ分類器に返す」も効きが薄い。** 距離の差の比
+// |(up-down)/(up+down)| が 0.02 以下のとき分類器を採ると 41 → 38 / 60 → 56 に
+// なるが、4761 マス中 3〜4 件のために定数がもう 1 つ増えるので採らない
+// （0.05 まで緩めると 43 / 58 で逆に悪くなる。最適が狭い）。
+//
+// **盤ごとに「その盤を見たことがあるか」で切り替えるのも駄目だった。**
+// 最近傍距離の中央値が大きい盤＝未知の出所とみなして分類器に任せる形にしても、
+// 回転照合が良い盤（0.42〜0.44）のほうが悪い盤（0.32）より距離が遠く、
+// しきい値を置ける並びになっていない。
+//
+// **代償は推論時間。** 全駒マスで最近傍探索を 2 回（そのまま / 180度）走らせるので、
+// 分位点で 25% だけ回していた頃より増える。実測は `TestKNNHoldout` で
+// 219s → 243s（+11%。141局面 × 81マス、駒種の推論も含めた全体）。
+func classifyCellOrient(cell image.Image, boardColor uint8, emptyMax float64, m Predictor) (CellCategory, bool) {
+	cat, _ := classifyCellDetail(cell, boardColor, emptyMax)
+	if cat == CellEmpty {
 		return cat, false
 	}
 	om, ok := m.(OrientationMatcher)
 	if !ok {
 		return cat, false
 	}
-	// 学習データは後手の駒を Rotate180 して先手向きに揃えてあるので、
-	// そのままのほうが近ければ先手、180度回した版のほうが近ければ後手
 	up := om.PieceDistance(cell)
 	down := om.PieceDistance(Rotate180(cell))
 	if math.IsInf(up, 1) && math.IsInf(down, 1) {
@@ -486,7 +474,8 @@ func classifyCellMargin(cell image.Image, boardColor uint8, marginMin, emptyMax 
 
 // RecognizeBoard は盤面全体を認識してSFENを返す
 //
-// 空/向きは ClassifyCellWith が一次判定し、駒種は Predictor（NN または k-NN）で
+// 空/駒は ClassifyCellWith が判定し、向きは Predictor との回転照合
+// （`classifyCellOrient`）で決める。駒種は Predictor（NN または k-NN）で
 // 推論する。Predictor が空クラス（ClassEmpty）を返した場合は分類より優先して
 // 空とする。グリッド線や木目で被覆率が上がったマスは、被覆率では駒と分離できないが
 // 画素の並びは既知の空マスと一致するため、学習済みの空パターンのほうが確かなため。
@@ -604,4 +593,11 @@ func resizeGray(src image.Image, w, h int) *image.Gray {
 		}
 	}
 	return dst
+}
+
+// Detail は盤ごとの空判定の境目を使った `ClassifyCellDetail`。
+// 分類器だけの判定（空/先手/後手 と向きの確信度）が要る呼び出し側のためのもので、
+// 認識そのものは `Classify` を通すこと。
+func (bo *BoardOrient) Detail(cell image.Image, boardColor uint8) (CellCategory, float64) {
+	return classifyCellDetail(cell, boardColor, bo.emptyMax)
 }
