@@ -173,6 +173,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/evaluate", handleEvaluate)
 	mux.HandleFunc("/api/evaluations", handleEvaluations)
 	mux.HandleFunc("/api/evaluations/", handleEvaluations)
+	mux.HandleFunc("/api/coverage", handleCoverage)
 	mux.HandleFunc("/api/negative", handleNegatives)
 	mux.HandleFunc("/api/negative/", handleNegativeItem)
 	mux.HandleFunc("/api/status", handleStatus)

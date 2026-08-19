@@ -231,6 +231,25 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
     </div>
   </div>
 
+  <!-- 盤の見た目ごとの厚み。**認識率は局面数より「同じ見た目が何枚あるか」で決まる**
+       ので、次にどの盤を撮るべきかをここで示す（coverage.go）。
+       成績は最新の評価実行から取るので、評価を回さないと数字は入らない -->
+  <div style="background:#16213e;border:1px solid #2a3a5e;border-radius:4px;padding:12px;margin-bottom:12px">
+    <div style="font-size:12px;color:#bbb;margin-bottom:8px">
+      <b>盤の見た目ごとの厚み</b>
+      <span style="color:#888">— 認識率は<b>局面数より「同じ見た目の盤が何枚あるか」</b>で決まります
+      （同じ出所 1 枚が他所 111 枚に匹敵）。薄くて読めていない見た目が上に出ます。</span>
+      <span id="coverage-count" style="color:#888;float:right"></span>
+    </div>
+    <div id="coverage-list" style="overflow-x:auto"></div>
+    <div style="font-size:11px;color:#777;margin-top:8px;line-height:1.7">
+      「見た目」は<b>画像サイズで代用</b>しています（同じ画面をキャプチャすれば一致する）。
+      同じサイズの別物・同じ出所の別サイズは分けられないので枚数は目安です。
+      一致率は<b>最新の評価実行</b>の手動座標での成績で、評価を回すまでは空欄になります。
+      <b>この表は「誰が登録したか」（API / UI）とは別</b>で、どの画面を写したものかで束ねています。
+    </div>
+  </div>
+
   <div style="font-size:12px;color:#888;margin-bottom:4px">
     <b style="color:#bbb">手動</b> = 保存してある盤面座標を与えたときの認識率（認識器そのものの成績）。
     <b style="color:#bbb">自動</b> = 検出から通した端から端まで。<b>盤面を検出できなかった局面は 0/81</b> として数えます。
@@ -1364,6 +1383,7 @@ async function refreshHistory() {
   const res = await fetch('/api/history');
   const data = await res.json();
   const latest = await latestEvalByEntry();
+  await refreshCoverage(); // 行に出す「見た目」バッジのため
   const list = document.getElementById('history-list');
   if (!data.entries || data.entries.length === 0) {
     list.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:10px">保存した局面はありません</div>';
@@ -1381,7 +1401,7 @@ async function refreshHistory() {
       <span class="hist-check">${done ? '○' : ''}</span>
       <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
       <div style="flex:1;min-width:0">
-        <div style="font-size:11px;color:#888">${idChipHTML(e.id, 'margin-right:6px')}${e.created_at}${
+        <div style="font-size:11px;color:#888">${idChipHTML(e.id, 'margin-right:6px')}${e.created_at}${lookBadgeHTML(e.id)}${
           unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。「再入力」で解析タブに読み込んで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
         <div style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
              title="${e.sfen}">${e.sfen}</div>
@@ -1916,8 +1936,93 @@ async function markCurrentAsNegative() {
   } finally { btn.disabled = false; }
 }
 
+// 盤の見た目ごとの厚み（/api/coverage）。
+//
+// **次にどの盤を撮るべきかを決めるための表。** 認識率は局面数より
+// 「同じ見た目の盤が何枚あるか」で決まるので、薄くて読めていない見た目を上に出す。
+// 履歴タブの行に出すバッジも同じデータから作る（id → 見た目）。
+let coverageByID = {};
+let coverageShowAll = false;
+
+async function refreshCoverage() {
+  let data;
+  try { data = await (await fetch('/api/coverage')).json(); } catch (_) { return; }
+  const groups = data.groups || [];
+  coverageByID = {};
+  groups.forEach(g => (g.ids || []).forEach(id => {
+    coverageByID[id] = { look: g.look, count: g.count, thin: g.thin };
+  }));
+
+  const el = document.getElementById('coverage-list');
+  if (!el) return;
+  const thin = groups.filter(g => g.thin).length;
+  document.getElementById('coverage-count').textContent = groups.length
+    ? `${groups.length} 通り・${thin} 通りが ${data.target} 枚未満` : '';
+  if (groups.length === 0) {
+    el.innerHTML = '<div style="color:#555;font-size:12px">保存した局面はありません</div>';
+    return;
+  }
+  const shown = coverageShowAll ? groups : groups.slice(0, 12);
+  const rateCell = g => {
+    if (g.rate < 0) return '<span style="color:#555" title="最新の評価に含まれていません">—</span>';
+    const c = g.rate < 0.9 ? '#ff8080' : (g.rate < 0.97 ? '#f0a030' : '#74c69d');
+    return `<span style="color:${c}">${(100 * g.rate).toFixed(1)}%</span>
+      <span style="color:#666;font-size:11px">${g.ok}/${g.cells}</span>`;
+  };
+  let html = `<table class="piece-table" style="font-size:12px">
+    <tr><th title="画像サイズで代用した「見た目」">見た目</th>
+    <th title="この見た目の局面が何枚あるか">枚数</th>
+    <th title="最新の評価実行での手動座標での一致率">一致率</th>
+    <th>局面</th></tr>`;
+  html += shown.map(g => {
+    const count = g.thin
+      ? `<span style="color:#f0a030" title="あと ${data.target - g.count} 枚">${g.count} / ${data.target}</span>`
+      : `<span style="color:#74c69d">${g.count}</span>`;
+    return `<tr><td style="white-space:nowrap;font-family:monospace">${escapeHTML(g.look)}</td>
+      <td>${count}</td><td style="white-space:nowrap">${rateCell(g)}</td>
+      <td>${(g.ids || []).slice(0, 5).map(id => idChipHTML(id, 'margin-right:4px')).join('')}${
+        (g.ids || []).length > 5 ? `<span style="color:#666">+${g.ids.length - 5}</span>` : ''}</td></tr>`;
+  }).join('');
+  html += '</table>';
+  if (groups.length > shown.length || coverageShowAll) {
+    html += `<div style="margin-top:6px"><button id="coverage-more"
+      style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer">${
+        coverageShowAll ? '上位だけ表示' : `残り ${groups.length - shown.length} 通りも表示`}</button></div>`;
+  }
+  // 数字の出どころ。**leave-one-out を外した実行は学習済みの局面で高く出る**ので、
+  // どの実行の数字かを必ず添える
+  if (data.run) {
+    html += `<div style="font-size:11px;color:#666;margin-top:6px">一致率の出どころ:
+      ${escapeHTML(data.run.created_at)} ${escapeHTML(data.run.label)}${
+        data.run.holdout ? '（leave-one-out）'
+          : '<span style="color:#f0a030">（leave-one-out 無し ＝ 学習済みの局面は高く出ます）</span>'}</div>`;
+  } else {
+    html += '<div style="font-size:11px;color:#666;margin-top:6px">評価をまだ実行していないので一致率は空欄です。</div>';
+  }
+  el.innerHTML = html;
+  const more = document.getElementById('coverage-more');
+  if (more) more.onclick = () => { coverageShowAll = !coverageShowAll; refreshCoverage(); };
+}
+
+document.getElementById('coverage-list').addEventListener('click', async e => {
+  const chip = e.target.closest('.id-chip');
+  if (chip) await copyIDChip(chip);
+});
+
+// 履歴の行に出す「見た目」バッジ。薄い（lookTarget 未満）ものは橙で目立たせる
+function lookBadgeHTML(id) {
+  const g = coverageByID[id];
+  if (!g) return '';
+  const color = g.thin ? '#f0a030' : '#666';
+  return ` <span style="color:${color};border:1px solid #333;border-radius:3px;padding:0 4px"
+    title="同じ見た目（画像サイズ）の局面が ${g.count} 枚。${
+      g.thin ? '薄いので、この盤をあと数枚集めると認識率が上がります' : '厚みは足りています'}"
+    >${escapeHTML(g.look)} · ${g.count}枚</span>`;
+}
+
 async function refreshEvaluations() {
   refreshNegatives();
+  refreshCoverage();
   const data = await (await fetch('/api/evaluations')).json();
   evalRuns = data.runs || [];
   const el = document.getElementById('eval-runs');
