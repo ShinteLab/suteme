@@ -1420,7 +1420,7 @@ async function refreshHistory() {
       <div class="hist-sel-cell" title="${unverified ? '未確認の局面は学習に使えません' : '学習に使う'}">
         <input type="checkbox" class="hist-sel" data-id="${e.id}" ${unverified ? 'disabled' : ''}></div>
       <span class="hist-check">${done ? '○' : ''}</span>
-      <img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy">
+      <a href="/api/history/${e.id}/image" target="_blank" rel="noopener" title="元画像を別ウィンドウで開く（URL に局面 ID が入ります）"><img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy"></a>
       <div style="flex:1;min-width:0">
         <div style="font-size:11px;color:#888">${idChipHTML(e.id, 'margin-right:6px')}${e.created_at}${lookBadgeHTML(e.id)}${
           unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。「再入力」で解析タブに読み込んで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
@@ -1536,6 +1536,11 @@ document.getElementById('history-list').addEventListener('click', async e => {
   if (del) {
     e.stopPropagation();
     await deleteHistory(del.dataset.id);
+    return;
+  }
+  // サムネイルは元画像へのリンク。行の選択には流さない
+  if (e.target.closest('a')) {
+    e.stopPropagation();
     return;
   }
   // 再入力（解析タブへ）は明示的に押したときだけ
@@ -1916,8 +1921,9 @@ async function refreshNegatives() {
   el.innerHTML = ids.length === 0
     ? '<div style="color:#555;font-size:12px">まだ登録されていません</div>'
     : ids.map(id => `<div style="position:relative">
-        <img src="/api/negative/${id}/image" title="${id}"
-          style="height:64px;border-radius:3px;display:block;border:1px solid #2a3a5e">
+        <a href="/api/negative/${id}/image" target="_blank" rel="noopener"
+          title="${id}（クリックで元画像を別ウィンドウ）"><img src="/api/negative/${id}/image"
+          style="height:64px;border-radius:3px;display:block;border:1px solid #2a3a5e"></a>
         <button class="negative-del" data-id="${id}" title="この負例を削除する"
           style="position:absolute;top:2px;right:2px;font-size:10px;line-height:1;background:#6a2d3a;color:#fff;border:none;padding:2px 4px;border-radius:3px;cursor:pointer">×</button>
         <div style="text-align:center;margin-top:2px">${idChipHTML(id)}</div>
@@ -2084,8 +2090,9 @@ function renderLookPanel(data) {
         title="この ${g.count} 枚を履歴で選択します（違うものが混ざっていたらチェックを外してください）"
         style="font-size:11px;background:none;border:1px solid #2a5a6a;color:#4cc9f0;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap">${g.count}枚 を選ぶ</button>
       <div style="display:flex;gap:3px;overflow-x:auto">${
-        g.ids.map(id => `<img src="/api/history/${id}/image" loading="lazy" title="${id}"
-          style="height:40px;border-radius:2px;border:1px solid #2a3a5e">`).join('')}</div>
+        g.ids.map(id => `<a href="/api/history/${id}/image" target="_blank" rel="noopener"
+          title="${id}（クリックで元画像を別ウィンドウ）"><img src="/api/history/${id}/image" loading="lazy"
+          style="height:40px;border-radius:2px;border:1px solid #2a3a5e"></a>`).join('')}</div>
     </div>`).join('');
   if (proposed.length > shown.length || lookSuggestShowAll) {
     el.innerHTML += `<button id="look-more"
