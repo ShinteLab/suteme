@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>suteme-test</title>
 <style>
+/* 画面の幅。**ラベリングは駒が見えないと判断できない**ので広く取る。
+   600px だった頃は 9 マスで 1 マス 64px しかなく、成駒の判別が厳しかった。
+   --board-width は盤（9x9）の幅で、1 マス = これ / 9 になる */
+:root { --page-width: 1200px; --board-width: 1000px; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
 h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 0.1em; }
@@ -32,14 +36,14 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .card h3 { padding: 6px 12px; background: #0f3460; font-size: 13px; font-weight: 500; }
 .card img { width: 100%; display: block; }
 
-.cells-section { max-width: 800px; margin: 0 auto; }
+.cells-section { max-width: var(--page-width); margin: 0 auto; }
 .cells-section h2 {
   font-size: 16px; font-weight: 400; margin-bottom: 12px;
   padding-bottom: 8px; border-bottom: 1px solid #333;
 }
 .cell-grid {
   display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px;
-  max-width: 600px; margin: 0 auto;
+  max-width: var(--board-width); margin: 0 auto;
 }
 .cell {
   background: #16213e; border-radius: 4px; overflow: hidden; text-align: center;
@@ -132,7 +136,7 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 .eval-src.exact { color: #f0a030; border-color: #6a4a1a; }
 .count-warn { color: #d00000 !important; font-weight: bold; }
 .cell-preview { width: 64px; height: 64px; object-fit: contain; border: 1px solid #333; border-radius: 4px; vertical-align: middle; margin-right: 8px; }
-.tab-bar { display: flex; gap: 4px; max-width: 600px; margin: 0 auto 16px; border-bottom: 2px solid #2a3a5e; }
+.tab-bar { display: flex; gap: 4px; max-width: var(--page-width); margin: 0 auto 16px; border-bottom: 2px solid #2a3a5e; }
 .tab-btn {
   background: none; border: none; color: #888; padding: 8px 24px;
   font-size: 14px; font-weight: 600; cursor: pointer;
@@ -189,7 +193,7 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <button class="tab-btn" id="tab-btn-api" onclick="switchTab('api')">API</button>
 </div>
 
-<div id="tab-eval" style="display:none;max-width:860px;margin:0 auto 20px">
+<div id="tab-eval" style="display:none;max-width:var(--page-width);margin:0 auto 20px">
   <div style="font-size:12px;color:#888;line-height:1.8;margin-bottom:12px">
     保存済み局面の正解 SFEN と突き合わせて認識率を測り、実行ごとに記録します。
     モデルや認識ロジックを変えたあとに実行すると、前回との差が下の表に並びます。
@@ -264,7 +268,7 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
   <div id="eval-detail" style="margin-top:12px"></div>
 </div>
 
-<div id="tab-api" style="display:none;max-width:600px;margin:0 auto 20px">
+<div id="tab-api" style="display:none;max-width:800px;margin:0 auto 20px">
   <div style="font-size:12px;color:#888;line-height:1.8;margin-bottom:12px">
     外部（ikkyoku など）から訓練データを登録するための口です。
     登録された局面は履歴に <span style="color:#f0a030">未確認</span> として入り、
@@ -330,7 +334,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   </details>
 </div>
 
-<div id="tab-history" style="display:none;max-width:600px;margin:0 auto 20px">
+<div id="tab-history" style="display:none;max-width:var(--page-width);margin:0 auto 20px">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
     <label style="font-size:12px;color:#bbb;display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap">
       <input type="checkbox" id="hist-select-all" onchange="toggleAllHistory(this.checked)"> 全選択
@@ -355,7 +359,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   <div id="hist-train-result" style="display:none;margin-top:8px;padding:8px 12px;background:#0f3460;border-radius:4px;font-size:12px;line-height:1.7"></div>
 </div>
 
-<div id="tab-look" style="display:none;max-width:860px;margin:0 auto 20px">
+<div id="tab-look" style="display:none;max-width:var(--page-width);margin:0 auto 20px">
   <!-- 盤の見た目。**同じ中継・同じゲーム画面かは人にしか決められない**
        （画像サイズは撮るたびに変わるし、同じ放送でも実盤・大盤・ゲーム画面は別物）。
        候補は署名から出すが、確定させるのは人（coverage.go）。
@@ -515,7 +519,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   </h2>
   <div id="sfen-output" style="display:none;background:#0f3460;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-family:monospace;font-size:14px;word-break:break-all"></div>
   <!-- 保存/SFEN一括入力した内容の確認用プレビュー。マス目(cell-grid)と同じく中央寄せ -->
-  <div id="board-preview-wrap" style="display:none;margin:0 auto 8px;max-width:340px">
+  <div id="board-preview-wrap" style="display:none;margin:0 auto 8px;max-width:420px">
     <shogi-board id="board-preview"></shogi-board>
   </div>
 </div>
