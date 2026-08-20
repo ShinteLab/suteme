@@ -1423,8 +1423,10 @@ async function refreshHistory() {
     const unverified = e.source === 'api' && !e.verified;
     return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
       data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}">
-      <div class="hist-sel-cell" title="${unverified ? '未確認の局面は学習に使えません' : '学習に使う'}">
-        <input type="checkbox" class="hist-sel" data-id="${e.id}" ${unverified ? 'disabled' : ''}></div>
+      <div class="hist-sel-cell" title="${unverified
+        ? '選択できます（見た目の判定に使えます）。ただし未確認なので学習の対象にはなりません'
+        : '学習・見た目の判定に使う'}">
+        <input type="checkbox" class="hist-sel" data-id="${e.id}"${unverified ? ' data-unverified="1"' : ''}></div>
       <span class="hist-check">${done ? '○' : ''}</span>
       <a href="/api/history/${e.id}/image" target="_blank" rel="noopener" title="元画像を別ウィンドウで開く（URL に局面 ID が入ります）"><img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy"></a>
       <div style="flex:1;min-width:0">
@@ -1444,19 +1446,32 @@ async function refreshHistory() {
   updateTrainHistoryButton();
 }
 
-// 履歴の選択（学習の対象）
-// 未確認（API 登録直後）の行は disabled にしてあるので選択に入れない
+// 履歴の選択。**「学習の対象」と「見た目の判定の対象」は別物。**
+// 未確認（API 登録直後）の局面は学習には使えないが、**見た目の判定はできる**
+// （見た目は画像の話で、正解 SFEN が確認済みかどうかとは関係ない）。
+// チェックボックスを disabled にしていた頃は、未確認の局面に
+// **見た目を付ける手段がまったく無かった**
 function historySelection() {
-  return [...document.querySelectorAll('.hist-sel:checked:not(:disabled)')].map(c => c.dataset.id);
+  return [...document.querySelectorAll('.hist-sel:checked')].map(c => c.dataset.id);
+}
+
+// 学習に使えるのは確認済みのものだけ（サーバも未確認は弾く）
+function trainSelection() {
+  return [...document.querySelectorAll('.hist-sel:checked:not([data-unverified])')].map(c => c.dataset.id);
 }
 
 function updateTrainHistoryButton() {
   const n = historySelection().length;
+  const t = trainSelection().length;
   const btn = document.getElementById('btn-train-history');
-  btn.disabled = n === 0;
-  btn.style.opacity = n === 0 ? '0.4' : '1';
-  btn.textContent = n === 0 ? '選択した局面で学習' : '選択した ' + n + ' 件で学習';
-  // 見た目の判定も同じ選択を使う
+  btn.disabled = t === 0;
+  btn.style.opacity = t === 0 ? '0.4' : '1';
+  btn.textContent = t === 0 ? '選択した局面で学習' : '選択した ' + t + ' 件で学習';
+  // 未確認を選んでいるなら、学習の対象から外れることを言う
+  btn.title = n > t
+    ? `未確認の ${n - t} 件は学習の対象になりません（見た目の判定には使えます）`
+    : '';
+  // 見た目の判定は未確認も含めて選択したぶん全部
   const clear = document.getElementById('btn-look-clear');
   if (clear) {
     clear.disabled = n === 0;
@@ -1472,14 +1487,14 @@ function updateTrainHistoryButton() {
 }
 
 function toggleAllHistory(on) {
-  document.querySelectorAll('.hist-sel:not(:disabled)').forEach(c => { c.checked = on; });
+  document.querySelectorAll('.hist-sel').forEach(c => { c.checked = on; });
   updateTrainHistoryButton();
 }
 
 // 選択した局面から直接学習する。画像・盤面座標・正解SFENは履歴に揃っているので
 // 解析画面に読み込む操作は要らない
 async function trainFromHistory() {
-  const ids = historySelection();
+  const ids = trainSelection();
   if (ids.length === 0) return;
   const nn = document.getElementById('hist-train-nn').checked;
   const btn = document.getElementById('btn-train-history');
@@ -1567,7 +1582,7 @@ document.getElementById('history-list').addEventListener('click', async e => {
   const row = e.target.closest('.hist-row');
   if (!row) return;
   const box = row.querySelector('.hist-sel');
-  if (!box || box.disabled) return; // 未確認の局面は学習に使えないので選択もさせない
+  if (!box) return;
   if (e.target !== box) box.checked = !box.checked;
   document.getElementById('hist-select-all').checked =
     document.querySelectorAll('.hist-sel').length === historySelection().length;
