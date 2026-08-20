@@ -159,6 +159,43 @@ func TestVarietyVsThickness(t *testing.T) {
 		}
 	}
 
+	// **同じ予算（枚数）をどう割るか。** 種類を増やすのが良いとして、
+	// 1 種類あたり何枚までなら無駄にならないかを見る
+	const budget = 8
+	splits := [][2]int{{8, 1}, {4, 2}, {2, 4}, {1, 8}} // {種類, 1種類あたりの枚数}
+	split := map[[2]int]*agg{}
+	for _, sp := range splits {
+		split[sp] = &agg{}
+	}
+	for ti := range boards {
+		var otherLooks []string
+		for _, l := range looks {
+			if l != boards[ti].look {
+				otherLooks = append(otherLooks, l)
+			}
+		}
+		for _, sp := range splits {
+			nLooks, per := sp[0], sp[1]
+			var train []int
+			for k := 0; k < len(otherLooks) && len(train) < budget; k++ {
+				l := otherLooks[(ti+k)%len(otherLooks)]
+				if len(byLook[l]) < per {
+					continue
+				}
+				train = append(train, byLook[l][:per]...)
+				if len(train) >= nLooks*per {
+					break
+				}
+			}
+			if len(train) != budget {
+				continue // その割り方ができるだけの見た目が無い
+			}
+			ok, total := read(ti, train)
+			split[sp].ok += ok
+			split[sp].total += total
+		}
+	}
+
 	pct := func(a *agg) string {
 		if a.total == 0 {
 			return "—"
@@ -169,5 +206,9 @@ func TestVarietyVsThickness(t *testing.T) {
 	t.Logf("%6s  %-22s %-22s", "枚数", "多様（N通り×1枚）", "厚み（1通り×N枚）")
 	for _, n := range sizes {
 		t.Logf("%6d  %-22s %-22s", n, pct(variety[n]), pct(thick[n]))
+	}
+	t.Logf("=== 同じ %d 枚をどう割るか（対象の見た目は丸ごと除外）===", budget)
+	for _, sp := range splits {
+		t.Logf("%2d 種類 × %d 枚: %s", sp[0], sp[1], pct(split[sp]))
 	}
 }
