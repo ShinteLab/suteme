@@ -364,7 +364,11 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
       <button id="btn-look-assign" onclick="assignLook()" disabled
         title="履歴で選んだ局面に、この名前の見た目を付けます（名前を空にすると未判定に戻します）"
         style="font-size:12px;background:#2d4a6a;color:#eee;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;white-space:nowrap;opacity:0.4">選択した局面にこの名前を付ける</button>
+      <button id="btn-look-clear" onclick="clearLook()" disabled
+        title="履歴で選んだ局面の見た目の判定を外して未判定に戻します（間違って束ねたとき）"
+        style="font-size:12px;background:none;border:1px solid #6a2d3a;color:#ff8080;padding:5px 10px;border-radius:4px;cursor:pointer;white-space:nowrap;opacity:0.4">判定を外す</button>
     </div>
+    <div id="look-named" style="font-size:12px;margin-bottom:6px"></div>
     <div id="look-suggest" style="font-size:12px"></div>
   </div>
 
@@ -1451,6 +1455,12 @@ function updateTrainHistoryButton() {
   btn.style.opacity = n === 0 ? '0.4' : '1';
   btn.textContent = n === 0 ? '選択した局面で学習' : '選択した ' + n + ' 件で学習';
   // 見た目の判定も同じ選択を使う
+  const clear = document.getElementById('btn-look-clear');
+  if (clear) {
+    clear.disabled = n === 0;
+    clear.style.opacity = n === 0 ? '0.4' : '1';
+    clear.textContent = n === 0 ? '判定を外す' : `${n} 件の判定を外す`;
+  }
   const look = document.getElementById('btn-look-assign');
   if (look) {
     look.disabled = n === 0;
@@ -2073,9 +2083,40 @@ function renderLookPanel(data) {
   prog.style.color = data.named === data.total ? '#74c69d' : '#f0a030';
 
   // 既に使った名前は入力補完に出す（表記ゆれで別の見た目に割れないように）
-  document.getElementById('look-names').innerHTML = groups
-    .filter(g => !g.proposed)
+  const named = groups.filter(g => !g.proposed).sort((a, b) => b.count - a.count);
+  document.getElementById('look-names').innerHTML = named
     .map(g => `<option value="${escapeHTML(g.look)}">`).join('');
+
+  // **判定済みの見た目。名前をクリックすれば入力欄に入る**（打ち直さなくてよい）。
+  // サムネイルの × はその 1 枚だけをこの見た目から外す（＝未判定に戻す）
+  const namedEl = document.getElementById('look-named');
+  if (named.length === 0) {
+    namedEl.innerHTML = '';
+  } else {
+    const shown = named.slice(0, lookNamedShowAll ? named.length : 6);
+    namedEl.innerHTML = shown.map(g => `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+        <button class="look-name-pick" data-look="${escapeHTML(g.look)}"
+          title="この名前を入力欄に入れます（選んだ局面に付け替えるとき）"
+          style="font-size:11px;background:none;border:1px solid ${g.thin ? '#6a5320' : '#2d6a4f'};
+            color:${g.thin ? '#f0a030' : '#74c69d'};padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap"
+          >${escapeHTML(g.look)} · ${g.count}枚</button>
+        <div style="display:flex;gap:3px;overflow-x:auto">${
+          g.ids.map(id => `<span style="position:relative;flex-shrink:0">
+            <a href="/api/history/${id}/image" target="_blank" rel="noopener"
+              title="${id}（クリックで元画像を別ウィンドウ）"><img src="/api/history/${id}/image" loading="lazy"
+              style="height:40px;border-radius:2px;border:1px solid #2a3a5e;display:block"></a>
+            <button class="look-drop" data-id="${id}" title="この 1 枚をこの見た目から外す（未判定に戻す）"
+              style="position:absolute;top:0;right:0;font-size:9px;line-height:1;background:#6a2d3a;color:#fff;
+                border:none;padding:1px 3px;border-radius:2px;cursor:pointer">×</button></span>`).join('')}</div>
+      </div>`).join('');
+    if (named.length > shown.length || lookNamedShowAll) {
+      namedEl.innerHTML += `<button id="look-named-more"
+        style="font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 8px;border-radius:3px;cursor:pointer">${
+          lookNamedShowAll ? '上位だけ表示' : `判定済みの残り ${named.length - shown.length} 件も表示`}</button>`;
+      const more = document.getElementById('look-named-more');
+      if (more) more.onclick = () => { lookNamedShowAll = !lookNamedShowAll; refreshCoverage(); };
+    }
+  }
 
   // 候補（未判定）を大きい塊から。1 枚だけのものは判断材料が無いので後ろ
   const proposed = groups.filter(g => g.proposed).sort((a, b) => b.count - a.count);
@@ -2103,6 +2144,35 @@ function renderLookPanel(data) {
   }
 }
 let lookSuggestShowAll = false;
+let lookNamedShowAll = false;
+
+// 判定済みの見た目のパネル。
+//   名前ボタン … 入力欄に入れるだけ（打ち直しを避ける）
+//   サムネイルの × … その 1 枚をこの見た目から外す（間違って束ねたときの逃げ道）
+document.getElementById('look-named').addEventListener('click', async e => {
+  const drop = e.target.closest('.look-drop');
+  if (drop) {
+    e.preventDefault();
+    e.stopPropagation();
+    await setLook([drop.dataset.id], '');
+    return;
+  }
+  const pick = e.target.closest('.look-name-pick');
+  if (!pick) return;
+  const input = document.getElementById('look-name');
+  input.value = pick.dataset.look;
+  input.focus();
+});
+
+// setLook は見た目を付ける / 外す（look が空なら未判定に戻す）
+async function setLook(ids, look) {
+  if (ids.length === 0) return;
+  await fetch('/api/look', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, look }),
+  });
+  await refreshHistory();
+}
 
 // 候補を履歴の選択に流し込む（学習の選択と同じチェックボックスを使う）
 document.getElementById('look-suggest').addEventListener('click', e => {
@@ -2116,6 +2186,21 @@ document.getElementById('look-suggest').addEventListener('click', e => {
   document.getElementById('look-name').focus();
 });
 
+// 選択した局面の見た目を外す（未判定に戻す）。
+// **間違って束ねたときに戻せないと、判定作業そのものが怖くて進められない**
+async function clearLook() {
+  const ids = historySelection();
+  if (ids.length === 0) return;
+  if (!confirm(`${ids.length} 件の見た目の判定を外しますか？`)) return;
+  const btn = document.getElementById('btn-look-clear');
+  btn.disabled = true;
+  try {
+    await setLook(ids, '');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // 選択した局面に見た目の名前を付ける。**名前を空にすると未判定に戻る**
 async function assignLook() {
   const ids = historySelection();
@@ -2125,14 +2210,10 @@ async function assignLook() {
   const btn = document.getElementById('btn-look-assign');
   btn.disabled = true;
   try {
-    await fetch('/api/look', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids, look }),
-    });
+    await setLook(ids, look);
   } finally {
     btn.disabled = false;
   }
-  await refreshHistory();
 }
 
 async function refreshEvaluations() {
