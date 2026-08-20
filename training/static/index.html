@@ -236,17 +236,19 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
        成績は最新の評価実行から取るので、評価を回さないと数字は入らない -->
   <div style="background:#16213e;border:1px solid #2a3a5e;border-radius:4px;padding:12px;margin-bottom:12px">
     <div style="font-size:12px;color:#bbb;margin-bottom:8px">
-      <b>盤の見た目ごとの厚み</b>
-      <span style="color:#888">— 認識率は<b>局面数より「同じ見た目の盤が何枚あるか」</b>で決まります
-      （同じ出所 1 枚が他所 111 枚に匹敵）。薄くて読めていない見た目が上に出ます。</span>
+      <b>盤の見た目の一覧</b>
+      <span style="color:#888">— 目標は<b>どんな盤でも読むこと</b>なので、集めるのは
+      <b>種類</b>です。同じ見た目を積んでも目標には効きません（実測: 同じ 8 枚を
+      8 種類×1枚に散らすと 79.3%、1 種類×8枚に積むと 70.6%）。
+      <b>枚数の多い順</b>＝もう撮らなくていい見た目が上に出ます。</span>
       <span id="coverage-count" style="color:#888;float:right"></span>
     </div>
     <div id="coverage-list" style="overflow-x:auto"></div>
     <div style="font-size:11px;color:#777;margin-top:8px;line-height:1.7">
-      「見た目」は<b>画像サイズで代用</b>しています（同じ画面をキャプチャすれば一致する）。
-      同じサイズの別物・同じ出所の別サイズは分けられないので枚数は目安です。
       一致率は<b>最新の評価実行</b>の手動座標での成績で、評価を回すまでは空欄になります。
       <b>この表は「誰が登録したか」（API / UI）とは別</b>で、どの画面を写したものかで束ねています。
+      次に撮るべきなのは<b>ここに無い見た目</b>なので、この表には出せません。
+      特定の中継だけ読み切りたいときだけ、その見た目を 3〜5 枚まで積む価値があります。
     </div>
   </div>
 
@@ -2011,15 +2013,15 @@ async function refreshCoverage() {
   const groups = data.groups || [];
   coverageByID = {};
   groups.forEach(g => (g.ids || []).forEach(id => {
-    coverageByID[id] = { look: g.look, count: g.count, thin: g.thin, proposed: g.proposed };
+    coverageByID[id] = { look: g.look, count: g.count, excess: g.excess, proposed: g.proposed };
   }));
   renderLookPanel(data);
 
   const el = document.getElementById('coverage-list');
   if (!el) return;
-  const thin = groups.filter(g => g.thin).length;
+  const excess = groups.filter(g => g.excess).length;
   document.getElementById('coverage-count').textContent = groups.length
-    ? `${groups.length} 通り・${thin} 通りが ${data.target} 枚未満` : '';
+    ? `見た目 ${groups.length} 通り・うち ${excess} 通りは ${data.target} 枚を超えて積んである` : '';
   if (groups.length === 0) {
     el.innerHTML = '<div style="color:#555;font-size:12px">保存した局面はありません</div>';
     return;
@@ -2037,9 +2039,9 @@ async function refreshCoverage() {
     <th title="最新の評価実行での手動座標での一致率">一致率</th>
     <th>局面</th></tr>`;
   html += shown.map(g => {
-    const count = g.thin
-      ? `<span style="color:#f0a030" title="あと ${data.target - g.count} 枚">${g.count} / ${data.target}</span>`
-      : `<span style="color:#74c69d">${g.count}</span>`;
+    const count = g.excess
+      ? `<span style="color:#888" title="${data.target} 枚を超えたぶんは「どんな盤でも読む」という目標には効きません（その盤に特化する投資になります）">${g.count} 枚</span>`
+      : `<span style="color:#74c69d" title="適正（1〜${data.target} 枚）">${g.count} 枚</span>`;
     return `<tr><td style="white-space:nowrap;font-family:monospace">${escapeHTML(g.look)}</td>
       <td>${count}</td><td style="white-space:nowrap">${rateCell(g)}</td>
       <td>${(g.ids || []).slice(0, 5).map(id => idChipHTML(id, 'margin-right:4px')).join('')}${
@@ -2081,10 +2083,10 @@ function lookBadgeHTML(id) {
       title="見た目が未判定です。似ている ${g.count} 枚を候補として束ねています（確定させるには名前を付けてください）"
       >未判定 · 候補${g.count}枚</span>`;
   }
-  const color = g.thin ? '#f0a030' : '#74c69d';
+  const color = g.excess ? '#888' : '#74c69d';
   return ` <span style="color:${color};border:1px solid #333;border-radius:3px;padding:0 4px"
     title="同じ見た目の局面が ${g.count} 枚。${
-      g.thin ? 'あと数枚集めるとこの盤の認識率が上がります' : '厚みは足りています'}"
+      g.excess ? 'これ以上この見た目を撮っても「どんな盤でも読む」目標には効きません' : '適正です'}"
     >${escapeHTML(g.look)} · ${g.count}枚</span>`;
 }
 
@@ -2118,9 +2120,9 @@ function renderLookPanel(data) {
     const shown = named.slice(0, lookNamedShowAll ? named.length : 6);
     namedEl.innerHTML = shown.map(g => `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
         <button class="look-name-pick" data-look="${escapeHTML(g.look)}"
-          title="この名前を入力欄に入れます（選んだ局面に付け替えるとき）"
-          style="font-size:11px;background:none;border:1px solid ${g.thin ? '#6a5320' : '#2d6a4f'};
-            color:${g.thin ? '#f0a030' : '#74c69d'};padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap"
+          title="この名前をプルダウンに入れます（選んだ局面に付け替えるとき）"
+          style="font-size:11px;background:none;border:1px solid ${g.excess ? '#444' : '#2d6a4f'};
+            color:${g.excess ? '#888' : '#74c69d'};padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap"
           >${escapeHTML(g.look)} · ${g.count}枚</button>
         <div style="display:flex;gap:3px;overflow-x:auto">${
           g.ids.map(id => `<span style="position:relative;flex-shrink:0">
@@ -2274,7 +2276,8 @@ async function refreshEvaluations() {
   }
   let html = `<table class="piece-table" style="font-size:12px">
     <tr><th title="実行した日時とラベル">日時 / ラベル</th><th>局面</th><th title="保存座標との差が 0.5マス以内だった局面。橙の数字は「その座標が検出器の出力そのもの」だった件数で、突き合わせても何も測れていない（出所別の内訳は行をクリック）">検出</th>
-    <th>手動</th><th>自動</th><th title="評価する局面を学習から外した k-NN">LOO 手動</th><th>LOO 自動</th>
+    <th>手動</th><th>自動</th><th title="評価する局面を学習から外した k-NN。同じ見た目の別局面は学習データに残るので高く出る">LOO 手動</th><th>LOO 自動</th>
+    <th title="その盤（見た目）を丸ごと学習から外した k-NN＝初めて見る盤に対する実力。suteme の目標はこちら。見た目が判定済みの局面だけが対象" style="color:#4cc9f0">見た目LOO</th>
     <th title="盤面が写っていない画像を盤として採用しなかった割合">負例</th><th></th></tr>`;
   html += evalRuns.map((r, i) => {
     const d = r.detect_summary || {};
@@ -2286,6 +2289,7 @@ async function refreshEvaluations() {
         <span class="sub">${d.aligned || 0}/${d.boards || 0}${d.exact
           ? `<span style="color:#f0a030" title="保存座標が検出結果そのものだった局面。自己充足なので検出の成績には数えられない"> ＝検出 ${d.exact}</span>` : ''}</span></td>
       ${rateCell(r.manual)}${rateCell(r.auto)}${rateCell(r.manual_holdout)}${rateCell(r.auto_holdout)}
+      ${rateCell(r.manual_look)}
       ${negativeCell(r.negative)}
       <td><button class="eval-del" data-id="${r.id}" title="この記録を削除する"
         style="font-size:11px;background:none;border:1px solid #6a2d3a;color:#ff8080;padding:1px 6px;border-radius:3px;cursor:pointer">×</button></td>
@@ -2387,7 +2391,7 @@ function showEvalDetail(i) {
         : '');
     return `<tr><td style="white-space:nowrap">${idChipHTML(e.id)}${src}</td>
       <td style="text-align:left">${det}</td>
-      ${cell(e.manual)}${cell(e.auto)}${cell(e.manual_holdout)}${cell(e.auto_holdout)}</tr>`;
+      ${cell(e.manual)}${cell(e.auto)}${cell(e.manual_holdout)}${cell(e.auto_holdout)}${cell(e.manual_look)}</tr>`;
   }).join('');
   const m = r.manual_holdout || r.manual;
   const a = r.auto_holdout || r.auto;
@@ -2404,13 +2408,16 @@ function showEvalDetail(i) {
       ${r.seconds ? r.seconds.toFixed(1) + '秒' : ''}
       ${detectBySourceHTML(r)}
       ${a ? `<br><b style="color:#bbb">${r.auto_holdout ? 'LOO ' : ''}自動</b>: ${perBoard(a)}` : ''}
+      ${r.manual_look ? `<br><b style="color:#4cc9f0">見た目LOO</b>（初めて見る盤に対する実力・判定済み ${r.manual_look.boards} 局面）:
+        ${pct(r.manual_look.ok, r.manual_look.cells)} / 駒 ${pct(r.manual_look.piece_ok, r.manual_look.piece_cells)} /
+        ${perBoard(r.manual_look)}` : ''}
       ${m ? `<br>誤りの内訳（${r.manual_holdout ? 'LOO ' : ''}手動座標）: 空→駒 ${m.empty_as_piece} / 駒→空 ${m.piece_as_empty} /
         向きの反転 ${m.orient_flip} / 駒種違い ${m.type_miss} / 駒マスの駒種 ${pct(m.piece_ok, m.piece_cells)}` : ''}
       ${a && a.piece_cells ? `<br>同（${r.auto_holdout ? 'LOO ' : ''}自動座標）: 空→駒 ${a.empty_as_piece} / 駒→空 ${a.piece_as_empty} /
         向きの反転 ${a.orient_flip} / 駒種違い ${a.type_miss} / 駒マスの駒種 ${pct(a.piece_ok, a.piece_cells)}` : ''}
     </div>
     <table class="piece-table" style="font-size:12px">
-      <tr><th>局面</th><th title="手動座標との差（マス）">検出のずれ</th><th>手動</th><th>自動</th><th>LOO 手動</th><th>LOO 自動</th></tr>
+      <tr><th>局面</th><th title="手動座標との差（マス）">検出のずれ</th><th>手動</th><th>自動</th><th>LOO 手動</th><th>LOO 自動</th><th title="その見た目を丸ごと外した k-NN">見た目LOO</th></tr>
       ${rows}</table>
     ${negativeDetailHTML(r.negative)}`;
 }

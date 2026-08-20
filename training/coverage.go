@@ -39,13 +39,22 @@ import (
 // 同じ語を使うと評価タブの出所別集計（`EvalSourceDetect`）と混ざるので、
 // 画面でも「見た目」と呼ぶ。
 
-// lookTarget は 1 つの見た目について集めたい枚数。
+// lookEnough は 1 つの見た目について「これ以上は目標に効かない」枚数。
 //
-// 実測（`TestSameSourceEffect`、同じ出所 7 枚を対象に駒種の一致率）:
-// 1 枚 87.8% / 2 枚 93.4% / **3 枚 95.0%** / 5 枚 97.9% / 6 枚 98.1%。
-// 3 枚で伸びが緩むので、まず全部の見た目を 3 枚にするのを目標にする
-// （5 枚まで積むより、薄い見た目を潰すほうが 1 枚あたりの効きが大きい）。
-const lookTarget = 3
+// **suteme の目標は「どんな盤でも読む」こと**（CLAUDE.md 冒頭）なので、
+// 同じ見た目を積んでも目標には効かない。同じ枚数をどう割るかの実測
+// （`TestVarietyVsThickness`。対象の見た目は丸ごと学習から外す＝初見の盤）:
+//
+//	8 種類 × 1 枚  79.3%
+//	4 種類 × 2 枚  77.7%
+//	2 種類 × 4 枚  76.3%
+//	1 種類 × 8 枚  70.6%
+//
+// **1 枚ずつ種類を増やすのが最良。** 2 枚目でわずかに保険が利く程度なので、
+// 2 枚を「足りている」の線にして、それ以上は積みすぎとして下へ回す。
+// （特定の中継だけ読み切りたいなら 3〜5 枚積むと 95〜98% に届くが、
+// それは特化であって目標ではない）
+const lookEnough = 2
 
 // lookProposeMax は「同じ見た目かもしれない」と候補に出す署名距離の上限。
 //
@@ -79,12 +88,13 @@ type LookGroup struct {
 	OK    int `json:"ok"`
 	// Rate は OK/Cells（0.0〜1.0）。Cells が 0 なら -1（＝未評価）
 	Rate float64 `json:"rate"`
-	// Thin は lookTarget に足りていないか
-	Thin bool `json:"thin"`
+	// Excess は lookEnough を超えて積んである（＝これ以上撮っても目標には効かない）
+	Excess bool `json:"excess"`
 }
 
 // CoverageReport は「次にどの盤を集めるか」を決めるための一覧。
 type CoverageReport struct {
+	// Target は「1 つの見た目にこれ以上積んでも目標には効かない」枚数（lookEnough）
 	Target int         `json:"target"`
 	Groups []LookGroup `json:"groups"`
 	// Named は人が見た目を判定済みの局面数
@@ -255,7 +265,7 @@ func lookGroups(entries []HistoryEntry) (named map[string][]string, proposed [][
 
 // coverageReport は履歴と最新の評価実行から見た目ごとの厚みを組み立てる。
 func coverageReport(h *HistoryData, runs []EvalRun) *CoverageReport {
-	rep := &CoverageReport{Target: lookTarget, Groups: []LookGroup{}}
+	rep := &CoverageReport{Target: lookEnough, Groups: []LookGroup{}}
 	if h == nil {
 		return rep
 	}
@@ -295,7 +305,7 @@ func coverageReport(h *HistoryData, runs []EvalRun) *CoverageReport {
 
 	add := func(look string, proposed bool, ids []string) {
 		g := LookGroup{Look: look, Proposed: proposed, Count: len(ids), IDs: ids, Rate: -1}
-		g.Thin = g.Count < lookTarget
+		g.Excess = g.Count > lookEnough
 		for _, id := range ids {
 			if s, ok := score[id]; ok {
 				g.Cells += s.cells
@@ -314,13 +324,14 @@ func coverageReport(h *HistoryData, runs []EvalRun) *CoverageReport {
 		add("", true, ids)
 	}
 
-	// **薄いものを先に、その中で読めていない順。** 1 枚しかなくても
-	// よく読めている見た目は足す価値が薄いので、下のほうへ回る。
-	// 未評価（Rate < 0）は判断材料が無いので各群の末尾
+	// **枚数の多い順。** 目標は種類を増やすことなので、この表で分かるのは
+	// 「もうこれ以上撮らなくていい見た目」のほう（＝上に出るもの）。
+	// **「薄い順に潰す」ではない。** 薄い見た目を厚くしても目標には効かない
+	// （`lookEnough`）。次に何を撮るかは「まだ無い種類」なので画面には出せない
 	sort.Slice(rep.Groups, func(i, j int) bool {
 		a, b := rep.Groups[i], rep.Groups[j]
-		if a.Thin != b.Thin {
-			return a.Thin
+		if a.Count != b.Count {
+			return a.Count > b.Count
 		}
 		if (a.Rate < 0) != (b.Rate < 0) {
 			return b.Rate < 0

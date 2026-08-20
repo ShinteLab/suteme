@@ -19,7 +19,7 @@ import (
 // 守りたいのは 4 つ。
 //   - **人が付けた見た目（`HistoryEntry.Look`）が最優先**。機械の候補で上書きしない
 //   - 未判定のものだけ署名で候補を出し、似ていないものを混ぜないこと
-//   - **薄いものが先、その中で読めていない順**（＝次に集める価値が高い順）に並ぶこと
+//   - **枚数の多い順**（＝もう撮らなくていい見た目が上）に並ぶこと
 //   - 一致率は最新の評価実行から取り、leave-one-out があればそちらを使うこと
 
 // lookImage は「見た目」の違う盤の画像を作る。
@@ -131,9 +131,9 @@ func TestCoverageProposesBySignature(t *testing.T) {
 	}
 }
 
-// **並び順がこの機能の中身。** 薄いものを先に、その中で読めていない順。
-// 1 枚しかなくてもよく読めている見た目は下へ回る（足す価値が薄いので）
-func TestCoverageOrdersThinAndWeakFirst(t *testing.T) {
+// **並び順がこの機能の中身。** 枚数の多い順＝「もう撮らなくていい見た目」が上。
+// 目標は種類を増やすことなので、薄い見た目を厚くする案内はしない
+func TestCoverageOrdersByCount(t *testing.T) {
 	chdirTemp(t)
 	mk := func(id string, look string) HistoryEntry {
 		e := saveLook(t, id, 0)
@@ -157,14 +157,17 @@ func TestCoverageOrdersThinAndWeakFirst(t *testing.T) {
 	}}}
 
 	rep := coverageReport(&HistoryData{Entries: entries}, runs)
-	want := []string{"薄くて弱い", "薄いがよく読めている", "厚いが弱い"}
+	// **枚数の多い順**（＝もう撮らなくていい見た目が上）。
+	// 薄い見た目を厚くしても「どんな盤でも読む」目標には効かないので、
+	// 「薄い順に潰す」並びにはしない
+	want := []string{"厚いが弱い", "薄くて弱い", "薄いがよく読めている"}
 	for i, w := range want {
 		if rep.Groups[i].Look != w {
 			t.Fatalf("並び順が違う: %d 番目が %q（期待 %q）", i, rep.Groups[i].Look, w)
 		}
 	}
-	if rep.Groups[2].Thin {
-		t.Error("3 枚あるものを薄い扱いにしている")
+	if !rep.Groups[0].Excess {
+		t.Error("3 枚あるものを「積みすぎ」にしていない")
 	}
 }
 
@@ -261,7 +264,7 @@ func TestCoverageHandlerReturnsJSON(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rep); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Target != lookTarget || len(rep.Groups) != 1 || rep.Groups[0].Look != "中継A" {
+	if rep.Target != lookEnough || len(rep.Groups) != 1 || rep.Groups[0].Look != "中継A" {
 		t.Fatalf("中身が違う: %+v", rep)
 	}
 }

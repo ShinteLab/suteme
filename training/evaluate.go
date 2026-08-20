@@ -166,6 +166,9 @@ type EvalEntry struct {
 	// *Holdout はこの局面を学習から外した k-NN での成績（holdout=false なら nil）
 	ManualHoldout *EvalMetrics `json:"manual_holdout,omitempty"`
 	AutoHoldout   *EvalMetrics `json:"auto_holdout,omitempty"`
+	// ManualLook は**その見た目を丸ごと**学習から外した k-NN での成績（手動座標）。
+	// 見た目が未判定の局面では nil
+	ManualLook *EvalMetrics `json:"manual_look,omitempty"`
 }
 
 // EvalRun は評価の実行 1 回。
@@ -194,6 +197,13 @@ type EvalRun struct {
 	Auto          EvalMetrics   `json:"auto"`
 	ManualHoldout *EvalMetrics  `json:"manual_holdout,omitempty"`
 	AutoHoldout   *EvalMetrics  `json:"auto_holdout,omitempty"`
+	// ManualLook は**見た目ホールドアウト**（その盤を丸ごと学習から外す）の集計。
+	//
+	// **「どんな盤でも読む」という目標に対する実力はこの数字。**
+	// 局面 leave-one-out（`ManualHoldout`）は同じ見た目の別局面が学習データに
+	// 残るので高く出る。対象は**見た目が判定済みの局面だけ**なので、
+	// `Manual` とは母集団が違う（`ManualLook.Boards` で分かる）
+	ManualLook *EvalMetrics `json:"manual_look,omitempty"`
 
 	Entries []EvalEntry `json:"entries"`
 	// Skipped は評価に入れられなかった局面数（座標が無い・未確認など）
@@ -383,10 +393,18 @@ func gradeDetect(r image.Rectangle, src suteme.RegionSource, conf float64, found
 	return res
 }
 
-// holdoutPredictors は leave-one-out 用に「その局面を学習から外した k-NN」を
-// 局面ごとに作る。学習に使うのは確認済みの局面だけ（/api/trainhistory と同じ条件）。
-func holdoutPredictors(entries []HistoryEntry, want map[string]bool) map[string]*suteme.KNN {
-	byEntry := make(map[string][]suteme.TrainingSample, len(entries))
+// holdoutPredictors は「何を学習から外した k-NN か」を key ごとに作る。
+// 学習に使うのは確認済みの局面だけ（/api/trainhistory と同じ条件）。
+//
+// key の取り方で意味が変わる。**この 2 つは別の質問に答えている。**
+//
+//	局面ホールドアウト … key = 局面ID。その局面だけを外す。
+//	                     同じ見た目の別局面は学習データに残るので**高く出る**
+//	見た目ホールドアウト … key = 見た目の名前。その盤を丸ごと外す＝**初めて見る盤**。
+//	                     「どんな盤でも読む」という目標に対する実力はこちら
+func holdoutPredictors(entries []HistoryEntry, keyOf func(HistoryEntry) string) map[string]*suteme.KNN {
+	byKey := map[string][]suteme.TrainingSample{}
+	keys := map[string]bool{}
 	for _, e := range entries {
 		if !e.IsVerified() {
 			continue
@@ -396,18 +414,23 @@ func holdoutPredictors(entries []HistoryEntry, want map[string]bool) map[string]
 			log.Printf("evaluate: %s のサンプル化に失敗 (%v)", e.ID, err)
 			continue
 		}
-		byEntry[e.ID] = s
+		k := keyOf(e)
+		if k == "" {
+			continue
+		}
+		byKey[k] = append(byKey[k], s...)
+		keys[k] = true
 	}
-	out := make(map[string]*suteme.KNN, len(want))
-	for id := range want {
+	out := make(map[string]*suteme.KNN, len(keys))
+	for k := range keys {
 		var train []suteme.TrainingSample
-		for other, s := range byEntry {
-			if other != id {
+		for other, s := range byKey {
+			if other != k {
 				train = append(train, s...)
 			}
 		}
 		if kn := suteme.NewKNN(MergeSamples(train)); kn != nil {
-			out[id] = kn
+			out[k] = kn
 		}
 	}
 	return out
@@ -464,16 +487,21 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 		return nil, fmt.Errorf("評価できる局面がありません（画像・正解 SFEN・盤面座標が揃っている必要があります）")
 	}
 
-	var holdoutKNN map[string]*suteme.KNN
+	var holdoutKNN, lookKNN map[string]*suteme.KNN
 	if holdout {
-		want := make(map[string]bool, len(targets))
-		for _, t := range targets {
-			want[t.entry.ID] = true
-		}
 		log.Printf("evaluate: leave-one-out 用の学習データを作成中（%d 局面）", len(h.Entries))
-		holdoutKNN = holdoutPredictors(h.Entries, want)
+		holdoutKNN = holdoutPredictors(h.Entries, func(e HistoryEntry) string { return e.ID })
 		run.ManualHoldout = &EvalMetrics{}
 		run.AutoHoldout = &EvalMetrics{}
+
+		// **見た目ホールドアウト＝目標（どんな盤でも読む）に対する実力。**
+		// 束ねる数は見た目の数なので、局面ごとに組み直すより速い
+		lookKNN = holdoutPredictors(h.Entries, func(e HistoryEntry) string {
+			return strings.TrimSpace(e.Look)
+		})
+		if len(lookKNN) > 0 {
+			run.ManualLook = &EvalMetrics{}
+		}
 	}
 
 	bySource := map[string]*EvalDetectSummary{}
@@ -500,6 +528,19 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 					suteme.ValidateBoard(t.img, br), false, t.entry.BoardBounds)
 			}
 			res.Auto = missedBoard(t.want)
+		}
+
+		// 見た目ホールドアウトは**手動座標だけ**で測る。盤面検出は学習データに
+		// 依存しないので、自動で測っても局面ホールドアウトと同じ数字になる
+		if look := strings.TrimSpace(t.entry.Look); look != "" {
+			if kn, ok := lookKNN[look]; ok {
+				ml := EvalMetrics{}
+				if g, _, err := recognizeGrid(t.img, kn, suteme.WithRect(t.rect.X1, t.rect.Y1, t.rect.X2, t.rect.Y2)); err == nil {
+					ml = gradeBoard(t.want, g)
+				}
+				res.ManualLook = &ml
+				run.ManualLook.add(ml)
+			}
 		}
 
 		if kn, ok := holdoutKNN[t.entry.ID]; ok {
