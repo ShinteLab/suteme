@@ -358,9 +358,11 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
       <span id="look-progress" style="color:#888;float:right"></span>
     </div>
     <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-      <input list="look-names" id="look-name" placeholder="見た目の名前（例: NHK杯 大盤 / 中継A の実盤）"
-        style="flex:1;background:#0f3460;border:1px solid #2a3a5e;color:#eee;padding:5px 8px;border-radius:4px;font-size:12px">
-      <datalist id="look-names"></datalist>
+      <select id="look-select" onchange="onLookSelect()"
+        title="既に付けた見た目から選びます（新しい名前を作るときは一番上）"
+        style="flex:1;background:#0f3460;border:1px solid #2a3a5e;color:#eee;padding:5px 8px;border-radius:4px;font-size:12px"></select>
+      <input id="look-name" placeholder="新しい見た目の名前（例: NHK杯 大盤 / 中継A の実盤）"
+        style="flex:1;display:none;background:#0f3460;border:1px solid #2a3a5e;color:#eee;padding:5px 8px;border-radius:4px;font-size:12px">
       <button id="btn-look-assign" onclick="assignLook()" disabled
         title="履歴で選んだ局面に、この名前の見た目を付けます（名前を空にすると未判定に戻します）"
         style="font-size:12px;background:#2d4a6a;color:#eee;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;white-space:nowrap;opacity:0.4">選択した局面にこの名前を付ける</button>
@@ -2082,10 +2084,15 @@ function renderLookPanel(data) {
   prog.textContent = `判定済み ${data.named} / ${data.total} 局面`;
   prog.style.color = data.named === data.total ? '#74c69d' : '#f0a030';
 
-  // 既に使った名前は入力補完に出す（表記ゆれで別の見た目に割れないように）
+  // **既に付けた名前はプルダウンから選ぶ。** 入力補完（datalist）だと
+  // 入力中の文字で候補が絞られるので、別の名前に変えるのに一度消す必要があった
   const named = groups.filter(g => !g.proposed).sort((a, b) => b.count - a.count);
-  document.getElementById('look-names').innerHTML = named
-    .map(g => `<option value="${escapeHTML(g.look)}">`).join('');
+  const sel = document.getElementById('look-select');
+  const keep = sel.value;
+  sel.innerHTML = `<option value="${NEW_LOOK}">＋ 新しい名前を付ける…</option>`
+    + named.map(g => `<option value="${escapeHTML(g.look)}">${escapeHTML(g.look)}（${g.count}枚）</option>`).join('');
+  sel.value = named.some(g => g.look === keep) ? keep : NEW_LOOK;
+  onLookSelect();
 
   // **判定済みの見た目。名前をクリックすれば入力欄に入る**（打ち直さなくてよい）。
   // サムネイルの × はその 1 枚だけをこの見た目から外す（＝未判定に戻す）
@@ -2159,10 +2166,28 @@ document.getElementById('look-named').addEventListener('click', async e => {
   }
   const pick = e.target.closest('.look-name-pick');
   if (!pick) return;
-  const input = document.getElementById('look-name');
-  input.value = pick.dataset.look;
-  input.focus();
+  const sel = document.getElementById('look-select');
+  sel.value = pick.dataset.look;
+  onLookSelect();
 });
+
+// 新しい名前を作るときだけ入力欄を出す
+const NEW_LOOK = '__new__'; // 見た目の名前としては使わない印
+function onLookSelect() {
+  const sel = document.getElementById('look-select');
+  const input = document.getElementById('look-name');
+  const isNew = sel.value === NEW_LOOK;
+  input.style.display = isNew ? '' : 'none';
+  if (isNew) input.focus();
+}
+
+// 付けようとしている名前。プルダウンで既存を選ぶか、新規なら入力欄の値
+function currentLookName() {
+  const sel = document.getElementById('look-select');
+  return sel.value === NEW_LOOK
+    ? document.getElementById('look-name').value.trim()
+    : sel.value;
+}
 
 // setLook は見た目を付ける / 外す（look が空なら未判定に戻す）
 async function setLook(ids, look) {
@@ -2205,8 +2230,13 @@ async function clearLook() {
 async function assignLook() {
   const ids = historySelection();
   if (ids.length === 0) return;
-  const look = document.getElementById('look-name').value.trim();
-  if (!look && !confirm(`${ids.length} 件の見た目の判定を外しますか？`)) return;
+  const look = currentLookName();
+  if (!look) {
+    // **空で押しても判定は外さない。** 外すのは「判定を外す」ボタンの仕事で、
+    // 名前の付け忘れと取り違えると人が付けた判定を黙って消すことになる
+    document.getElementById('look-name').focus();
+    return;
+  }
   const btn = document.getElementById('btn-look-assign');
   btn.disabled = true;
   try {
