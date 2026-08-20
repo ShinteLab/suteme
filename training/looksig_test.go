@@ -240,3 +240,144 @@ func TestLookHelpVsDistance(t *testing.T) {
 	}
 	t.Logf("書き出し: %s", out)
 }
+
+// TestLookGroupingCheck は人が付けた見た目の束ね方を点検する（調査用）。
+//
+//	SUTEME_LOOKCHECK=out.csv go test -run TestLookGroupingCheck -timeout 60m ./training
+//
+// **見た目の正解は「その相手のサンプルがあると読めるようになるか」**なので、
+// 同じ名前どうし（same_look=1）と、別の名前の相手（same_look=0）で
+// 「相手 1 局面だけを学習データにして読んだときの一致率」を比べる。
+// 同じ名前のほうが高くなければ、その束ね方は認識の役には立っていない。
+func TestLookGroupingCheck(t *testing.T) {
+	out := os.Getenv("SUTEME_LOOKCHECK")
+	if out == "" {
+		t.Skip("SUTEME_LOOKCHECK が空なのでスキップ（調査用）")
+	}
+	if !filepath.IsAbs(out) {
+		if abs, err := filepath.Abs(out); err == nil {
+			out = abs
+		}
+	}
+	if !chdirToData(t) {
+		t.Fatal("data/history.json が見つかりません")
+	}
+	h := loadHistory()
+
+	type board struct {
+		id      string
+		look    string
+		img     image.Image
+		br      *suteme.BoardRegion
+		want    *[9][9]string
+		sig     []float64
+		samples []suteme.TrainingSample
+	}
+	boards := []board{}
+	// SUTEME_LOOKCHECK_ONLY に見た目の名前をカンマ区切りで並べると、
+	// その名前どうしだけを**全ペア**で測る（統合してよいかを詰めるとき）
+	only := map[string]bool{}
+	for _, n := range strings.Split(os.Getenv("SUTEME_LOOKCHECK_ONLY"), ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			only[n] = true
+		}
+	}
+	for _, e := range h.Entries {
+		if e.BoardBounds == nil || strings.TrimSpace(e.Look) == "" {
+			continue // 判定済みのものだけ点検する
+		}
+		if len(only) > 0 && !only[e.Look] {
+			continue
+		}
+		f, err := os.Open(filepath.Join(dataDir, e.ID+".png"))
+		if err != nil {
+			continue
+		}
+		img, _, err := image.Decode(f)
+		f.Close()
+		if err != nil {
+			continue
+		}
+		want, err := wantGrid(e.SFEN)
+		if err != nil {
+			continue
+		}
+		s, err := samplesFromHistory(e)
+		if err != nil {
+			continue
+		}
+		sig, ok := lookSignature(e)
+		if !ok {
+			continue
+		}
+		b := e.BoardBounds
+		boards = append(boards, board{
+			id: e.ID, look: e.Look, img: img,
+			br:      suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2),
+			want:    want,
+			sig:     sig,
+			samples: MergeSamples(s),
+		})
+	}
+	t.Logf("判定済みの局面 %d", len(boards))
+
+	read := func(target, partner *board) (ok, total int) {
+		kn := suteme.NewKNN(partner.samples)
+		if kn == nil {
+			return 0, 0
+		}
+		bc := suteme.BoardColor(target.img, target.br)
+		bo := suteme.NewBoardOrient(target.img, target.br, bc)
+		for r := 0; r < 9; r++ {
+			for c := 0; c < 9; c++ {
+				cell := target.br.ExtractCell(target.img, r, c)
+				if cell == nil {
+					continue
+				}
+				total++
+				if predictCellBO(cell, bc, bo, kn) == target.want[r][c] {
+					ok++
+				}
+			}
+		}
+		return ok, total
+	}
+
+	var sb strings.Builder
+	sb.WriteString("id,look,partner,partner_look,same_look,sig_dist,ok,total\n")
+	for i := range boards {
+		// 同じ名前の相手は全部、違う名前の相手は散らして 4 件
+		var others []int
+		for j := range boards {
+			if j == i {
+				continue
+			}
+			if boards[j].look == boards[i].look {
+				ok, total := read(&boards[i], &boards[j])
+				fmt.Fprintf(&sb, "%s,%s,%s,%s,1,%.5f,%d,%d\n", boards[i].id, boards[i].look,
+					boards[j].id, boards[j].look, sigDistanceTest(boards[i].sig, boards[j].sig), ok, total)
+				continue
+			}
+			others = append(others, j)
+		}
+		n := 4
+		if len(only) > 0 {
+			n = len(others) // 絞り込んだときは全ペア
+		}
+		for k := 0; k < n && len(others) > 0; k++ {
+			j := others[k]
+			if len(only) == 0 {
+				j = others[(i*7+k*len(others)/4)%len(others)]
+			}
+			ok, total := read(&boards[i], &boards[j])
+			fmt.Fprintf(&sb, "%s,%s,%s,%s,0,%.5f,%d,%d\n", boards[i].id, boards[i].look,
+				boards[j].id, boards[j].look, sigDistanceTest(boards[i].sig, boards[j].sig), ok, total)
+		}
+	}
+	if err := os.WriteFile(out, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("書き出し: %s", out)
+}
+
+func sigDistanceTest(a, b []float64) float64 { return sigDistance(a, b) }
