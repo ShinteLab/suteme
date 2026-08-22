@@ -504,6 +504,9 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
 
   <h2>3. 盤面で修正
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">水色の「歩?」は推論候補（未確定）。違うマスをクリックして直してください</span>
+    <!-- **どこまで入力したかは常に出す。** 履歴から戻したときや推論候補のままの
+         ときに、画面が「入力済み」なのか「まだ候補」なのか見分けが付かなかった -->
+    <span id="label-progress" style="float:right;font-size:12px;font-weight:400"></span>
   </h2>
   <div class="stats" id="analyze-status" style="text-align:left;margin-bottom:8px"></div>
   <div class="cell-grid" id="cell-grid"></div>
@@ -927,6 +930,7 @@ function renderCells(id, categories) {
   document.getElementById('analyze-empty').style.display = 'none';
   document.getElementById('cells-section').style.display = 'block';
   enableSaveButton(); // 未入力のマスは保存時に推論候補で埋めるので、常に押せる
+  updateLabelProgress();
 }
 
 // SFEN駒文字（大文字/小文字/+付き）から駒名を返す。不明なら null
@@ -1140,6 +1144,23 @@ PIECE_TYPES.forEach(pt => {
   pieceBtns.appendChild(btn);
 });
 
+// 81マスのうち何マスを入力（確定）したかを見出しに出す。
+// boardLabels が入力の実体で、null が未入力。保存時は未入力を推論候補で埋めるので、
+// **残りが何マスあって、何で埋まるのか**が分かる必要がある
+function updateLabelProgress() {
+  const el = document.getElementById('label-progress');
+  if (!el) return;
+  if (!boardLabels) { el.textContent = ''; return; }
+  let n = 0;
+  for (let r = 0; r < 9; r++) for (let c = 0; c < 9; c++) if (boardLabels[r][c] !== null) n++;
+  if (n === 81) {
+    el.innerHTML = '<span style="color:#74c69d">入力済み 81/81 マス</span>';
+  } else {
+    el.innerHTML = '<span style="color:#f0a030">入力済み ' + n + '/81 マス</span>' +
+      '<span style="color:#888"> — 残り ' + (81 - n) + ' マスは保存時に推論候補で埋めます</span>';
+  }
+}
+
 function applyLabel(r, c, pieceId, displayHtml, bgColor) {
   const label = document.getElementById('label-' + r + '-' + c);
   label.innerHTML = displayHtml;
@@ -1153,6 +1174,7 @@ function applyLabel(r, c, pieceId, displayHtml, bgColor) {
     if (boardLabels) boardLabels[r][c] = pieceId;
     enableSaveButton();
   }
+  updateLabelProgress();
 }
 
 // 編集中の局面を差し替える。ID は保存先（上書きか新規か）であると同時に
@@ -1721,7 +1743,9 @@ async function reenterHistory(row) {
     setHands(f[2] || '-');
     applyTurnFields(f[1], f[3]);
   }
-  document.getElementById('analyze-status').textContent = '履歴から読み込みました';
+  document.getElementById('analyze-status').textContent = sfen
+    ? '履歴から読み込みました — 保存済みの SFEN を81マスに反映しています（○ が入力済み）'
+    : '履歴から読み込みました — この局面に SFEN は保存されていません';
 }
 
 // 履歴の削除（エントリと保存画像の両方をサーバから消す）。
@@ -1855,7 +1879,7 @@ async function applyFromSFEN() {
     const cellEl = labelEl.closest('.cell');
 
     if (piece === 'none') {
-      labelEl.innerHTML = '空';
+      labelEl.innerHTML = '空<span class="ok-mark">○</span>';
       labelEl.style.background = catColors[0];
       if (cellCategories) cellCategories[row][col] = 0;
       if (cellEl) cellEl.classList.add('labeled');
@@ -1867,11 +1891,11 @@ async function applyFromSFEN() {
       const pt = PIECE_TYPES.find(p => p.base === base);
       const pname = pt ? pt.label : piece;
       if (isGote) {
-        labelEl.innerHTML = '↓' + pname;
+        labelEl.innerHTML = '↓' + pname + '<span class="ok-mark">○</span>';
         labelEl.style.background = catColors[2];
         if (cellCategories) cellCategories[row][col] = 2;
       } else {
-        labelEl.innerHTML = '↑' + pname;
+        labelEl.innerHTML = '↑' + pname + '<span class="ok-mark">○</span>';
         labelEl.style.background = catColors[1];
         if (cellCategories) cellCategories[row][col] = 1;
       }
@@ -1881,6 +1905,7 @@ async function applyFromSFEN() {
   document.getElementById('analyze-status').textContent = 'SFEN入力完了 — ' + labels.filter(l => l.piece !== 'none').length + '駒';
   updateBoardPreview(sfen); // 入力した SFEN を盤で表示
   enableSaveButton();
+  updateLabelProgress();
 }
 
 // 画像を登録したら自動で走る認識。入力タブに読み取れた盤面を出すだけで、
