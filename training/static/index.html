@@ -24,6 +24,7 @@ body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; pa
 .upload-area p { color: #888; }
 
 .stats { text-align: center; margin-bottom: 16px; color: #aaa; font-size: 14px; }
+.coord { width: 68px; background: #0f3460; border: 1px solid #333; color: #eee; padding: 5px 6px; border-radius: 3px; font-family: monospace; font-size: 12px; }
 .loading { display: none; text-align: center; padding: 24px; color: #4cc9f0; }
 .loading.active { display: block; }
 
@@ -31,6 +32,11 @@ body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; pa
   display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
   max-width: 1400px; margin: 0 auto 32px;
 }
+/* 盤面を手動指定している間は元画像だけを 1 列にして大きく出す。
+   3 枚並びの幅（1400/3 ≒ 460px）では駒の境目が見えず、外枠を数px の精度で
+   引けない。指定が終われば元の 3 枚並びに戻る */
+.pipeline.selecting { grid-template-columns: 1fr; }
+.pipeline.selecting .card.hide-when-selecting { display: none; }
 .card { background: #16213e; border-radius: 6px; overflow: hidden; }
 .card h3 { padding: 6px 12px; background: #0f3460; font-size: 13px; font-weight: 500; }
 .card img { width: 100%; display: block; }
@@ -440,36 +446,52 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   入力タブで画像を登録してください
 </div>
 
-<!-- 盤面検出に失敗したときだけ出す。手動指定すれば先に進めることを明示する -->
-<div id="analyze-notice" style="display:none;margin-bottom:12px;padding:10px 12px;background:#3a2a0f;border:1px solid #7a5a1f;border-radius:4px;font-size:13px;line-height:1.7;color:#f0c060">
-  盤面を自動検出できませんでした。<strong>「盤面を手動指定」</strong>を押して、元画像の上で
-  盤の左上から右下へドラッグしてください。指定すればそのまま認識・ラベリングに進めます。
-  <button class="action-btn" style="float:none;margin-left:8px" onclick="startBoardSelect()">盤面を手動指定</button>
-</div>
-
 <!-- いま編集している局面の ID。保存済み（履歴から再入力した / 一度保存した）ときだけ出る。
      不具合の事例を人に伝えるときは、日付時刻ではなくこの ID で指す -->
 <div id="analyze-id" style="display:none;font-size:12px;color:#888;margin-bottom:10px"></div>
 
 <div class="pipeline" id="pipeline" style="display:none">
   <div class="card">
-    <h3>元画像
-      <button id="btn-select-board" onclick="startBoardSelect()" style="float:right;font-size:11px;padding:2px 8px;background:#555;color:#eee;border:none;border-radius:3px;cursor:pointer">盤面を手動指定</button>
-    </h3>
+    <h3>元画像<span style="font-weight:400;color:#888;margin-left:8px;font-size:11px">盤面の指定は下の「1. 盤面の指定」から</span></h3>
     <div id="img-original-wrapper" style="position:relative;cursor:default">
       <img id="img-original" style="width:100%;display:block">
       <canvas id="select-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></canvas>
     </div>
-    <div id="select-hint" style="display:none;padding:4px 8px;background:#0f3460;font-size:12px;color:#4cc9f0">盤面の左上から右下へドラッグしてください</div>
+    <div id="select-hint" style="display:none;padding:6px 10px;background:#0f3460;font-size:12px;color:#4cc9f0">
+      盤の<strong>外枠（いちばん外側の線）</strong>の左上から右下へドラッグしてください
+      <button onclick="cancelBoardSelect()" style="float:right;font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 10px;border-radius:3px;cursor:pointer">やめる</button>
+    </div>
   </div>
-  <div class="card"><h3>エッジ</h3><img id="img-edges" style="width:100%;display:block"></div>
+  <div class="card hide-when-selecting"><h3>エッジ</h3><img id="img-edges" style="width:100%;display:block"></div>
   <!-- 検出に失敗しても DetectBoard の候補自体は描かれる（信頼度で棄却しただけ）。
        何も出ないわけではないので、棄却したことを見出しに書かないと成功に見える -->
-  <div class="card"><h3>盤面検出<span id="board-card-note" style="font-weight:400;color:#f0a030;margin-left:8px"></span></h3><img id="img-board" style="width:100%;display:block"></div>
+  <div class="card hide-when-selecting"><h3>盤面検出<span id="board-card-note" style="font-weight:400;color:#f0a030;margin-left:8px"></span></h3><img id="img-board" style="width:100%;display:block"></div>
 </div>
+<!-- 盤面の指定。3 枚の画像を眺めても「どこを直せばいいか」が分からなかったので、
+     他の工程と同じ番号付きの手順として最初に置く。**cells-section の外**に置くこと
+     （検出に失敗するとあちらは隠れるが、指定が要るのはまさにその場面） -->
+<div class="cells-section" id="board-step" style="display:none">
+  <h2>1. 盤面の指定
+    <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">検出がずれていたら、ここでドラッグか座標で指定し直します</span>
+  </h2>
+  <div id="board-step-state" style="font-size:13px;margin-bottom:8px"></div>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
+    <button class="action-btn" id="btn-select-board" style="float:none" onclick="startManualBoard()">手動で指定</button>
+    <span style="font-size:12px;color:#888;margin-left:8px">または座標で指定 —</span>
+    <span style="font-size:12px;color:#888">左上</span>
+    <input type="number" id="board-x1" class="coord" placeholder="x1">
+    <input type="number" id="board-y1" class="coord" placeholder="y1">
+    <span style="font-size:12px;color:#888">右下</span>
+    <input type="number" id="board-x2" class="coord" placeholder="x2">
+    <input type="number" id="board-y2" class="coord" placeholder="y2">
+    <button onclick="applyBoardCoords()" title="盤の外枠（10本の線の一番外側）の座標を入れてください"
+      style="background:#4cc9f0;color:#000;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">この座標で設定</button>
+  </div>
+</div>
+
 <div class="cells-section" id="cells-section" style="display:none">
   <!-- 上から「SFENで入力するなら入力」→「盤面で修正」→「保存」の順に並べる -->
-  <h2>1. SFENで入力する場合
+  <h2>2. SFENで入力する場合
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">貼り付けて「SFENから入力」。手で直すだけならここは不要です</span>
   </h2>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
@@ -480,7 +502,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
       style="background:#4cc9f0;color:#000;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;white-space:nowrap">SFENから入力</button>
   </div>
 
-  <h2>2. 盤面で修正
+  <h2>3. 盤面で修正
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">水色の「歩?」は推論候補（未確定）。違うマスをクリックして直してください</span>
   </h2>
   <div class="stats" id="analyze-status" style="text-align:left;margin-bottom:8px"></div>
@@ -488,7 +510,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
 
   <!-- 駒台の画像認識は未実装なので、ここは手入力。
        API から完全形の SFEN が来た場合はその値が入る（消さないため） -->
-  <h2 style="margin-top:20px">3. 手番と持ち駒
+  <h2 style="margin-top:20px">4. 手番と持ち駒
     <span style="font-size:12px;color:#888;font-weight:400;margin-left:12px">画像からは決まらないので手入力です。分からなければ触らなくて構いません</span>
   </h2>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
@@ -508,7 +530,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   <div id="hand-inputs" style="background:#16213e;border:1px solid #2a3a5e;border-radius:4px;padding:10px;margin-bottom:8px"></div>
   <div id="hand-summary" style="font-size:12px;line-height:1.7;margin-bottom:16px"></div>
 
-  <h2 style="margin-top:20px">4. 保存
+  <h2 style="margin-top:20px">5. 保存
     <button id="btn-save-session" class="action-btn" onclick="saveSession()" disabled
       title="画面の入力から SFEN を作って保存します。未入力のマスは推論候補で埋めます"
       style="background:#2d6a4f;color:#eee">保存</button>
@@ -628,15 +650,106 @@ function startBoardSelect() {
   boardSelectMode = true;
   document.getElementById('select-hint').style.display = 'block';
   document.getElementById('img-original-wrapper').style.cursor = 'crosshair';
+  // 元画像を 1 列にして大きく出す。小さいままでは外枠を精度よく引けない
+  document.getElementById('pipeline').classList.add('selecting');
 }
 
-// 入力タブの「解析タブで盤面を指定する」から呼ぶ。
+// 選択モードを抜ける（指定し終えたときと「やめる」の両方から呼ぶ）
+function endBoardSelect() {
+  boardSelectMode = false;
+  selectDragStart = null;
+  document.getElementById('select-hint').style.display = 'none';
+  document.getElementById('img-original-wrapper').style.cursor = 'default';
+  document.getElementById('pipeline').classList.remove('selecting');
+  const canvas = document.getElementById('select-canvas');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function cancelBoardSelect() {
+  endBoardSelect();
+  document.getElementById('board-step').scrollIntoView({ block: 'center' });
+}
+
+// 入力タブの「解析タブで盤面を指定する」と「1. 盤面の指定」のボタンから呼ぶ。
 // タブを切り替えるだけだと解析タブのどこを触ればいいか分からないので、
 // 元画像までスクロールして選択モードまで入れてしまう
 function startManualBoard() {
   switchTab('analyze');
   startBoardSelect();
   document.getElementById('img-original-wrapper').scrollIntoView({ block: 'center' });
+}
+
+// 「1. 盤面の指定」の表示を更新する。source は detect（自動検出を採用）/
+// rejected（信頼度不足で棄却。候補の座標は欄に入れる）/ manual（人が指定）/
+// saved（履歴に保存されていた座標）
+function showBoardStep(rect, source, conf) {
+  document.getElementById('board-step').style.display = currentSessionId ? '' : 'none';
+  if (rect) {
+    document.getElementById('board-x1').value = rect.x1;
+    document.getElementById('board-y1').value = rect.y1;
+    document.getElementById('board-x2').value = rect.x2;
+    document.getElementById('board-y2').value = rect.y2;
+  }
+  const where = rect
+    ? '(' + rect.x1 + ',' + rect.y1 + ')-(' + rect.x2 + ',' + rect.y2 + ') ' +
+      (rect.x2 - rect.x1) + 'x' + (rect.y2 - rect.y1) + 'px'
+    : '';
+  const el = document.getElementById('board-step-state');
+  if (source === 'rejected') {
+    // 棄却された候補も座標欄に入れておく。全然違う場所を見ていたのか
+    // 数px ずれただけなのかは、人が元画像と見比べれば分かる
+    el.innerHTML = '<span class="confidence-bad">自動検出は信頼度不足で棄却しました (信頼度: ' +
+      conf + '%)</span>' +
+      (where ? ' — 棄却した候補: <span style="font-family:monospace">' + where + '</span>' : '') +
+      '<br><span style="color:#ccc">「手動で指定」を押して元画像をドラッグするか、座標を直して「この座標で設定」を押してください。</span>';
+    return;
+  }
+  const label = source === 'manual' ? '手動指定' : source === 'saved' ? '保存済みの座標' : '自動検出';
+  el.innerHTML = label + ': <span style="font-family:monospace">' + where + '</span>' +
+    (source === 'detect' ? ' | 信頼度: <span class="' +
+      (conf >= 70 ? 'confidence-good' : conf >= 50 ? 'confidence-ok' : 'confidence-bad') +
+      '">' + conf + '%</span>' : '');
+}
+
+// 盤面の指定はドラッグ・座標入力・履歴からの復元のすべてがここを通る。
+// recognize=false は履歴からの復元用（この後 SFEN で上書きするので推論は要らない）
+async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual' } = {}) {
+  if (!currentSessionId) return false;
+  const r = {
+    x1: Math.min(x1, x2), y1: Math.min(y1, y2),
+    x2: Math.max(x1, x2), y2: Math.max(y1, y2),
+  };
+  if (r.x2 - r.x1 < 18 || r.y2 - r.y1 < 18) {
+    alert('盤面の範囲が小さすぎます（9マスに割れません）');
+    return false;
+  }
+  const res = await fetch('/api/setboard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session: currentSessionId, ...r }),
+  });
+  const data = await res.json();
+  if (data.status !== 'ok') { alert('盤面の指定に失敗しました'); return false; }
+  document.getElementById('img-board').src =
+    '/api/images/' + currentSessionId + '/board?' + Date.now();
+  cellSuggestions = data.suggestions || null;
+  renderCells(currentSessionId, data.categories);
+  document.getElementById('board-card-note').textContent = '';
+  showBoardStep(data.bounds || r, source);
+  if (recognize) {
+    document.getElementById('analyze-status').textContent = '盤面を指定しました';
+    await runRecognition();
+  }
+  return true;
+}
+
+// 座標欄から指定する。ドラッグでは数px の詰めがしづらいので、
+// 候補の座標を少しだけ直したいときはこちらが早い
+async function applyBoardCoords() {
+  const v = id => parseInt(document.getElementById(id).value, 10);
+  const nums = ['board-x1', 'board-y1', 'board-x2', 'board-y2'].map(v);
+  if (nums.some(n => !Number.isFinite(n))) { alert('座標を4つとも入力してください'); return; }
+  await setBoardRect(nums[0], nums[1], nums[2], nums[3]);
 }
 
 function getImgCoord(img, clientX, clientY) {
@@ -676,33 +789,13 @@ function getImgCoord(img, clientX, clientY) {
 
   wrapper.addEventListener('mouseup', async e => {
     if (!boardSelectMode || !selectDragStart) return;
-    boardSelectMode = false;
-    wrapper.style.cursor = 'default';
-    document.getElementById('select-hint').style.display = 'none';
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
     const img = document.getElementById('img-original');
     const c1 = getImgCoord(img, selectDragStart.clientX, selectDragStart.clientY);
     const c2 = getImgCoord(img, e.clientX, e.clientY);
-    selectDragStart = null;
+    // 元の 3 枚並びに戻してから設定する（盤面検出の画像も見せたいので）
+    endBoardSelect();
 
-    const res = await fetch('/api/setboard', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session: currentSessionId, x1: c1.x, y1: c1.y, x2: c2.x, y2: c2.y }),
-    });
-    const data = await res.json();
-    if (data.status === 'ok') {
-      const t = Date.now();
-      document.getElementById('img-board').src = '/api/images/' + currentSessionId + '/board?' + t;
-      cellSuggestions = data.suggestions || null;
-      renderCells(currentSessionId, data.categories);
-      document.getElementById('analyze-notice').style.display = 'none';
-      document.getElementById('board-card-note').textContent = '';
-      document.getElementById('analyze-status').textContent = '盤面を手動指定しました';
-      await runRecognition();
-    }
+    await setBoardRect(c1.x, c1.y, c2.x, c2.y);
   });
 })();
 
@@ -739,7 +832,8 @@ async function analyze(file, { tab = 'input' } = {}) {
   document.getElementById('pipeline').style.display = 'none';
   document.getElementById('cells-section').style.display = 'none';
   document.getElementById('analyze-empty').style.display = '';
-  document.getElementById('analyze-notice').style.display = 'none';
+  document.getElementById('board-step').style.display = 'none';
+  endBoardSelect(); // 前の画像で指定モードのままだった場合に備える
   document.getElementById('recog-section').style.display = 'none';
   document.getElementById('sfen-output').style.display = 'none';
   updateBoardPreview(null);
@@ -771,8 +865,11 @@ async function analyze(file, { tab = 'input' } = {}) {
     const conf = data.confidence || 0;
     const confClass = conf >= 70 ? 'confidence-good' : conf >= 50 ? 'confidence-ok' : 'confidence-bad';
 
+    const b = data.bounds;
+    const rect = b ? { x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h } : null;
+
     if (data.board) {
-      const b = data.bounds;
+      showBoardStep(rect, 'detect', conf);
       document.getElementById('stats').innerHTML =
         '盤面検出: ' + b.w + 'x' + b.h + 'px | 信頼度: <span class="' + confClass + '">' + conf + '%</span>';
       document.getElementById('board-card-note').textContent = '';
@@ -788,7 +885,7 @@ async function analyze(file, { tab = 'input' } = {}) {
         '<div style="font-size:13px;color:#ccc;margin-bottom:8px">解析タブで盤面の範囲を指定すれば、そのまま認識・ラベリングに進めます。</div>' +
         '<button class="action-btn" style="float:none" onclick="startManualBoard()">解析タブで盤面を指定する ›</button>';
       document.getElementById('cells-section').style.display = 'none';
-      document.getElementById('analyze-notice').style.display = '';
+      showBoardStep(rect, 'rejected', conf);
       document.getElementById('board-card-note').textContent = '（この候補は信頼度不足で棄却）';
     }
   } catch (e) { alert('エラー: ' + e.message); }
@@ -1608,20 +1705,10 @@ async function reenterHistory(row) {
   setCurrentHistoryId(id);
   resetSaveButton();
 
-  // 保存した盤面座標を復元
+  // 保存した盤面座標を復元。この後 SFEN でラベルを上書きするので推論は走らせない
   if (bounds && currentSessionId) {
-    const sbRes = await fetch('/api/setboard', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session: currentSessionId, ...bounds }),
-    });
-    const sbData = await sbRes.json();
-    if (sbData.status === 'ok') {
-      const t = Date.now();
-      document.getElementById('img-board').src = '/api/images/' + currentSessionId + '/board?' + t;
-      cellSuggestions = sbData.suggestions || null;
-      renderCells(currentSessionId, sbData.categories);
-    }
+    await setBoardRect(bounds.x1, bounds.y1, bounds.x2, bounds.y2,
+      { recognize: false, source: 'saved' });
   }
 
   // 保存済み SFEN を欄に戻してラベルへ展開する。

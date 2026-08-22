@@ -350,12 +350,17 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		"board":      hasBoard && confidence >= 0.5,
 		"confidence": int(confidence * 100),
 	}
-	if hasBoard && confidence >= 0.5 {
+	// **棄却した候補の座標も返す。** 解析タブの「盤面の指定」がこれを座標欄に
+	// 入れるので、外した検出を人が数px 直すだけで済む（評価タブが棄却された
+	// 候補の位置を残しているのと同じ理由）
+	if hasBoard {
 		b := result.Board.Bounds
 		resp["bounds"] = map[string]int{
 			"x": b.Min.X, "y": b.Min.Y,
 			"w": b.Dx(), "h": b.Dy(),
 		}
+	}
+	if hasBoard && confidence >= 0.5 {
 		cats := suteme.ClassifyBoard(img, result.Board)
 		catGrid := [9][9]int{}
 		for r := 0; r < 9; r++ {
@@ -766,9 +771,18 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 実際に使われた矩形を返す（正規化されるので、入れ替わった座標や
+	// ドラッグの向きに関わらず画面の座標欄と一致する）
+	mu.RLock()
+	bb := s.Result.Board.Bounds
+	mu.RUnlock()
 	resp := map[string]interface{}{
 		"status":     "ok",
 		"categories": catGrid,
+		"bounds": map[string]int{
+			"x1": bb.Min.X, "y1": bb.Min.Y,
+			"x2": bb.Max.X, "y2": bb.Max.Y,
+		},
 	}
 	mu.RLock()
 	if sug := predictCells(s); sug != nil {
