@@ -719,8 +719,11 @@ document.addEventListener('paste', e => {
   }
 });
 
-async function analyze(file) {
-  switchTab('input'); // 結果は入力タブに出るので、どこから貼っても移動する
+// tab: 解析後に居させたいタブ。ドラッグ&ドロップ / Ctrl+V は別タブから来るので
+// 認識結果の出る入力タブへ移す。履歴からの再入力だけは解析タブのまま進める
+// （入力タブを素通りしてスピナーだけ見せる遷移になっていた）
+async function analyze(file, { tab = 'input' } = {}) {
+  switchTab(tab);
   // 前の画像の入力を持ち越さない。SFEN 欄が残っていると次の画像の
   // ラベリング中も古い局面が画面に居座って紛らわしい
   document.getElementById('sfen-input').value = '';
@@ -731,7 +734,8 @@ async function analyze(file) {
   setHands('-');
   resetSaveButton();
   resetNegativeButton();
-  document.getElementById('loading').classList.add('active');
+  // 進捗は移った先のタブに出す（#loading は入力タブの中にある）
+  if (tab === 'input') document.getElementById('loading').classList.add('active');
   document.getElementById('pipeline').style.display = 'none';
   document.getElementById('cells-section').style.display = 'none';
   document.getElementById('analyze-empty').style.display = '';
@@ -740,7 +744,8 @@ async function analyze(file) {
   document.getElementById('sfen-output').style.display = 'none';
   updateBoardPreview(null);
   document.getElementById('stats').textContent = '';
-  document.getElementById('analyze-status').textContent = '';
+  document.getElementById('analyze-status').textContent =
+    tab === 'analyze' ? '画像を読み込んでいます...' : '';
 
   const form = new FormData();
   form.append('image', file);
@@ -1595,8 +1600,10 @@ async function reenterHistory(row) {
   processedHistory.add(id); // 処理済みマーク（セッション内のみ）
   const blob = await res.blob();
   const file = new File([blob], id + '.png', { type: 'image/png' });
-  // analyze() が SFEN 欄をクリアするので、復元は analyze の後に行う
-  await analyze(file);
+  // analyze() が SFEN 欄をクリアするので、復元は analyze の後に行う。
+  // **入力タブへは寄り道しない**（再入力は保存済みの正解を戻して直す作業で、
+  // 入力タブに出る認識結果はこの後の setboard / applyFromSFEN で上書きされる）
+  await analyze(file, { tab: 'analyze' });
   // 再入力なので、保存は新規登録ではなくこの履歴の上書きにする
   setCurrentHistoryId(id);
   resetSaveButton();
@@ -1627,8 +1634,7 @@ async function reenterHistory(row) {
     setHands(f[2] || '-');
     applyTurnFields(f[1], f[3]);
   }
-  // 再入力が目的なので、復元し終えてから解析タブに移る
-  switchTab('analyze');
+  document.getElementById('analyze-status').textContent = '履歴から読み込みました';
 }
 
 // 履歴の削除（エントリと保存画像の両方をサーバから消す）。
