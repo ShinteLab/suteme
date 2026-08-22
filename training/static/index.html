@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>suteme-test</title>
+<title>suteme-training</title>
 <style>
 /* 画面の幅。**ラベリングは駒が見えないと判断できない**ので広く取る。
    600px だった頃は 9 マスで 1 マス 64px しかなく、成駒の判別が厳しかった。
@@ -11,7 +11,6 @@
 :root { --page-width: 1200px; --board-width: 1000px; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
-h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 0.1em; }
 
 .upload-area {
   border: 2px dashed #555; border-radius: 8px; padding: 48px;
@@ -181,8 +180,6 @@ h1 { text-align: center; margin-bottom: 24px; font-weight: 300; letter-spacing: 
 </style>
 </head>
 <body>
-
-<h1>suteme-test</h1>
 
 <div class="tab-bar">
   <button class="tab-btn active" id="tab-btn-input" onclick="switchTab('input')">入力</button>
