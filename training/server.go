@@ -382,6 +382,18 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// setSessionImageCache はセッション画像（元画像・エッジ・盤面検出・マス）の
+// キャッシュ方針を決める。**no-cache にしてはいけない。**
+// URL には画面側が付ける ?<時刻> が入っていて、盤面を指定し直せば
+// 別の URL になる＝同じ URL の中身は変わらない。にもかかわらず no-cache だと
+// 検証子（ETag / Last-Modified）が無いぶん毎回まるごと取り直しになり、
+// ブラウザが画像を捨てて描き直すたびに 84 枚（元画像 3 + マス 81）の
+// PNG を再エンコードして返すことになる。取り直しが 1 枚でもこけると
+// **表示済みの盤面検出の枠やマスの写真が黙って消える**。
+func setSessionImageCache(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+}
+
 func handleImage(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/images/"), "/")
 	if len(parts) != 2 {
@@ -395,6 +407,10 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 	s, ok := sessions[id]
 	mu.RUnlock()
 	if !ok {
+		// 表示済みの画像が消えるときの原因はここ（セッションが無い＝
+		// サーバを再起動した等）。黙って 404 を返すと画面からは
+		// 「解析が消えた」としか見えないのでログに残す
+		log.Printf("image: unknown session %s (%s)", id, typ)
 		http.NotFound(w, r)
 		return
 	}
@@ -413,7 +429,7 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "no-cache")
+	setSessionImageCache(w)
 	png.Encode(w, img)
 }
 
@@ -436,6 +452,7 @@ func handleCell(w http.ResponseWriter, r *http.Request) {
 	s, ok := sessions[id]
 	mu.RUnlock()
 	if !ok || s.Result.Board == nil {
+		log.Printf("cell: unknown session %s (row=%d col=%d)", id, row, col)
 		http.NotFound(w, r)
 		return
 	}
@@ -447,7 +464,7 @@ func handleCell(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "no-cache")
+	setSessionImageCache(w)
 	png.Encode(w, cell)
 }
 

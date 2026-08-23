@@ -35,6 +35,11 @@ body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; pa
 /* 盤面を手動指定している間は元画像だけを 1 列にして大きく出す。
    3 枚並びの幅（1400/3 ≒ 460px）では駒の境目が見えず、外枠を数px の精度で
    引けない。指定が終われば元の 3 枚並びに戻る */
+.img-error {
+  padding: 10px; font-size: 12px; color: #ff8080; background: #2a1010;
+  border: 1px solid #5a2020; border-radius: 4px; line-height: 1.5;
+}
+.cell .img-error { padding: 4px; font-size: 10px; text-align: center; }
 .pipeline.selecting { grid-template-columns: 1fr; }
 .pipeline.selecting .card.hide-when-selecting { display: none; }
 .card { background: #16213e; border-radius: 6px; overflow: hidden; }
@@ -430,7 +435,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   <div class="recog-cols">
     <div class="recog-col">
       <div class="recog-label">入力画像</div>
-      <div class="recog-col-body"><img id="input-image" style="width:100%;display:block;border-radius:4px"></div>
+      <div class="recog-col-body"><img id="input-image" onerror="imageFailed(this)" style="width:100%;display:block;border-radius:4px"></div>
     </div>
     <div class="recog-col" id="recog-board-wrap" style="display:none">
       <div class="recog-label">読み取った盤面</div>
@@ -454,7 +459,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   <div class="card">
     <h3>元画像<span style="font-weight:400;color:#888;margin-left:8px;font-size:11px">盤面の指定は下の「1. 盤面の指定」から</span></h3>
     <div id="img-original-wrapper" style="position:relative;cursor:default">
-      <img id="img-original" style="width:100%;display:block">
+      <img id="img-original" onerror="imageFailed(this)" style="width:100%;display:block">
       <canvas id="select-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></canvas>
     </div>
     <div id="select-hint" style="display:none;padding:6px 10px;background:#0f3460;font-size:12px;color:#4cc9f0">
@@ -462,10 +467,10 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
       <button onclick="cancelBoardSelect()" style="float:right;font-size:11px;background:none;border:1px solid #444;color:#888;padding:2px 10px;border-radius:3px;cursor:pointer">やめる</button>
     </div>
   </div>
-  <div class="card hide-when-selecting"><h3>エッジ</h3><img id="img-edges" style="width:100%;display:block"></div>
+  <div class="card hide-when-selecting"><h3>エッジ</h3><img id="img-edges" onerror="imageFailed(this)" style="width:100%;display:block"></div>
   <!-- 検出に失敗しても DetectBoard の候補自体は描かれる（信頼度で棄却しただけ）。
        何も出ないわけではないので、棄却したことを見出しに書かないと成功に見える -->
-  <div class="card hide-when-selecting"><h3>盤面検出<span id="board-card-note" style="font-weight:400;color:#f0a030;margin-left:8px"></span></h3><img id="img-board" style="width:100%;display:block"></div>
+  <div class="card hide-when-selecting"><h3>盤面検出<span id="board-card-note" style="font-weight:400;color:#f0a030;margin-left:8px"></span></h3><img id="img-board" onerror="imageFailed(this)" style="width:100%;display:block"></div>
 </div>
 <!-- 盤面の指定。3 枚の画像を眺めても「どこを直せばいいか」が分からなかったので、
      他の工程と同じ番号付きの手順として最初に置く。**cells-section の外**に置くこと
@@ -647,6 +652,22 @@ fileInput.addEventListener('change', () => { if (fileInput.files.length) analyze
 // 盤面手動指定
 let boardSelectMode = false;
 let selectDragStart = null;
+
+// 画像が取れなかったときに黙って消えないようにする。
+// セッション（元画像・盤面・マスの切り出し）は**サーバのメモリにしかない**ので、
+// サーバを再起動すると 404 になり、それまで出ていた盤面検出の枠やマスの写真が
+// いっせいに消える。理由がその場に出ていないと「解析が消えた」としか見えない。
+function imageFailed(img) {
+  if (img.dataset.failed) return;
+  img.dataset.failed = '1';
+  img.style.display = 'none';
+  const cell = img.closest('.cell');
+  const note = document.createElement('div');
+  note.className = 'img-error';
+  note.textContent = cell ? '画像なし'
+    : '画像を取得できませんでした。サーバを再起動すると解析中の画像は失われます — 入力タブで登録し直してください。';
+  img.parentNode.insertBefore(note, img.nextSibling);
+}
 
 function startBoardSelect() {
   if (!currentSessionId) return;
@@ -920,7 +941,7 @@ function renderCells(id, categories) {
       }
 
       cell.innerHTML =
-        '<img src="/api/cells/' + id + '/' + r + '/' + c + '?' + Date.now() + '">' +
+        '<img onerror="imageFailed(this)" src="/api/cells/' + id + '/' + r + '/' + c + '?' + Date.now() + '">' +
         '<div class="label" id="label-' + r + '-' + c + '" style="background:' + labelBg + '">' + catLabel(cat) + hint + '</div>';
       grid.appendChild(cell);
     }
