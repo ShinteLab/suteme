@@ -5,10 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>suteme-training</title>
 <style>
-/* 画面の幅。**ラベリングは駒が見えないと判断できない**ので広く取る。
-   600px だった頃は 9 マスで 1 マス 64px しかなく、成駒の判別が厳しかった。
-   --board-width は盤（9x9）の幅で、1 マス = これ / 9 になる */
-:root { --page-width: 1200px; --board-width: 1000px; }
+/* 画面の幅。--board-width は盤（9x9）の幅で、1 マス = これ / 9 になる。
+   **既定は小さいほう（500px）。** ラベリングは駒が見えないと判断できないが、
+   直すマスが無いときは画面の大半を占めるだけで邪魔になる。駒を見比べたい
+   ときだけ「大きく」で 1000px（1 マス 108px）に広げる。
+   600px だった頃は 1 マス 64px しかなく、成駒の判別が厳しかった */
+:root { --page-width: 1200px; --board-width: 500px; }
+body.board-big { --board-width: 1000px; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
 
@@ -512,6 +515,9 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
     <!-- **どこまで入力したかは常に出す。** 履歴から戻したときや推論候補のままの
          ときに、画面が「入力済み」なのか「まだ候補」なのか見分けが付かなかった -->
     <span id="label-progress" style="float:right;font-size:12px;font-weight:400"></span>
+    <button id="btn-board-size" onclick="toggleBoardSize()"
+      title="マスを大きくして駒を見比べる（設定はこのブラウザに残ります）"
+      style="float:right;font-size:11px;font-weight:400;margin-right:12px;background:#0f3460;color:#9ad;border:1px solid #2a3a5e;padding:2px 10px;border-radius:3px;cursor:pointer"></button>
   </h2>
   <div class="stats" id="analyze-status" style="text-align:left;margin-bottom:8px"></div>
   <div class="cell-grid" id="cell-grid"></div>
@@ -652,6 +658,23 @@ fileInput.addEventListener('change', () => { if (fileInput.files.length) analyze
 // 盤面手動指定
 let boardSelectMode = false;
 let selectDragStart = null;
+
+// ラベリングのマスの大きさ。**既定は小さいほう。**
+// 入力が要らないときに画面の大半を盤が占めるのが邪魔なので、
+// 駒を見比べたいときだけ広げる。選んだ状態はこのブラウザに残す
+function setBoardSize(big) {
+  document.body.classList.toggle('board-big', big);
+  document.getElementById('btn-board-size').textContent = big ? '小さく' : '大きく';
+  try { localStorage.setItem('sutemeBoardBig', big ? '1' : '0'); } catch (e) { /* 保存できなくても動く */ }
+}
+
+function toggleBoardSize() {
+  setBoardSize(!document.body.classList.contains('board-big'));
+}
+
+setBoardSize((() => {
+  try { return localStorage.getItem('sutemeBoardBig') === '1'; } catch (e) { return false; }
+})());
 
 // 画像が取れなかったときに黙って消えないようにする。
 // セッション（元画像・盤面・マスの切り出し）は**サーバのメモリにしかない**ので、
