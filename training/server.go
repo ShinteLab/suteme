@@ -33,6 +33,10 @@ type session struct {
 	Original image.Image
 	Result   *suteme.AnalyzeResult
 	BoardImg *image.RGBA
+	// BoundsBy は今の盤面座標を**誰が決めたか**（detect / manual / 空＝不明）。
+	// 保存時にそのまま履歴へ移す。**画面から送られた値を保存時に受け取る形に
+	// しないこと**（保存の直前に人が引き直しても追随しないため）
+	BoundsBy string
 }
 
 const (
@@ -59,11 +63,37 @@ const (
 	SourceAPI = "api"
 )
 
+// 盤面座標の出どころ。**空文字は「不明」であって「自動検出」ではない。**
+// 既存エントリと、出どころを名乗らずに /api/register へ送られたものが該当する。
+// 分からないものを分かった風に出すと、検出の成績を読むときに騙される
+// （評価タブが出所ごとに集計を分けているのと同じ理由）
+const (
+	BoundsByDetect = "detect" // 自動検出をそのまま採用した
+	BoundsByManual = "manual" // 人が引いた（ドラッグ / 座標入力）
+)
+
+// normalizeBoundsBy は知らない値を「不明」に倒す
+func normalizeBoundsBy(v string) string {
+	switch v {
+	case BoundsByDetect, BoundsByManual:
+		return v
+	}
+	return ""
+}
+
 type HistoryEntry struct {
 	ID          string       `json:"id"`
 	CreatedAt   string       `json:"created_at"`
 	SFEN        string       `json:"sfen"`
 	BoardBounds *BoardBounds `json:"board_bounds,omitempty"`
+	// BoundsBy は BoardBounds を**誰が決めたか**（"detect" / "manual"）。
+	// 空は不明（既存エントリ・出どころを名乗らない API 登録）。
+	//
+	// **座標があることと、人が引いたことは別**。自動検出をそのまま保存した
+	// 局面の座標は検出器自身の出力なので、突き合わせても同じ結果が出るだけ
+	// （評価タブの `EvalDetect.Exact` はこれを px 単位の一致で代用していた）。
+	// 再入力したときに「保存済みの座標」としか出せなかったのもこれが無いため
+	BoundsBy string `json:"bounds_by,omitempty"`
 	// Source は登録経路（"ui" / "api"）。空は UI（既存エントリ）
 	Source string `json:"source,omitempty"`
 	// Verified は人が解析タブで内容を見たか。**画像と SFEN の対応は機械には
@@ -350,6 +380,7 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		Original: img,
 		Result:   result,
 		BoardImg: boardImg,
+		BoundsBy: BoundsByDetect,
 	}
 	mu.Unlock()
 
@@ -641,6 +672,7 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	if s.Result != nil && s.Result.Board != nil {
 		b := s.Result.Board.Bounds
 		entry.BoardBounds = &BoardBounds{b.Min.X, b.Min.Y, b.Max.X, b.Max.Y}
+		entry.BoundsBy = s.BoundsBy
 	}
 	historyMu.Lock()
 	h := loadHistory()
@@ -775,6 +807,10 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 		Y1      int    `json:"y1"`
 		X2      int    `json:"x2"`
 		Y2      int    `json:"y2"`
+		// By は座標の出どころ。人が引いたなら "manual"、履歴から戻したなら
+		// **そのエントリに記録されていた値**をそのまま渡す（戻しただけで
+		// 「人が引いた」に格上げしない）
+		By string `json:"by"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -795,6 +831,7 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		br := suteme.BoardRegionFromRect(req.X1, req.Y1, req.X2, req.Y2)
 		s.Result.Board = br
+		s.BoundsBy = normalizeBoundsBy(req.By)
 		s.BoardImg = s.Result.DrawBoard(s.Original)
 		cats = suteme.ClassifyBoard(s.Original, br)
 	}
@@ -824,6 +861,7 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 			"x1": bb.Min.X, "y1": bb.Min.Y,
 			"x2": bb.Max.X, "y2": bb.Max.Y,
 		},
+		"bounds_by": normalizeBoundsBy(req.By),
 	}
 	mu.RLock()
 	if sug := predictCells(s); sug != nil {
