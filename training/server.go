@@ -40,8 +40,17 @@ const (
 	historyFile = "data/history.json"
 )
 
+// BoardBounds は盤面の外枠。**json タグを外さないこと。**
+// タグが無いと `{"X1":296,...}` と大文字で出るが、画面側は
+// `/api/setboard` の返す `bounds` と同じ小文字で読む。食い違うと
+// 履歴からの再入力で座標が undefined → null → 0 になり、
+// **(0,0)-(0,0) の盤面が設定されて格子と 81 マスの画像が消える**。
+// 読み込みは大文字小文字を区別しないので、既存の history.json もそのまま読める。
 type BoardBounds struct {
-	X1, Y1, X2, Y2 int
+	X1 int `json:"x1"`
+	Y1 int `json:"y1"`
+	X2 int `json:"x2"`
+	Y2 int `json:"y2"`
 }
 
 // 局面の出所。空文字（既存エントリ）は UI からの保存とみなす
@@ -297,6 +306,13 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 		}
 	}
 	return &grid
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func newID() string {
@@ -762,6 +778,14 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 潰れた矩形は 9 マスに割れない。黙って受けると盤面が (0,0)-(0,0) になり、
+	// マス画像が全部 404 ＝ 画面から解析結果が消えたようにしか見えない
+	// （ドラッグの向きで座標が入れ替わることがあるので絶対値で見る）
+	if abs(req.X2-req.X1) < 18 || abs(req.Y2-req.Y1) < 18 {
+		http.Error(w, "盤面の範囲が小さすぎます", http.StatusBadRequest)
 		return
 	}
 

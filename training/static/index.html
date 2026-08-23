@@ -739,6 +739,13 @@ function showBoardStep(rect, source, conf) {
 // recognize=false は履歴からの復元用（この後 SFEN で上書きするので推論は要らない）
 async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual' } = {}) {
   if (!currentSessionId) return false;
+  // **数値でないものを黙って送らない。** JSON.stringify は NaN/undefined を
+  // null にするので、サーバは 0 として受け取り (0,0)-(0,0) の盤面を作る。
+  // その盤はマスを切り出せず、格子も 81 マスの画像も画面から消える
+  if (![x1, y1, x2, y2].every(Number.isFinite)) {
+    alert('盤面の座標が読めませんでした（' + [x1, y1, x2, y2].join(',') + '）');
+    return false;
+  }
   const r = {
     x1: Math.min(x1, x2), y1: Math.min(y1, y2),
     x2: Math.max(x1, x2), y2: Math.max(y1, y2),
@@ -1727,13 +1734,22 @@ document.getElementById('history-list').addEventListener('click', async e => {
   updateTrainHistoryButton();
 });
 
+// 履歴の盤面座標。サーバは小文字キー（x1..y2）で返すが、
+// 古い書き出しの大文字キーも拾えるようにしておく
+function normalizeBounds(b) {
+  if (!b) return null;
+  const pick = (lo, up) => (b[lo] !== undefined ? b[lo] : b[up]);
+  const r = { x1: pick('x1', 'X1'), y1: pick('y1', 'Y1'), x2: pick('x2', 'X2'), y2: pick('y2', 'Y2') };
+  return [r.x1, r.y1, r.x2, r.y2].every(Number.isFinite) ? r : null;
+}
+
 // 保存済み局面を解析タブに読み込んで直す。画像・盤面座標・SFEN を戻し、
 // 保存は新規登録ではなくこの履歴の上書きにする
 async function reenterHistory(row) {
   if (!row) return;
   const id = row.dataset.id;
   const sfen = row.dataset.sfen;
-  const bounds = row.dataset.bounds ? JSON.parse(row.dataset.bounds) : null;
+  const bounds = normalizeBounds(row.dataset.bounds ? JSON.parse(row.dataset.bounds) : null);
 
   const res = await fetch('/api/history/' + id + '/image');
   if (!res.ok) { alert('画像の読み込みに失敗しました'); return; }
