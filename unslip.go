@@ -206,6 +206,42 @@ func (j *StripJudge) BoardScore(in []float64) float64 {
 // 0.3 でも結果は同じなので、間を採って 0.2。
 const unslipMargin = 0.2
 
+// stripGainCover は「得る帯」が画像の中に写っていなければならない割合。
+//
+// **`StripInput` は画像の範囲で切ってから 72x8 に潰す。** 帯が画像の外へ
+// 出ていると、9マス分より短い帯を引き伸ばした別物を測ることになるのに、
+// 判定器はそれでも何らかのスコアを返す。実測（`6850d800`）:
+// 上へ 1マス分の帯が 65px 中 49px（0.75）しか無いのに盤らしさ 1.00 を返し、
+// **正しかった窓（0.07マス）を 0.98マスへ動かして**いた。しかも乗り換えた先は
+// 画像の外へ 16px はみ出す（`unslipRegion` はこの前に済んでいるので誰も戻さない）。
+//
+// **「乗り換え先が画像に収まること」を条件にしてはいけない。** 盤が画像の
+// 下端で切れている局面（`eb47550c`。人が引いた枠自体が画像の外へ 7px 出ている）で
+// 本来直る乗り換えを止めてしまう。見るのは窓ではなく帯。
+//
+// 掃引（leave-one-out、155 局面。判定器なしの 0.5マス以内は 150）:
+//
+//	cover  0.5マス以内  直った  壊れた
+//	0.00      152         3       1     ← 導入前
+//	0.75      152         3       1
+//	0.80      153         3       0
+//	0.85      153         3       0     ← 現在（平らな範囲の真ん中）
+//	0.90      153         3       0
+//	0.95      152         2       0     ← `eb47550c`(0.92) が止まる
+//
+// 0.80〜0.90 が平らなので中央を採る。
+const stripGainCover = 0.85
+
+// stripVisibleEnough は帯が画像に十分写っているかを返す
+func stripVisibleEnough(r, bounds image.Rectangle) bool {
+	area := r.Dx() * r.Dy()
+	if area <= 0 {
+		return false
+	}
+	vis := r.Intersect(bounds)
+	return float64(vis.Dx()*vis.Dy()) >= stripGainCover*float64(area)
+}
+
 // unslipByJudge は ±1マスずらした窓と見比べ、
 // 「失う帯」より「得る帯」のほうが盤らしければ乗り換える。
 //
@@ -237,6 +273,12 @@ func unslipByJudge(img image.Image, br *BoardRegion, j *StripJudge) *BoardRegion
 
 	bestGain, best := unslipMargin, br
 	for _, c := range cands {
+		// **得る帯がほとんど画像の外なら比べない**（`stripGainCover`）。
+		if !stripVisibleEnough(c.gain, img.Bounds()) {
+			continue
+		}
+		moved := image.Rect(b.Min.X+c.dx*cw, b.Min.Y+c.dy*ch,
+			b.Max.X+c.dx*cw, b.Max.Y+c.dy*ch)
 		lost := StripInput(img, c.lost, c.vertical)
 		gain := StripInput(img, c.gain, c.vertical)
 		if lost == nil || gain == nil {
@@ -244,8 +286,7 @@ func unslipByJudge(img image.Image, br *BoardRegion, j *StripJudge) *BoardRegion
 		}
 		if d := j.BoardScore(gain) - j.BoardScore(lost); d > bestGain {
 			bestGain = d
-			best = BoardRegionFromRect(b.Min.X+c.dx*cw, b.Min.Y+c.dy*ch,
-				b.Max.X+c.dx*cw, b.Max.Y+c.dy*ch)
+			best = BoardRegionFromRect(moved.Min.X, moved.Min.Y, moved.Max.X, moved.Max.Y)
 		}
 	}
 	return best
