@@ -728,8 +728,10 @@ function startManualBoard() {
 
 // 「1. 盤面の指定」の表示を更新する。source は detect（自動検出を採用）/
 // rejected（信頼度不足で棄却。候補の座標は欄に入れる）/ manual（人が指定）/
-// saved（履歴に保存されていた座標）
-function showBoardStep(rect, source, conf) {
+// saved（履歴に保存されていた座標）。
+// saved のときは by（detect / manual / 空＝不明）でその座標を誰が決めたかを出す。
+// **「保存済み」だけでは自動検出のまま保存したものと区別が付かない**
+function showBoardStep(rect, source, conf, by) {
   document.getElementById('board-step').style.display = currentSessionId ? '' : 'none';
   if (rect) {
     document.getElementById('board-x1').value = rect.x1;
@@ -751,7 +753,13 @@ function showBoardStep(rect, source, conf) {
       '<br><span style="color:#ccc">「手動で指定」を押して元画像をドラッグするか、座標を直して「この座標で設定」を押してください。</span>';
     return;
   }
-  const label = source === 'manual' ? '手動指定' : source === 'saved' ? '保存済みの座標' : '自動検出';
+  let label = source === 'manual' ? '手動指定' : source === 'saved' ? '保存済みの座標' : '自動検出';
+  if (source === 'saved') {
+    // 空は「不明」。分からないものを「自動検出」と言い切らない
+    label += by === 'manual' ? '（人が指定したもの）'
+      : by === 'detect' ? '（自動検出のまま保存）'
+      : '（出どころ不明）';
+  }
   el.innerHTML = label + ': <span style="font-family:monospace">' + where + '</span>' +
     (source === 'detect' ? ' | 信頼度: <span class="' +
       (conf >= 70 ? 'confidence-good' : conf >= 50 ? 'confidence-ok' : 'confidence-bad') +
@@ -760,7 +768,7 @@ function showBoardStep(rect, source, conf) {
 
 // 盤面の指定はドラッグ・座標入力・履歴からの復元のすべてがここを通る。
 // recognize=false は履歴からの復元用（この後 SFEN で上書きするので推論は要らない）
-async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual' } = {}) {
+async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual', by } = {}) {
   if (!currentSessionId) return false;
   // **数値でないものを黙って送らない。** JSON.stringify は NaN/undefined を
   // null にするので、サーバは 0 として受け取り (0,0)-(0,0) の盤面を作る。
@@ -780,7 +788,9 @@ async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual
   const res = await fetch('/api/setboard', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session: currentSessionId, ...r }),
+    // 履歴から戻したときは記録されていた出どころをそのまま渡す
+    // （戻しただけで「人が引いた」に格上げしない）
+    body: JSON.stringify({ session: currentSessionId, ...r, by: by !== undefined ? by : 'manual' }),
   });
   const data = await res.json();
   if (data.status !== 'ok') { alert('盤面の指定に失敗しました'); return false; }
@@ -789,7 +799,7 @@ async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual
   cellSuggestions = data.suggestions || null;
   renderCells(currentSessionId, data.categories);
   document.getElementById('board-card-note').textContent = '';
-  showBoardStep(data.bounds || r, source);
+  showBoardStep(data.bounds || r, source, undefined, data.bounds_by);
   if (recognize) {
     document.getElementById('analyze-status').textContent = '盤面を指定しました';
     await runRecognition();
@@ -923,7 +933,7 @@ async function analyze(file, { tab = 'input' } = {}) {
     const rect = b ? { x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h } : null;
 
     if (data.board) {
-      showBoardStep(rect, 'detect', conf);
+      showBoardStep(rect, 'detect', conf, 'detect');
       document.getElementById('stats').innerHTML =
         '盤面検出: ' + b.w + 'x' + b.h + 'px | 信頼度: <span class="' + confClass + '">' + conf + '%</span>';
       document.getElementById('board-card-note').textContent = '';
@@ -1617,7 +1627,8 @@ async function refreshHistory() {
     // 画像と SFEN の対応は機械には検証できないので学習には使えない
     const unverified = e.source === 'api' && !e.verified;
     return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
-      data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}">
+      data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}"
+      data-bounds-by="${e.bounds_by || ''}">
       <div class="hist-sel-cell" title="${unverified ? '未確認の局面は学習に使えません' : '学習に使う'}">
         <input type="checkbox" class="hist-sel" data-id="${e.id}" ${unverified ? 'disabled' : ''}></div>
       <span class="hist-check">${done ? '○' : ''}</span>
@@ -1773,6 +1784,7 @@ async function reenterHistory(row) {
   const id = row.dataset.id;
   const sfen = row.dataset.sfen;
   const bounds = normalizeBounds(row.dataset.bounds ? JSON.parse(row.dataset.bounds) : null);
+  const boundsBy = row.dataset.boundsBy || '';
 
   const res = await fetch('/api/history/' + id + '/image');
   if (!res.ok) { alert('画像の読み込みに失敗しました'); return; }
@@ -1790,7 +1802,7 @@ async function reenterHistory(row) {
   // 保存した盤面座標を復元。この後 SFEN でラベルを上書きするので推論は走らせない
   if (bounds && currentSessionId) {
     await setBoardRect(bounds.x1, bounds.y1, bounds.x2, bounds.y2,
-      { recognize: false, source: 'saved' });
+      { recognize: false, source: 'saved', by: boundsBy });
   }
 
   // 保存済み SFEN を欄に戻してラベルへ展開する。

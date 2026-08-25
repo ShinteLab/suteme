@@ -252,11 +252,17 @@ func newToken() string {
 //	image          画像ファイル（PNG / JPEG）
 //	sfen           正解の SFEN（盤面部分だけでも可）
 //	x1,y1,x2,y2    盤面の外枠座標（必須）
+//	bounds_by      座標の出どころ（任意。"detect" / "manual"。既定は不明）
 //
 // **盤面座標は必須。** 座標なしのエントリは samplesFromHistory が
 // DetectBoard に頼るうえ shiftAugment のずらしを作らないので、学習価値が
 // 1/5 になる。しかもその事実に学習を押すまで気付けない。送り手（ikkyoku）は
 // suteme の盤面認識を通した座標を持っているので、必須にして困らない。
+//
+// **`bounds_by` は名乗らなければ「不明」。自動検出とみなさない。**
+// 送り手が人の手で枠を引ける作りなら "manual" を送ること。この値は
+// 「その座標を突き合わせに使ってよいか」の判断に効く（自動検出をそのまま
+// 送り返した座標は検出器自身の出力なので、突き合わせても自己充足になる）。
 //
 // **SFEN は検証しない。** 解析タブで人が確認する運びなので、
 // ここで弾くと直す機会ごと失う。パースできない SFEN は学習時に
@@ -346,6 +352,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().Format("01/02 15:04"),
 		SFEN:        sfenStr,
 		BoardBounds: bounds,
+		BoundsBy:    normalizeBoundsBy(r.FormValue("bounds_by")),
 		Source:      SourceAPI,
 		Verified:    false,
 		Hash:        hash,
