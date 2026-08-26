@@ -13,6 +13,11 @@ training_data*.bin.tmp*
 training_data*.json
 training_data.json.*
 
+# 盤の縁の帯（1マス滑りの判定器）。history.json から作り直せる生成物なので
+# training_data*.bin と同じ扱い（training/unslip.go の rebuildStripData）
+strip_data*.bin
+strip_data*.bin.tmp*
+
 # 保存済み局面データ
 data/
 
