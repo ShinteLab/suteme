@@ -222,6 +222,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/savesession", handleSaveSession)
 	mux.HandleFunc("/api/setboard", handleSetBoard)
 	mux.HandleFunc("/api/trainhistory", handleTrainHistory)
+	mux.HandleFunc("/api/export", handleExport)
 	mux.HandleFunc("/api/recognize", handleRecognize)
 	mux.HandleFunc("/api/handcheck", handleHandCheck)
 	mux.HandleFunc("/api/evaluate", handleEvaluate)
@@ -1002,6 +1003,43 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+}
+
+// handleExport: 配布用の認識器を dist/ に書き出す（training/compact.go）。
+//
+// **ローカル限定**（`withAccessControl` がループバック以外を落とす）。
+// 学習データはファイルを書く操作なので、外から叩ける口には載せない。
+func handleExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		PerClass int `json:"per_class"`
+	}
+	// 本文が無くても既定で書き出せるようにする（デコード失敗は無視）
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.PerClass <= 0 {
+		req.PerClass = CompactPerClass
+	}
+
+	files, err := ExportCompact(req.PerClass)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var total int64
+	for _, f := range files {
+		total += f.Bytes
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"dir":       distDir,
+		"per_class": req.PerClass,
+		"bytes":     total,
+		"files":     files,
+	})
 }
 
 // countEmpty は空マスのサンプル数を数える

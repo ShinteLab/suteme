@@ -368,6 +368,27 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
   </label>
   <div id="history-list" style="max-height:480px;overflow-y:auto;border:1px solid #2a3a5e;border-radius:4px"></div>
   <div id="hist-train-result" style="display:none;margin-top:8px;padding:8px 12px;background:#0f3460;border-radius:4px;font-size:12px;line-height:1.7"></div>
+
+  <!-- 配布用の書き出し。**学習データ全件は配れない**（114MB・1局面 1.2秒・
+       並べ直せば盤の絵になる）ので、クラスごとに間引いたものを dist/ に出す。
+       手元の全件を上書きしないよう、名前は正式名のままディレクトリで分ける -->
+  <div style="margin-top:14px;padding-top:12px;border-top:1px solid #2a3a5e">
+    <div style="font-weight:bold;margin-bottom:4px">配布用に書き出す</div>
+    <div style="font-size:12px;color:#888;margin-bottom:8px">
+      学習データを 1クラスあたりの件数まで間引いて <code>dist/</code> に出します
+      （盤の縁の判定データも一緒に置きます）。
+      <b>中身は駒の画像そのもの</b>なので、公開するなら元画像の権利を確かめてから。
+    </div>
+    <label style="font-size:12px;color:#888;display:inline-flex;align-items:center;gap:6px">
+      1クラスあたり
+      <input type="number" id="export-per-class" value="1000" min="1" step="50"
+        style="width:80px;padding:4px;background:#16213e;border:1px solid #2a3a5e;border-radius:3px;color:#eee">
+      件
+    </label>
+    <button id="export-btn" onclick="exportCompact()" style="margin-left:8px">書き出す</button>
+    <span style="font-size:12px;color:#888;margin-left:8px">目安: 250件で約6MB・1000件で約19MB</span>
+    <div id="export-result" style="display:none;margin-top:8px;padding:8px 12px;background:#0f3460;border-radius:4px;font-size:12px;line-height:1.7"></div>
+  </div>
 </div>
 
 <div id="tab-look" style="display:none;max-width:var(--page-width);margin:0 auto 20px">
@@ -1753,6 +1774,50 @@ async function trainFromHistory() {
     box.innerHTML = '<span style="color:#ff8080">エラー: ' + e.message + '</span>';
   } finally {
     updateTrainHistoryButton();
+  }
+}
+
+// 配布用に学習データを間引いて dist/ に書き出す。
+// **学習データ全件は配れない**（114MB / 1局面 1.2秒 / 並べ直せば盤の絵になる）。
+// 数字は「1クラスあたり何件残すか」で、クラスの偏りは直さない（上限だけ）
+async function exportCompact() {
+  const per = parseInt(document.getElementById('export-per-class').value, 10);
+  const btn = document.getElementById('export-btn');
+  const box = document.getElementById('export-result');
+  if (!(per > 0)) {
+    box.style.display = 'block';
+    box.innerHTML = '<span style="color:#ff8080">1クラスあたりの件数は 1 以上にしてください</span>';
+    return;
+  }
+  btn.disabled = true;
+  box.style.display = 'block';
+  box.innerHTML = '<span style="color:#888">書き出しています…</span>';
+  try {
+    const res = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ per_class: per }),
+    });
+    if (!res.ok) {
+      box.innerHTML = '<span style="color:#ff8080">書き出しに失敗しました: ' + (await res.text()) + '</span>';
+      return;
+    }
+    const data = await res.json();
+    const mb = b => (b / 1024 / 1024).toFixed(1) + ' MB';
+    let html = '<b style="color:#74c69d">書き出しました</b> — ' +
+      data.dir + '/ に ' + (data.files || []).length + ' ファイル（合計 ' + mb(data.bytes) + '）';
+    (data.files || []).forEach(f => {
+      html += '<br><code>' + f.path + '</code> — ' + mb(f.bytes) +
+        (f.samples ? '（' + f.samples + '件）' : '') +
+        '<br><span style="color:#888">　' + f.note + '</span>';
+    });
+    html += '<br><span style="color:#888">受け取る側は、この 2 つを実行ファイルと同じ場所か' +
+      'カレントディレクトリに置きます（ファイル名は変えないこと）。</span>';
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<span style="color:#ff8080">エラー: ' + e.message + '</span>';
+  } finally {
+    btn.disabled = false;
   }
 }
 

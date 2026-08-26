@@ -36,19 +36,32 @@ import (
 const OrientPerClass = 250
 
 // BuildOrientData は学習データから向き照合用のサンプルを間引いて返す。
+// **空マスは落とす**（`PieceDistance` が読み飛ばすので持っていても引かれない）。
+func BuildOrientData(samples []suteme.TrainingSample, perClass int) []suteme.TrainingSample {
+	return thinByClass(samples, perClass, false)
+}
+
+// thinByClass はクラスごとに perClass 件まで間引く。
 //
 // **等間隔に抜く（先頭から詰めない）。** 学習データは局面ごとに順に
 // 積まれているので、先頭から取ると**古い局面の盤だけ**が残る。
-// 回転照合の成績は「同じ見た目の盤を見たことがあるか」で決まる
-// （CLAUDE.md「向きの回転照合」）ので、**見た目の広がりが命**。
+// k-NN の成績は「同じ見た目の盤を見たことがあるか」で決まる
+// （CLAUDE.md「同じ出所を厚く」「向きの回転照合」）ので、**見た目の広がりが命**。
 // 等間隔なら局面をまたいで散る。
-func BuildOrientData(samples []suteme.TrainingSample, perClass int) []suteme.TrainingSample {
+//
+// **クラスの偏りは直さない。** 上限をかけるだけで、少ないクラスを
+// 水増ししない（`BalanceData` とは別物）。歩 3560 に対し杏 10 のような
+// 開きはそのまま残る＝間引いても薄いクラスは薄いまま。
+func thinByClass(samples []suteme.TrainingSample, perClass int, keepEmpty bool) []suteme.TrainingSample {
 	if perClass <= 0 {
 		return nil
 	}
 	byClass := map[int][]int{}
 	for i, s := range samples {
-		if s.Label == suteme.ClassEmpty || s.Label < 0 {
+		if s.Label < 0 {
+			continue
+		}
+		if s.Label == suteme.ClassEmpty && !keepEmpty {
 			continue
 		}
 		byClass[s.Label] = append(byClass[s.Label], i)
@@ -69,7 +82,7 @@ func BuildOrientData(samples []suteme.TrainingSample, perClass int) []suteme.Tra
 			}
 			continue
 		}
-		// 等間隔に perClass 件。端も必ず含める
+		// 等間隔に perClass 件。先頭は必ず含める
 		for k := 0; k < perClass; k++ {
 			out = append(out, samples[idx[k*len(idx)/perClass]])
 		}

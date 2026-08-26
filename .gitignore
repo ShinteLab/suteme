@@ -25,5 +25,8 @@ orient_data*.bin.tmp*
 # 保存済み局面データ
 data/
 
+# 配布用の書き出し（training/compact.go。学習データから作り直せる）
+dist/
+
 # Go ビルドキャッシュ
 /vendor/
