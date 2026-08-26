@@ -10,7 +10,6 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	_ "image/png"
-	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -524,10 +523,14 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHistoryItem: /api/history/{id}/image で画像取得、
+// /api/history/{id}/thumb で一覧用のサムネイル取得、
 // /api/history/{id} への DELETE で履歴（画像 + エントリ）を削除する
 func handleHistoryItem(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/history/")
-	id = strings.TrimSuffix(id, "/image")
+	rest := strings.TrimPrefix(r.URL.Path, "/api/history/")
+	id, kind := rest, ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		id, kind = rest[:i], rest[i+1:]
+	}
 	if !validID(id) {
 		http.NotFound(w, r)
 		return
@@ -536,16 +539,41 @@ func handleHistoryItem(w http.ResponseWriter, r *http.Request) {
 		handleHistoryDelete(w, r, id)
 		return
 	}
-	f, err := os.Open(filepath.Join(dataDir, id+".png"))
+
+	path := filepath.Join(dataDir, id+".png")
+	if kind == "thumb" {
+		// 作れなければ元画像に落とす（重いだけで、表示はされる）
+		if t := historyThumb(id); t != "" {
+			path = t
+		}
+	}
+	serveImageFile(w, r, path)
+}
+
+// serveImageFile は PNG を返す。**検証子（ETag）を必ず付けること。**
+//
+// 上書き保存で同じ URL の中身が差し替わるので長期キャッシュにはできないが、
+// 検証子が無いと `no-cache` は**毎回まるごと取り直し**になる。履歴タブは
+// 一度に 155 枚の画像を並べるので、ここが素通しだとタブを開くたびに
+// 全部が再転送・再デコードされる。ETag があれば変わっていない画像は
+// 304（本文なし）で済む。
+func serveImageFile(w http.ResponseWriter, r *http.Request, path string) {
+	f, err := os.Open(path)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "image/png")
-	// 上書き保存で同じ URL の画像が差し替わるので、長期キャッシュにはしない
 	w.Header().Set("Cache-Control", "no-cache")
-	io.Copy(w, f)
+	w.Header().Set("ETag", fmt.Sprintf(`"%x-%x"`, st.ModTime().UnixNano(), st.Size()))
+	// http.ServeContent が If-None-Match / If-Modified-Since を見て 304 を返す
+	http.ServeContent(w, r, "", st.ModTime(), f)
 }
 
 // validID は履歴 ID（newID の 16 桁 hex）としてパスに使ってよい文字列かを返す。
@@ -579,6 +607,7 @@ func handleHistoryDelete(w http.ResponseWriter, r *http.Request, id string) {
 		h.Entries = kept
 		saveHistoryFile(h)
 		os.Remove(filepath.Join(dataDir, id+".png"))
+		removeThumb(id)
 	}
 	historyMu.Unlock()
 

@@ -675,6 +675,12 @@ func handleEvaluations(w http.ResponseWriter, r *http.Request) {
 		evalMu.Lock()
 		h := loadEvalHistory()
 		evalMu.Unlock()
+		// ?latest=1 は最新の実行 1 件だけを返す。履歴タブの行に出す認識率は
+		// 先頭の実行しか見ないのに、全文は局面ごとの内訳を抱えた実行が
+		// 100 件まで載っていて実測 1.05MB ある（評価タブは全件を引く）
+		if r.URL.Query().Get("latest") != "" && len(h.Runs) > 0 {
+			h = &EvalHistory{Runs: h.Runs[:1]}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(h)
 	case r.Method == http.MethodDelete && validID(id):

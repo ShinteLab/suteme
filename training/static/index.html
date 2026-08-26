@@ -1590,7 +1590,9 @@ const processedHistory = new Set(); // このセッション中に読み込ん�
 // 評価タブは実行単位の集計なので、どの局面が読めていないのかは一覧で見たい
 async function latestEvalByEntry() {
   try {
-    const data = await (await fetch('/api/evaluations')).json();
+    // **一覧に出すのは最新の実行 1 件だけ。** 全文を引くと局面ごとの内訳を
+    // 抱えた実行が 100 件まで載っていて、実測 1.05MB になる（使うのは先頭の 1 件）
+    const data = await (await fetch('/api/evaluations?latest=1')).json();
     const run = (data.runs || [])[0];
     if (!run) return null;
     const map = {};
@@ -1611,11 +1613,14 @@ function historyScoreHTML(latest, id) {
     ${det} · ${rate}</div>`;
 }
 
+// **一覧を先に描いてから、後から入る情報を差し込む。**
+// 見た目バッジ（`/api/coverage`）は署名の計算で数秒かかることがあり、
+// 認識率（`/api/evaluations`）も局面数ぶん重い。以前は 3 本を直列に await
+// してから組み立てていたので、その間ずっと画面が空のままだった。
+// どちらも行の中の小さな注記なので、無い状態で描いて後から埋めればよい。
 async function refreshHistory() {
   const res = await fetch('/api/history');
   const data = await res.json();
-  const latest = await latestEvalByEntry();
-  await refreshCoverage(); // 行に出す「見た目」バッジのため
   const list = document.getElementById('history-list');
   if (!data.entries || data.entries.length === 0) {
     list.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:10px">保存した局面はありません</div>';
@@ -1632,13 +1637,13 @@ async function refreshHistory() {
       <div class="hist-sel-cell" title="${unverified ? '未確認の局面は学習に使えません' : '学習に使う'}">
         <input type="checkbox" class="hist-sel" data-id="${e.id}" ${unverified ? 'disabled' : ''}></div>
       <span class="hist-check">${done ? '○' : ''}</span>
-      <a href="/api/history/${e.id}/image" target="_blank" rel="noopener" title="元画像を別ウィンドウで開く（URL に局面 ID が入ります）"><img class="hist-thumb" src="/api/history/${e.id}/image" loading="lazy"></a>
+      <a href="/api/history/${e.id}/image" target="_blank" rel="noopener" title="元画像を別ウィンドウで開く（URL に局面 ID が入ります）"><img class="hist-thumb" src="/api/history/${e.id}/thumb" loading="lazy" alt=""></a>
       <div style="flex:1;min-width:0">
-        <div style="font-size:11px;color:#888">${idChipHTML(e.id, 'margin-right:6px')}${e.created_at}${lookBadgeHTML(e.id)}${
+        <div style="font-size:11px;color:#888">${idChipHTML(e.id, 'margin-right:6px')}${e.created_at}<span class="hist-look" data-id="${e.id}">${lookBadgeHTML(e.id)}</span>${
           unverified ? ' <span style="color:#f0a030;border:1px solid #6a5320;border-radius:3px;padding:0 4px" title="APIから登録されました。「再入力」で解析タブに読み込んで確認し、保存し直すと学習に使えます">API / 未確認</span>' : ''}</div>
         <div style="font-size:11px;color:#bbb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace"
              title="${e.sfen}">${e.sfen}</div>
-        ${historyScoreHTML(latest, e.id)}
+        <span class="hist-score" data-id="${e.id}"></span>
       </div>
       <button class="hist-reenter" data-id="${e.id}" title="解析タブに読み込んでラベルを直す"
         style="font-size:11px;background:none;border:1px solid #2a5a6a;color:#4cc9f0;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap">再入力 ›</button>
@@ -1648,6 +1653,24 @@ async function refreshHistory() {
   }).join('');
   document.getElementById('hist-select-all').checked = false;
   updateTrainHistoryButton();
+  fillHistoryExtras();
+}
+
+// 見た目バッジと認識率を、描き終わった一覧に後から差し込む。
+// **失敗しても一覧は残す**（どちらも注記であって、一覧そのものではない）
+async function fillHistoryExtras() {
+  const looks = refreshCoverage().then(() => {
+    document.querySelectorAll('#history-list .hist-look').forEach(el => {
+      el.innerHTML = lookBadgeHTML(el.dataset.id);
+    });
+  });
+  const scores = latestEvalByEntry().then(latest => {
+    if (!latest) return;
+    document.querySelectorAll('#history-list .hist-score').forEach(el => {
+      el.innerHTML = historyScoreHTML(latest, el.dataset.id);
+    });
+  });
+  await Promise.allSettled([looks, scores]);
 }
 
 // 履歴の選択（学習の対象）。**見た目の判定はここを使わない**（見た目タブが
@@ -2295,7 +2318,7 @@ function updateLookButtons() {
 // サムネイル 1 枚。クリックで選択、Ctrl+クリックで元画像
 function lookThumbHTML(id, extra) {
   return `<span style="position:relative;flex-shrink:0">
-    <img class="look-thumb" data-id="${id}" src="/api/history/${id}/image" loading="lazy"
+    <img class="look-thumb" data-id="${id}" src="/api/history/${id}/thumb" loading="lazy"
       title="${id}（クリックで選択 / Ctrl+クリックで元画像）"
       style="height:44px;border-radius:2px;border:1px solid #2a3a5e;display:block;cursor:pointer;opacity:0.75">
     ${extra || ''}</span>`;
