@@ -13,6 +13,32 @@ import (
 // 修正前は 1〜3マスずれていた（詳細は CLAUDE.md「盤面検出」）
 const detectTolCells = 0.5
 
+// detectSlipMaxRatio は**判定器を外した素の検出**に残ってよい 1マス滑りの割合。
+//
+// **1マスの滑りは `ValidateBoard` では原理的に見分けられない。**
+// `gridAlignment` は全マスシフトに不変なので、周期が正しいまま窓が 1マス
+// 滑った検出は**信頼度 1.00 のまま通る**（CLAUDE.md「盤面検出の検証」）。
+// この見分けは帯の判定器（`unslipByJudge`）の領分で、このテストは
+// 環境に依らない数字を出すためにその判定器を**外して**測っている。
+// つまり「滑ったのに黙って通る」ことをここで責めるのは筋が違う。
+//
+// 代わりに**件数を縛って**、増えたら気付けるようにする。実測（157局面）:
+// 滑りは 5 件（3.2%）で、**`training` の `TestUnslipHoldout` が
+// leave-one-out でその 5 件すべてを直す**ことを確かめている（157/157）。
+const detectSlipMaxRatio = 0.05
+
+// detectOverflowTolCells は検出領域が画像からはみ出してよい範囲（マス単位）。
+//
+// **0 にはできない。** 仕上げの `SnapToGrid` は外枠を格子線そのものへ
+// サブピクセルで合わせ直すので、**盤が画像の端で切れている画像では
+// 格子線の推定位置が画像の外に来る**（実測 `9d2c92ae`: 画像の下端 701 に対し
+// 707＝0.24マス）。これは滑りではなく、**人が引いた枠を同じ工程に通した
+// 座標と px 単位で一致する**（学習側の `samplesFromHistory` も同じ座標を使う）。
+// `ExtractCell` は画像の範囲で切るので、はみ出した側のマスが少し狭くなるだけ。
+//
+// 1マス以上のはみ出しは話が別で、そちらは窓が滑った印（`unslipRegion` の領分）。
+const detectOverflowTolCells = 0.5
+
 // 保存済み局面（data/）の手動指定座標を正解として DetectBoard のズレを測る。
 // 位置（左上）と大きさの両方を1マスを単位とした比で見る。
 //
@@ -42,7 +68,7 @@ func TestDetectBoardMatchesManual(t *testing.T) {
 		t.Fatalf("history.json: %v", err)
 	}
 
-	ok, total := 0, 0
+	ok, total, slipped := 0, 0, 0
 	for _, e := range h.Entries {
 		imgF, err := os.Open(dir + "/" + e.ID + ".png")
 		if err != nil {
@@ -63,11 +89,13 @@ func TestDetectBoardMatchesManual(t *testing.T) {
 			t.Logf("%s: 検出できず", e.ID)
 			continue
 		}
-		// 画像からはみ出した領域を返さない（`unslipRegion`）。
+		// **1マス以上はみ出した領域を返さない（`unslipRegion`）。**
 		// はみ出しは「窓が1マス滑った」印であると同時に、
-		// そのままでは ExtractCell が画像外を読む
-		if !det.Bounds.In(img.Bounds()) {
-			t.Errorf("%s: 検出 %v が画像 %v からはみ出している", e.ID, det.Bounds, img.Bounds())
+		// そのままでは ExtractCell が画像の外を読むことになる。
+		// 数px は `SnapToGrid` の当てはめ由来なので許す（`detectOverflowTolCells`）
+		if over := overflowCells(det.Bounds, img.Bounds(), cw, ch); over > detectOverflowTolCells {
+			t.Errorf("%s: 検出 %v が画像 %v から %.2fマスはみ出している",
+				e.ID, det.Bounds, img.Bounds(), over)
 		}
 		dx := float64(det.Bounds.Min.X-man.Min.X) / cw
 		dy := float64(det.Bounds.Min.Y-man.Min.Y) / ch
@@ -85,7 +113,15 @@ func TestDetectBoardMatchesManual(t *testing.T) {
 			}
 			continue
 		}
-		// 外した場合、黙って通してはいけない（ValidateBoard が気付くこと）
+		// **1マスの滑りだけは別扱い。** 大きさは合っているのに位置だけが
+		// 1マスぶん動いた検出は、判定器を外している以上ここでは落とせない
+		// （`detectSlipMaxRatio`）。件数だけ数えておく
+		if isOneCellSlip(dx, dy, dw, dh) {
+			slipped++
+			t.Logf("%s: 1マス滑り（判定器の領分。TestUnslipHoldout が直すこと）", e.ID)
+			continue
+		}
+		// それ以外で外した場合は、黙って通してはいけない（ValidateBoard が気付くこと）
 		if conf >= minBoardConfidence {
 			t.Errorf("%s: %.2fマスずれているのに conf=%.2f で採用される", e.ID, worst, conf)
 		}
@@ -94,11 +130,47 @@ func TestDetectBoardMatchesManual(t *testing.T) {
 	if total == 0 {
 		t.Skip("画像が無いのでスキップ")
 	}
-	t.Logf("合計: %d/%d が %.1fマス以内", ok, total, detectTolCells)
+	t.Logf("合計: %d/%d が %.1fマス以内（1マス滑り %d 件 = %.1f%%）",
+		ok, total, detectTolCells, slipped, float64(slipped)/float64(total)*100)
 	// 修正前は 11 件中 1 件しか合っていなかった
 	if ok*10 < total*8 {
 		t.Errorf("%.1fマス以内に収まったのが %d/%d しかない", detectTolCells, ok, total)
 	}
+	if float64(slipped) > float64(total)*detectSlipMaxRatio {
+		t.Errorf("1マス滑りが %d/%d 件ある（上限 %.0f%%）。帯の判定器を外した素の検出の話なので、"+
+			"増えたら滑りを作っている前段（unslipRegion / snapToOuterFrame / pickTaper）を疑うこと",
+			slipped, total, detectSlipMaxRatio*100)
+	}
+}
+
+// overflowCells は矩形 r が枠 outer から何マスはみ出しているかを返す
+func overflowCells(r, outer image.Rectangle, cw, ch float64) float64 {
+	over := 0.0
+	for _, v := range []struct {
+		px   int
+		cell float64
+	}{
+		{outer.Min.X - r.Min.X, cw}, {outer.Min.Y - r.Min.Y, ch},
+		{r.Max.X - outer.Max.X, cw}, {r.Max.Y - outer.Max.Y, ch},
+	} {
+		if v.px > 0 {
+			over = math.Max(over, float64(v.px)/v.cell)
+		}
+	}
+	return over
+}
+
+// isOneCellSlip は「大きさは合っているのに位置だけ 1マスぶん動いた」検出かを返す。
+//
+// **周期が違う検出（半分の周期・盤の一部）と区別するために大きさも見る。**
+// あちらは `pickTaper` や `gridAlignment` で落とせるので、
+// 見逃してよい理由が無い（CLAUDE.md「半分の周期」）。
+func isOneCellSlip(dx, dy, dw, dh float64) bool {
+	if math.Abs(dw) > detectTolCells || math.Abs(dh) > detectTolCells {
+		return false
+	}
+	slid := func(d float64) bool { return math.Abs(d) > detectTolCells && math.Abs(d) <= 1.5 }
+	return slid(dx) || slid(dy)
 }
 
 // cropInvarianceMargins は同じ盤を切り出す余白（px）。

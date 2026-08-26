@@ -3,6 +3,7 @@ package suteme
 import (
 	"image"
 	"image/color"
+	"math"
 	"testing"
 )
 
@@ -145,5 +146,55 @@ func TestCandidateSetBreaksTieByVotes(t *testing.T) {
 	}
 	if got := s.best(); got.br.Bounds.Min.X != 575 || got.votes != 2 {
 		t.Errorf("畳んだ結果が %v 票=%d（信頼度の高い位置・票2 のはず）", got.br.Bounds, got.votes)
+	}
+}
+
+// TestIsOneCellSlipRejectsWrongSize は「1マス滑り」の見分けを縛る。
+//
+// **この判定は `TestDetectBoardMatchesManual` の見逃し口**なので、
+// 緩めると壊れた検出まで黙って通ることになる。滑りは
+// 「大きさは合っているのに位置だけ 1マスぶん動いた」ものに限る。
+func TestIsOneCellSlipRejectsWrongSize(t *testing.T) {
+	cases := []struct {
+		name           string
+		dx, dy, dw, dh float64
+		want           bool
+	}{
+		{"縦に1マス滑り", 0.00, -0.99, 0.00, -0.01, true},
+		{"横に1マス滑り", 1.01, 0.02, -0.05, 0.03, true},
+		{"滑りぎみ（0.64マス）", 0.17, -0.64, -0.35, -0.45, true},
+		{"合っている", 0.03, 0.05, -0.08, -0.14, false},
+		{"半分の周期（大きさが違う）", 0.10, 0.20, -4.50, -4.50, false},
+		{"位置も大きさも大外し", 3.57, 1.20, 3.90, 2.10, false},
+		{"2マス滑り（滑りとして見逃さない）", 0.00, -2.00, 0.00, 0.00, false},
+		{"大きさだけ 1マス違う（滑りではない）", 0.00, 0.00, -1.00, 0.00, false},
+	}
+	for _, c := range cases {
+		if got := isOneCellSlip(c.dx, c.dy, c.dw, c.dh); got != c.want {
+			t.Errorf("%s: isOneCellSlip(%.2f,%.2f,%.2f,%.2f) = %v, want %v",
+				c.name, c.dx, c.dy, c.dw, c.dh, got, c.want)
+		}
+	}
+}
+
+// TestOverflowCells ははみ出し量がマス単位で出ることを確かめる
+func TestOverflowCells(t *testing.T) {
+	img := image.Rect(0, 0, 664, 701)
+	cw, ch := 71.7, 76.3
+
+	if got := overflowCells(image.Rect(10, 10, 600, 600), img, cw, ch); got != 0 {
+		t.Errorf("画像内なのに %.2f マスはみ出し扱い", got)
+	}
+	// 実測 9d2c92ae: 下端が 6px 外（SnapToGrid の当てはめ由来）
+	if got := overflowCells(image.Rect(2, 2, 647, 707), img, cw, ch); math.Abs(got-6/ch) > 1e-9 {
+		t.Errorf("下へ 6px = %.3f マス, got %.3f", 6/ch, got)
+	}
+	// 1マス滑って右へ出た場合は見逃さない
+	if got := overflowCells(image.Rect(72, 0, 736, 700), img, cw, ch); got < 1 {
+		t.Errorf("右へ 72px（1マス超）が %.2f マス扱い", got)
+	}
+	// 左・上へのはみ出しも数える
+	if got := overflowCells(image.Rect(-80, -10, 600, 600), img, cw, ch); got < 1 {
+		t.Errorf("左へ 80px（1マス超）が %.2f マス扱い", got)
 	}
 }
