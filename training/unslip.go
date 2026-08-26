@@ -72,8 +72,12 @@ func stripSamplesFromHistory(e HistoryEntry) ([]suteme.StripSample, error) {
 	if err != nil {
 		return nil, fmt.Errorf("画像のデコードに失敗しました")
 	}
+	// 駒の学習（`samplesFromHistory`）と同じく格子線へ寄せてから帯を取る。
+	// 帯は「盤の縁の 1マス」なので、枠が数px ずれるとその分だけ別の画素を
+	// 見ることになり、判定器と検出側で見ているものが食い違う
 	b := e.BoardBounds
-	s := stripSamplesFromRegion(img, b.X1, b.Y1, b.X2, b.Y2)
+	r := suteme.SnapToGrid(img, suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2)).Bounds
+	s := stripSamplesFromRegion(img, r.Min.X, r.Min.Y, r.Max.X, r.Max.Y)
 	if len(s) == 0 {
 		return nil, fmt.Errorf("帯を作れませんでした")
 	}

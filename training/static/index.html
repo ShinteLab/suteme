@@ -800,8 +800,14 @@ async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual
   renderCells(currentSessionId, data.categories);
   document.getElementById('board-card-note').textContent = '';
   showBoardStep(data.bounds || r, source, undefined, data.bounds_by);
+  // **サーバは引いた枠を格子線へ寄せて返す**（`SnapToGrid`。同じ盤なら
+  // 誰がどう引いても同じ位置で切り出すため）。黙って動かすと「入れた座標と
+  // 違う」に見えるので、寄った分を出す
+  const snapped = data.bounds && ['x1', 'y1', 'x2', 'y2'].some(k => data.bounds[k] !== r[k]);
   if (recognize) {
-    document.getElementById('analyze-status').textContent = '盤面を指定しました';
+    document.getElementById('analyze-status').textContent = snapped
+      ? '盤面を指定しました（格子線に合わせて調整しました）'
+      : '盤面を指定しました';
     await runRecognition();
   }
   return true;

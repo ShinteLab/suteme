@@ -858,7 +858,15 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 	s, ok := sessions[req.Session]
 	var cats [9][9]suteme.CellCategory
 	if ok {
-		br := suteme.BoardRegionFromRect(req.X1, req.Y1, req.X2, req.Y2)
+		// **人が引いた枠も格子線へ寄せる（`SnapToGrid`）。**
+		// 学習も検出も同じ一点で切り出す、というのがこの画面の前提なので、
+		// ここだけ手加減した枠を通すと**同じ盤なのに引き方で結果が変わる**
+		// （それを無くすための工程。CLAUDE.md「切り出しを撮り方に依らせない」）。
+		// **寄せた結果はレスポンスの `bounds` で画面に返る**ので、
+		// 人は実際に使われた座標を見て、必要ならもう一度引き直せる。
+		// 格子が読めなければ引いた枠がそのまま残る。
+		br := suteme.SnapToGrid(s.Original,
+			suteme.BoardRegionFromRect(req.X1, req.Y1, req.X2, req.Y2))
 		s.Result.Board = br
 		s.BoundsBy = normalizeBoundsBy(req.By)
 		s.BoardImg = s.Result.DrawBoard(s.Original)
@@ -1026,12 +1034,24 @@ func samplesFromHistory(e HistoryEntry) ([]suteme.TrainingSample, error) {
 	}
 
 	// 盤面座標。shiftAugment でずらした版も作る
+	//
+	// **保存された座標はそのままでは使わず、`SnapToGrid` で格子線へ寄せる。**
+	// 推論側（`DetectBoard`）が必ず同じ工程を通るので、ここを通さないと
+	// **学習と推論で切り出しが食い違う**。実測（157局面、v6 の学習データ
+	// ＝スナップ前の座標で作ったもの）: 検出側にだけ `SnapToGrid` を入れると
+	// 自動座標の完全一致が 133局面 → 99局面に落ちた。座標が良くなっても
+	// 学習データが古い切り出しを覚えているので、揃えないと損をする。
+	//
+	// 人が引いた枠も同じ扱いにする。**枠の引き方（キャプチャの余白・
+	// 人の手加減）を学習データに持ち込まない**のがここの狙いで、
+	// 「手動指定はそのまま使う」（認識時の `WithRegion`）とは目的が違う。
 	var regions []*suteme.BoardRegion
 	if e.BoardBounds != nil {
 		b := e.BoardBounds
+		r := suteme.SnapToGrid(img, suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2)).Bounds
 		for _, s := range shiftAugment {
 			regions = append(regions, suteme.BoardRegionFromRect(
-				b.X1+s[0], b.Y1+s[1], b.X2+s[0], b.Y2+s[1]))
+				r.Min.X+s[0], r.Min.Y+s[1], r.Max.X+s[0], r.Max.Y+s[1]))
 		}
 	} else {
 		// 盤面座標を持たない古いエントリは自動検出に頼る。

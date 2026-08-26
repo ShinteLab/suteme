@@ -338,7 +338,15 @@ type evalTarget struct {
 	entry HistoryEntry
 	img   image.Image
 	want  *[9][9]string
-	rect  BoardBounds
+	// rect は保存されている座標そのもの。**検出のずれを測る基準**なので
+	// 寄せない（人が記録した値と比べるための物差し）。
+	rect BoardBounds
+	// snap は rect を格子線へ寄せたもの。**認識に使うのはこちら。**
+	// 学習データも `SnapToGrid` を通した切り出しで作るので、寄せない座標で
+	// 測ると「誰も使っていない切り出し」の成績を見ることになる。
+	// 実測（157局面、寄せた学習データ）: 手動座標を寄せずに測ると
+	// 98.81%・完全一致 95局面まで落ちる（自動座標は 99.91%・147局面）。
+	snap image.Rectangle
 }
 
 // loadEvalTarget は履歴 1 件を評価できる形に読む。
@@ -361,7 +369,9 @@ func loadEvalTarget(e HistoryEntry) (*evalTarget, error) {
 	if err != nil {
 		return nil, fmt.Errorf("SFEN の解析に失敗しました")
 	}
-	return &evalTarget{entry: e, img: img, want: want, rect: *e.BoardBounds}, nil
+	b := e.BoardBounds
+	snap := suteme.SnapToGrid(img, suteme.BoardRegionFromRect(b.X1, b.Y1, b.X2, b.Y2)).Bounds
+	return &evalTarget{entry: e, img: img, want: want, rect: *b, snap: snap}, nil
 }
 
 // gradeDetect は自動検出の結果を手動指定座標と突き合わせる。
@@ -508,8 +518,8 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 	for i, t := range targets {
 		res := EvalEntry{ID: t.entry.ID, Source: t.entry.Source}
 
-		// 手動座標。認識器そのものの成績
-		if g, _, err := recognizeGrid(t.img, p, suteme.WithRect(t.rect.X1, t.rect.Y1, t.rect.X2, t.rect.Y2)); err == nil {
+		// 手動座標（格子線へ寄せたもの）。認識器そのものの成績
+		if g, _, err := recognizeGrid(t.img, p, suteme.WithRect(t.snap.Min.X, t.snap.Min.Y, t.snap.Max.X, t.snap.Max.Y)); err == nil {
 			res.Manual = gradeBoard(t.want, g)
 		} else {
 			res.Error = err.Error()
@@ -535,7 +545,7 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 		if look := strings.TrimSpace(t.entry.Look); look != "" {
 			if kn, ok := lookKNN[look]; ok {
 				ml := EvalMetrics{}
-				if g, _, err := recognizeGrid(t.img, kn, suteme.WithRect(t.rect.X1, t.rect.Y1, t.rect.X2, t.rect.Y2)); err == nil {
+				if g, _, err := recognizeGrid(t.img, kn, suteme.WithRect(t.snap.Min.X, t.snap.Min.Y, t.snap.Max.X, t.snap.Max.Y)); err == nil {
 					ml = gradeBoard(t.want, g)
 				}
 				res.ManualLook = &ml
@@ -545,7 +555,7 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 
 		if kn, ok := holdoutKNN[t.entry.ID]; ok {
 			mh := EvalMetrics{}
-			if g, _, err := recognizeGrid(t.img, kn, suteme.WithRect(t.rect.X1, t.rect.Y1, t.rect.X2, t.rect.Y2)); err == nil {
+			if g, _, err := recognizeGrid(t.img, kn, suteme.WithRect(t.snap.Min.X, t.snap.Min.Y, t.snap.Max.X, t.snap.Max.Y)); err == nil {
 				mh = gradeBoard(t.want, g)
 			}
 			ah := missedBoard(t.want)

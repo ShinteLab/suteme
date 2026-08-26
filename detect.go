@@ -65,17 +65,22 @@ func DetectBoard(img image.Image) *BoardRegion {
 	return finishRegion(img, best.br)
 }
 
-// finishRegion は検出した窓の仕上げ。3 つとも「1マスの滑り」を直すもので、
-// **効く場面が別々なので順に通す**。
+// finishRegion は検出した窓の仕上げ。前半 3 つは「1マスの滑り」を直すもので、
+// **効く場面が別々なので順に通す**。最後の 1 つは滑りではなく**再現性**のための
+// 工程で、どの窓に落ち着いたにせよ最後に格子線へ合わせ直す。
 //
 //  1. `unslipRegion` … 画像からはみ出していたら 1マス内側へ戻す（幾何）
 //  2. `snapToOuterFrame` … 10本のうち最弱の線がはっきり強くなるなら乗り換える（線）
 //  3. `unslipByJudge` … 盤の縁の帯が盤らしいほうへ乗り換える（学習）
+//  4. `SnapToGrid` … 外枠を格子線へサブピクセルで合わせ直す（撮り方に依らせない）
 //
 // 3 は帯の教師データ（`strip_data_v1.bin`）が無ければ**何もしない**ので、
-// 判定器を置いていない環境の挙動は 1・2 までと変わらない。
+// 判定器を置いていない環境の挙動は 1・2・4 までと変わらない。
+//
+// **4 は必ず最後**。1〜3 が「どのマス目に乗るか」を決め、4 はその窓を
+// 動かさずに数px の位置だけを整える（探索は ±0.2マスなので 1マス動かせない）。
 func finishRegion(img image.Image, br *BoardRegion) *BoardRegion {
-	return unslipByJudge(img, snapToOuterFrame(img, unslipRegion(img, br)), defaultStripJudge())
+	return SnapToGrid(img, unslipByJudge(img, snapToOuterFrame(img, unslipRegion(img, br)), defaultStripJudge()))
 }
 
 // candTolCells は 2 つの候補を「同じ窓」とみなす差（マス単位）。
@@ -846,4 +851,285 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// gridSnapWindow は境界線を探す範囲（マス間隔に対する割合）。
+// `finishRegion` の前段（`refineRegion` / 各 unslip）を通った時点で
+// ずれは数px なので広くは要らないが、画像全体での検出が信頼度 0.9 を超えて
+// `refineRegion` を通らない経路（`DetectBoard` の早期打ち切り）もあるので
+// 0.2マス取る。1マス滑る余地は無い。
+const gridSnapWindow = 0.2
+
+// gridSnapMaxResid は等間隔の並びから外れているとみなす残差
+// （マス間隔に対する割合）。駒の輪郭や盤外の罫線を拾った線を落とす。
+const gridSnapMaxResid = 0.08
+
+// gridSnapMinLines は当てはめに使う線の最小本数。
+// 10本のうちこれを下回ったら格子が読めていないので何もしない。
+const gridSnapMinLines = 7
+
+// gridSnapMaxPitch は当てはめたマス間隔が元からずれてよい割合。
+const gridSnapMaxPitch = 0.06
+
+// SnapToGrid は外枠を**格子線そのもの**へサブピクセルで合わせ直す。
+//
+// **これは精度ではなく再現性のための工程。** 同じ盤を写した画像でも、
+// 余白の取り方（キャプチャの枠）が違うと投影に載る画素が変わり、
+// 検出される外枠が数px 動く。実測（同一画素の 2 枚。`8ee60d34` と
+// `8b7375547` は x で 17px・y で 50px ちょうど平行移動しただけの関係）:
+//
+//	8ee60d34（余白 40px ほど）  646x695  真の外枠より 幅 +4 / 高さ +7
+//	8b737554（余白 300px ほど）  641x685  真の外枠より 上辺 +6 / 高さ -3
+//
+// 外枠の高さが 7px 違うと 1マスあたり 0.75px、下段では 6px（1マスの 9%）
+// 内側の境界がずれる。この程度で k-NN の最近傍は入れ替わり、**同じ画素なのに
+// 片方だけ 2マス誤る**（`27:k→g` `37:n→r`）。矩形を入れ替えると誤りも
+// 付いて回るので、原因は画像でも認識器でもなく外枠の数px。
+//
+// **「こう撮れば当たる」を無くすには、外枠を撮り方に依らない一点＝格子線に
+// 固定するしかない。** 格子線から測った外枠を与えると、上の 2 枚はどちらも
+// 誤り 0 になる。
+//
+// やることは 3 つ:
+//
+//  1. 10本の境界それぞれについて、±`gridSnapWindow` マスの窓で投影のピークを
+//     探し、**重心でサブピクセルまで**下ろす
+//  2. 等間隔の並び `原点 + i*間隔` を最小二乗で当てはめ、残差の大きい線を
+//     落として当てはめ直す（駒の輪郭・盤外の罫線を掴んだ線を捨てる）
+//  3. 間隔が元から `gridSnapMaxPitch` 以上ずれるなら採らない
+//
+// **`refineRegion` では代われない。** あちらは整数px の探索で、目的関数の
+// `axisAlignment` は境界が格子線に ±`gridPeakTol`(3px) で乗っていれば同じ値を
+// 返す＝**数px の差に順位が付かない**。だから余白で答えが動く。
+//
+// **信頼度で足切りしない。** 同じ理由で `ValidateBoard` はこの数px を
+// 区別できないので、条件にしても素通りするだけの見せかけの安全弁になる。
+// 代わりに「線が `gridSnapMinLines` 本読めたか」「間隔が動きすぎないか」という
+// 当てはめ自身の条件で採否を決める。
+//
+// **公開しているのは、外から渡す座標も同じ一点に寄せられるようにするため。**
+// `DetectBoard` は内部で必ず通すので、検出を使う側は呼ぶ必要が無い。
+// 人が引いた枠や別のアプリが持っている枠（ikkyoku のガイド枠）を
+// 同じ基準に正規化したいときに使う。格子が読めなければ渡した窓をそのまま返す。
+//
+// **`Recognize` の `WithRegion` / `WithRect` は通していない。** 手動指定は
+// 検証せずそのまま使う（CLAUDE.md「公開 API」）という約束があり、
+// 学習データもその座標で作られているので、認識側だけ黙って動かすと
+// 学習と推論で切り出しが食い違う。
+func SnapToGrid(img image.Image, br *BoardRegion) *BoardRegion {
+	if br == nil {
+		return nil
+	}
+	// **収束するまで繰り返す。** 投影を取る範囲は渡された窓から決まるので、
+	// 1 回目の答えは入口の窓に少し引きずられる（同じ盤でも撮り方で 1〜3px
+	// 残る）。**答えを入れて答えが変わらなくなれば、それは入口に依らない一点。**
+	// 実測（148局面 × 余白 3 通り）: 余白違いで完全一致が 119 → 140、
+	// 平均ぶれ 0.72px → 0.41px。数回で止まるので上限は 4 回。
+	orig := br
+	for i := 0; i < 4; i++ {
+		next := snapOnce(img, br)
+		if next.Bounds == br.Bounds {
+			break
+		}
+		br = next
+	}
+	// 1 回ごとの `gridSnapMaxPitch` は「その回の入口」に対する制限なので、
+	// 繰り返すと積み上がりうる。**入口からの総ずれも同じ幅に収める。**
+	if !withinPitch(orig.Bounds, br.Bounds, gridSnapMaxPitch) {
+		return orig
+	}
+	return br
+}
+
+// withinPitch は 2 つの窓のマスの大きさが frac 以内に収まっているかを返す
+func withinPitch(a, b image.Rectangle, frac float64) bool {
+	if a.Dx() <= 0 || a.Dy() <= 0 {
+		return false
+	}
+	dw := math.Abs(float64(b.Dx()-a.Dx())) / float64(a.Dx())
+	dh := math.Abs(float64(b.Dy()-a.Dy())) / float64(a.Dy())
+	return dw <= frac && dh <= frac
+}
+
+func snapOnce(img image.Image, br *BoardRegion) *BoardRegion {
+	spanX := float64(br.Bounds.Dx()) / 9
+	spanY := float64(br.Bounds.Dy()) / 9
+	if spanX < 6 || spanY < 6 {
+		return br
+	}
+	bd := br.Bounds
+
+	// **投影を取る範囲は「盤の中 + 探す方向にだけ 1マス」。**
+	// 横線を測るのに盤の左右の外まで含めると、駒台や UI が入るかどうかで
+	// 行の中央値が動く＝**まさに無くしたい「撮り方による違い」**が
+	// この工程自身に入り込む。直交方向は盤の中だけを見る。
+	rowProj, rowBase, okRow := axisProjection(img, image.Rect(
+		bd.Min.X, bd.Min.Y-int(spanY), bd.Max.X, bd.Max.Y+int(spanY)), false)
+	colProj, colBase, okCol := axisProjection(img, image.Rect(
+		bd.Min.X-int(spanX), bd.Min.Y, bd.Max.X+int(spanX), bd.Max.Y), true)
+	if !okRow && !okCol {
+		return br
+	}
+
+	ox, sx := float64(bd.Min.X), spanX
+	oy, sy := float64(bd.Min.Y), spanY
+	fitted := false
+	if okCol {
+		if o, s, ok := fitGridAxis(colProj, float64(bd.Min.X-colBase), spanX); ok {
+			ox, sx, fitted = o+float64(colBase), s, true
+		}
+	}
+	if okRow {
+		if o, s, ok := fitGridAxis(rowProj, float64(bd.Min.Y-rowBase), spanY); ok {
+			oy, sy, fitted = o+float64(rowBase), s, true
+		}
+	}
+	if !fitted {
+		return br
+	}
+
+	snapped := BoardRegionFromRect(
+		int(math.Round(ox)), int(math.Round(oy)),
+		int(math.Round(ox+sx*9)), int(math.Round(oy+sy*9)),
+	)
+	if !plausibleAspect(snapped) {
+		return br
+	}
+	return snapped
+}
+
+// axisProjection は範囲 r の中で 1 軸分の投影を取り、投影と
+// その先頭が指す元画像の座標を返す。vertical=true なら縦線（列方向）。
+func axisProjection(img image.Image, r image.Rectangle, vertical bool) ([]float64, int, bool) {
+	r = r.Intersect(img.Bounds())
+	if r.Dx() < 9*3 || r.Dy() < 9*3 {
+		return nil, 0, false
+	}
+	sub := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		for x := r.Min.X; x < r.Max.X; x++ {
+			sub.Set(x-r.Min.X, y-r.Min.Y, img.At(x, y))
+		}
+	}
+	row, col := lineProjections(BoxBlur(ConvertGray(sub), 2))
+	if vertical {
+		return col, r.Min.X, true
+	}
+	return row, r.Min.Y, true
+}
+
+// fitGridAxis は 1 軸分の投影から「原点 + i*間隔」を当てはめる。
+// 当てはめられなければ ok=false。
+func fitGridAxis(proj []float64, origin, span float64) (float64, float64, bool) {
+	pos := make([]float64, 0, 10)
+	idx := make([]float64, 0, 10)
+	win := int(math.Round(span * gridSnapWindow))
+	if win < 2 {
+		win = 2
+	}
+	for i := 0; i <= 9; i++ {
+		if p, ok := peakSubpixel(proj, origin+span*float64(i), win); ok {
+			idx = append(idx, float64(i))
+			pos = append(pos, p)
+		}
+	}
+	if len(pos) < gridSnapMinLines {
+		return 0, 0, false
+	}
+
+	o, s := lineFit(idx, pos)
+	// 残差の大きい線を落として当てはめ直す（外れ値は 1 回で足りる）
+	fi := idx[:0:0]
+	fp := pos[:0:0]
+	for j := range pos {
+		if math.Abs(pos[j]-(o+s*idx[j])) <= span*gridSnapMaxResid {
+			fi = append(fi, idx[j])
+			fp = append(fp, pos[j])
+		}
+	}
+	if len(fp) < gridSnapMinLines {
+		return 0, 0, false
+	}
+	if len(fp) < len(pos) {
+		o, s = lineFit(fi, fp)
+	}
+	if s <= 0 || math.Abs(s-span) > span*gridSnapMaxPitch {
+		return 0, 0, false
+	}
+	return o, s, true
+}
+
+// peakSubpixel は want の周り ±win の中で最も強い投影のピークを探し、
+// その位置を重心でサブピクセルまで下ろして返す。
+//
+// **重心を取るときに台座を引く。** 投影は木目や駒の輪郭で底上げされているので、
+// 生の値で重心を取ると窓の中央（＝期待位置）へ引き戻される＝いま居る場所を
+// 肯定するだけになり、撮り方による数px のずれが残る。
+func peakSubpixel(proj []float64, want float64, win int) (float64, bool) {
+	lo := int(math.Round(want)) - win
+	hi := int(math.Round(want)) + win
+	if lo < 1 {
+		lo = 1
+	}
+	if hi > len(proj)-2 {
+		hi = len(proj) - 2
+	}
+	if lo > hi {
+		return 0, false
+	}
+	top, base := proj[lo], proj[lo]
+	for i := lo; i <= hi; i++ {
+		if proj[i] > top {
+			top = proj[i]
+		}
+		if proj[i] < base {
+			base = proj[i]
+		}
+	}
+	if top <= 0 || top <= base {
+		return 0, false
+	}
+	// 山の上半分だけで重心を取る
+	th := base + (top-base)*peakHalfHeight
+	num, den := 0.0, 0.0
+	for i := lo; i <= hi; i++ {
+		if proj[i] < th {
+			continue
+		}
+		w := proj[i] - th
+		num += float64(i) * w
+		den += w
+	}
+	if den <= 0 {
+		return 0, false
+	}
+	return num / den, true
+}
+
+// peakHalfHeight は重心を取るときに切り捨てる高さ（山の高さに対する割合）。
+//
+// **`|勾配|` の投影では 1 本の格子線が 2 本の尾根になる**（線の立ち上がりと
+// 立ち下がり）。最大値の近傍だけで重心を取ると、どちらの尾根を掴むかで
+// 位置が 2px ほど飛ぶ。窓の中の「山の上半分」をまとめて重心にすれば
+// 2 本の尾根の中央＝線の中心に落ち着く。
+// 実測（`8ee60d34` の列方向）: 残差の最大が 4.0px → 1.6px。
+const peakHalfHeight = 0.5
+
+// lineFit は最小二乗で y = a + b*x を当てはめる
+func lineFit(x, y []float64) (a, b float64) {
+	n := float64(len(x))
+	var sx, sy, sxx, sxy float64
+	for i := range x {
+		sx += x[i]
+		sy += y[i]
+		sxx += x[i] * x[i]
+		sxy += x[i] * y[i]
+	}
+	d := n*sxx - sx*sx
+	if d == 0 {
+		return sy / n, 0
+	}
+	b = (n*sxy - sx*sy) / d
+	a = (sy - b*sx) / n
+	return a, b
 }
