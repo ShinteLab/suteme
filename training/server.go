@@ -165,8 +165,10 @@ var (
 	modelFile = suteme.DefaultModelFile
 	// stripFile は盤の縁の帯の教師データ。**駒種の学習データとは別**
 	stripFile = suteme.DefaultStripFile
-	modelLock sync.RWMutex
-	historyMu sync.RWMutex
+	// orientFile は向きの回転照合だけを担う間引きデータ（配布用。training/orient.go）
+	orientFile = suteme.DefaultOrientFile
+	modelLock  sync.RWMutex
+	historyMu  sync.RWMutex
 )
 
 // Serve はラベリング・学習用のWebサーバを起動する
@@ -1215,10 +1217,20 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 		log.Printf("Rebuilt strip data: %d strips", stripCount)
 	}
 
+	// 向きの回転照合だけを担う間引きデータも作り直す（配布用）。
+	// **学習データの部分集合を抜くだけなので数十 ms。**
+	// ここが古いと、NN を配った先だけ向きが古い盤で照合されることになる
+	orientCount, err := rebuildOrientData(data.Samples)
+	if err != nil {
+		// 帯と同じく、失敗しても学習は成功扱い（いつでも作り直せる）
+		log.Printf("Orient data rebuild failed: %v", err)
+	}
+
 	res := map[string]interface{}{
 		"status":     "ok",
 		"samples":    len(data.Samples),
 		"strips":     stripCount,
+		"orient":     orientCount,
 		"duplicates": duplicates,
 		// 分布は生データから出す。NN を回さない場合も学習データの中身は見たい
 		"distribution": ClassDistribution(data.Samples),

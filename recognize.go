@@ -459,7 +459,12 @@ func classifyCellOrient(cell image.Image, boardColor uint8, emptyMax float64, m 
 	}
 	om, ok := m.(OrientationMatcher)
 	if !ok {
-		return cat, false
+		// **推論器が照合できないなら、向き専用の照合データを探す**
+		// （`orient_data_v1.bin`。NN を配る構成のための穴埋め。orient.go）。
+		// それも無ければ分類器の判定がそのまま残る
+		if om = defaultOrientMatcher(); om == nil {
+			return cat, false
+		}
 	}
 	up := om.PieceDistance(cell)
 	down := om.PieceDistance(Rotate180(cell))

@@ -4,8 +4,21 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"os"
 	"testing"
 )
+
+// TestMain は向き照合データ（`orient_data_v1.bin`）の自動探索を止める。
+//
+// **カレントにファイルがあるかで結果が変わってはいけない。**
+// このパッケージのテストは合成画像（暗いブロブ）を使うので、
+// 実物の駒サンプルと照合されると向きが決まらない。
+// 帯の判定器（`SetStripJudge(nil)`）を各テストで外しているのと同じ理由で、
+// こちらは全体に効かせる。入れて測りたいテストは `SetOrientMatcher` で明示すること。
+func TestMain(m *testing.M) {
+	SetOrientMatcher(nil)
+	os.Exit(m.Run())
+}
 
 // stubPredictor は常に同じ駒種を返す推論器（LoadSFEN の配線確認用）
 type stubPredictor struct {

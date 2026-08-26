@@ -58,7 +58,15 @@ type OrientationMatcher interface {
 
 // PieceDistance は駒サンプル（空を除く）への最近傍の2乗距離を返す。
 // 一致するサンプルが無ければ +Inf。
+//
+// **nil でも落ちない。** `NewKNN` はサンプルが無ければ nil を返すので、
+// `SetOrientMatcher(NewKNN(...))` のように**型付きの nil が
+// インタフェースに入る**ことがある（呼ぶ側では nil 判定にかからない）。
+// 距離を +Inf で返せば「照合できない」として扱われ、向きは分類器に落ちる。
 func (kn *KNN) PieceDistance(cell image.Image) float64 {
+	if kn == nil {
+		return math.Inf(1)
+	}
 	input := CellToInput(cell)
 	best := math.Inf(1)
 	for _, s := range kn.samples {

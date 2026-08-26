@@ -1736,7 +1736,8 @@ async function trainFromHistory() {
       '学習データ ' + data.samples + '件（' +
       (data.balanced ? 'バランス後 ' + data.balanced + '件' : 'k-NN 再構築済み') +
       (data.duplicates ? ' / 重複除去 ' + data.duplicates + '件' : '') + '）' +
-      (data.strips ? ' ＋ 盤の縁 ' + data.strips + '本（1マスずれの判定用）' : '');
+      (data.strips ? ' ＋ 盤の縁 ' + data.strips + '本（1マスずれの判定用）' : '') +
+      (data.orient ? ' ＋ 向き照合 ' + data.orient + '件（配布用）' : '');
     // NN を回していない場合、比較用 SFEN は古いモデルの出力になる
     if (data.nn_stale) {
       html += '<br><span style="color:#888">NN（比較用）は学習していないので ' +

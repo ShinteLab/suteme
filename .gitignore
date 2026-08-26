@@ -18,6 +18,10 @@ training_data.json.*
 strip_data*.bin
 strip_data*.bin.tmp*
 
+# 向き照合データ（配布用の間引き）。学習データの部分集合なので同じ扱い
+orient_data*.bin
+orient_data*.bin.tmp*
+
 # 保存済み局面データ
 data/
 
