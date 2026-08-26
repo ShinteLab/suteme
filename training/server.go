@@ -190,6 +190,13 @@ func Serve(port string) error {
 			log.Printf("Loaded strip judge from %s (%d strips)", stripFile, j.Samples())
 		}
 	}
+	// **帯を裏で温めておく。** 学習のたびに帯データを全局面から作り直すが、
+	// 局面ごとに覚えてある（`cachedStripSamples`）ので 2 回目からは速い。
+	// その「1 回目」を起動直後に済ませておけば、人が学習を押したときには
+	// 選んだ局面のぶんしか走らない。**待たせない**ようにバックグラウンドで回す
+	// （まだ温まっていなければ、学習がその場で計算するだけ）
+	go warmStripCache()
+
 	// 起動時に保存済みモデルを読み込む
 	if m, err := suteme.LoadModel(modelFile); err == nil {
 		model = m

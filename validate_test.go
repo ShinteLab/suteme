@@ -69,3 +69,35 @@ func TestValidateBoardRejectsStripes(t *testing.T) {
 		}
 	}
 }
+
+// TestLineProjectionsAxesMatchesBoth は「要る軸だけ計算する」版が
+// 両方求めた場合と同じ値を返すことを確かめる。
+// `SnapToGrid` はこの投影の上でサブピクセルの重心を取るので、
+// わずかでも違えば切り出しが動く（＝学習データの版が上がる）。
+func TestLineProjectionsAxesMatchesBoth(t *testing.T) {
+	img := image.NewGray(image.Rect(0, 0, 120, 96))
+	for y := 0; y < 96; y++ {
+		for x := 0; x < 120; x++ {
+			v := 180
+			if x%13 == 0 || y%11 == 0 {
+				v = 40
+			}
+			img.SetGray(x, y, color.Gray{Y: uint8(v)})
+		}
+	}
+	blurred := BoxBlur(img, 2)
+	wantRow, wantCol := lineProjections(blurred)
+
+	gotRow, _ := lineProjectionsAxes(blurred, true, false)
+	for i := range wantRow {
+		if gotRow[i] != wantRow[i] {
+			t.Fatalf("row[%d] = %v, want %v", i, gotRow[i], wantRow[i])
+		}
+	}
+	_, gotCol := lineProjectionsAxes(blurred, false, true)
+	for i := range wantCol {
+		if gotCol[i] != wantCol[i] {
+			t.Fatalf("col[%d] = %v, want %v", i, gotCol[i], wantCol[i])
+		}
+	}
+}

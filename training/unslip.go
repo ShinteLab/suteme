@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"log"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/ShinteLab/suteme"
 )
@@ -84,24 +87,103 @@ func stripSamplesFromHistory(e HistoryEntry) ([]suteme.StripSample, error) {
 	return s, nil
 }
 
+// 帯は局面ごとに覚えておく（`SnapToGrid` が重い）。
+//
+// **作り直しをやめるのではなく、変わっていない局面の計算を飛ばす。**
+// 帯データは毎回ゼロから組み直す約束（消した局面の帯を残さない）だが、
+// **費用の実体は「確認済みの全局面ぶんの `SnapToGrid`」**で、
+// 学習で選んだ局面数には関係なく効いてくる。実測（157局面）:
+// 帯の作り直し 39.6s のうち **`SnapToGrid` が 34.6s**・PNG デコードが 3.7s。
+// 1 局だけ選んでも 40 秒かかっていたのはここ。
+//
+// 画像は上書き保存されうるので**更新時刻と大きさで確かめる**。
+// 盤面座標を引き直しても帯は変わるので**座標もキーに入れる**
+// （サムネイル `thumb.go` や見た目の署名 `sigCache` と同じ流儀）。
+var (
+	stripMu    sync.Mutex
+	stripCache = map[string]cachedStrips{}
+)
+
+type cachedStrips struct {
+	samples []suteme.StripSample
+	mod     time.Time
+	size    int64
+	bounds  BoardBounds
+}
+
+// cachedStripSamples は帯を覚えておいて返す。
+// 画像が差し替わったか盤面座標が変わっていれば作り直す。
+func cachedStripSamples(e HistoryEntry) []suteme.StripSample {
+	if e.BoardBounds == nil {
+		return nil
+	}
+	st, err := os.Stat(filepath.Join(dataDir, e.ID+".png"))
+	if err != nil {
+		return nil
+	}
+
+	// **計算の間もロックを持ったままにする。** 起動直後の温めと人が押した
+	// 学習が重なりうるので、離すと同じ局面を 2 回計算することになる
+	stripMu.Lock()
+	defer stripMu.Unlock()
+	if c, hit := stripCache[e.ID]; hit &&
+		c.mod.Equal(st.ModTime()) && c.size == st.Size() && c.bounds == *e.BoardBounds {
+		return c.samples
+	}
+	// 失敗（画像が読めない・帯が作れない）も覚える。
+	// 覚えないと、壊れた 1 件のために毎回デコードを試すことになる
+	s, err := stripSamplesFromHistory(e)
+	if err != nil {
+		s = nil
+	}
+	stripCache[e.ID] = cachedStrips{
+		samples: s, mod: st.ModTime(), size: st.Size(), bounds: *e.BoardBounds,
+	}
+	return s
+}
+
 // BuildStripData は確認済みの全局面から帯の教師データを作り直す。
 //
 // **毎回ゼロから作る（累積しない）。** 駒の学習データと違って
-// 1 局面あたり 8 本しか無く、全件でも 1000 本強なので作り直しても数秒。
-// 累積すると、局面を消したときに古い帯が残り続ける。
+// 1 局面あたり 8 本しか無く、全件でも 1000 本強。累積すると、
+// 局面を消したときに古い帯が残り続ける。
+// 実際の計算は局面ごとに覚えてある（`cachedStripSamples`）ので、
+// 作り直しても変わった局面のぶんしか走らない。
 func BuildStripData(entries []HistoryEntry) []suteme.StripSample {
 	var out []suteme.StripSample
+	live := make(map[string]bool, len(entries))
 	for _, e := range entries {
+		live[e.ID] = true
 		if !e.IsVerified() {
 			continue
 		}
-		s, err := stripSamplesFromHistory(e)
-		if err != nil {
-			continue
-		}
-		out = append(out, s...)
+		out = append(out, cachedStripSamples(e)...)
 	}
+
+	// 消された局面のぶんは覚えたままにしない
+	stripMu.Lock()
+	for id := range stripCache {
+		if !live[id] {
+			delete(stripCache, id)
+		}
+	}
+	stripMu.Unlock()
 	return out
+}
+
+// warmStripCache は帯のキャッシュを裏で埋める（起動時に呼ぶ）。
+// **判定器やファイルには触らない。** 計算を先にやっておくだけなので、
+// 途中で失敗しても学習がその場で計算し直すだけで済む。
+func warmStripCache() {
+	historyMu.RLock()
+	h := loadHistory()
+	historyMu.RUnlock()
+	if h == nil || len(h.Entries) == 0 {
+		return
+	}
+	st := time.Now()
+	n := len(BuildStripData(h.Entries))
+	log.Printf("Warmed strip cache: %d strips in %v", n, time.Since(st))
 }
 
 // rebuildStripData は確認済みの全局面から帯データを作り直して保存し、

@@ -191,23 +191,44 @@ const minLineStrength = 8
 // 中央値と実測値は一致する）。ValidateBoard は候補ごとに呼ぶので、
 // 列ごとのソート O(n log n) を避ける意味がある。
 func lineProjections(blurred *image.Gray) (row, col []float64) {
+	return lineProjectionsAxes(blurred, true, true)
+}
+
+// lineProjectionsAxes は要る軸だけを計算する `lineProjections`。
+//
+// **片方しか使わない呼び出しがある**（`axisProjection`＝`SnapToGrid` は
+// 縦線か横線のどちらか一方しか見ない）のに両方返していたので、
+// **Sobel と中央値の半分が捨てられていた**。`SnapToGrid` は収束するまで
+// 繰り返し、そのたびに 2 つの範囲で投影を取るので効きが大きい。
+// 要らない側は勾配の計算ごと省く。返り値の中身は `lineProjections` と同じで、
+// 求めなかった側は 0 埋めのまま返る。
+func lineProjectionsAxes(blurred *image.Gray, wantRow, wantCol bool) (row, col []float64) {
 	b := blurred.Bounds()
 	w, h := b.Dx(), b.Dy()
 	row = make([]float64, h)
 	col = make([]float64, w)
-	if w < 3 || h < 3 {
+	if w < 3 || h < 3 || (!wantRow && !wantCol) {
 		return row, col
 	}
 
 	at := func(x, y int) int { return int(blurred.GrayAt(x+b.Min.X, y+b.Min.Y).Y) }
-	gx := make([]int, w*h)
-	gy := make([]int, w*h)
+	var gx, gy []int
+	if wantCol {
+		gx = make([]int, w*h)
+	}
+	if wantRow {
+		gy = make([]int, w*h)
+	}
 	for y := 1; y < h-1; y++ {
 		for x := 1; x < w-1; x++ {
-			vx := -at(x-1, y-1) - 2*at(x-1, y) - at(x-1, y+1) + at(x+1, y-1) + 2*at(x+1, y) + at(x+1, y+1)
-			vy := -at(x-1, y-1) - 2*at(x, y-1) - at(x+1, y-1) + at(x-1, y+1) + 2*at(x, y+1) + at(x+1, y+1)
-			gx[y*w+x] = absInt(vx)
-			gy[y*w+x] = absInt(vy)
+			tl, tc, tr := at(x-1, y-1), at(x, y-1), at(x+1, y-1)
+			bl, bc, br := at(x-1, y+1), at(x, y+1), at(x+1, y+1)
+			if wantCol {
+				gx[y*w+x] = absInt(-tl - 2*at(x-1, y) - bl + tr + 2*at(x+1, y) + br)
+			}
+			if wantRow {
+				gy[y*w+x] = absInt(-tl - 2*tc - tr + bl + 2*bc + br)
+			}
 		}
 	}
 
@@ -222,19 +243,23 @@ func lineProjections(blurred *image.Gray) (row, col []float64) {
 		}
 		return 0
 	}
-	for y := 0; y < h; y++ {
-		hist = [256]int{}
-		for x := 0; x < w; x++ {
-			hist[minInt(gy[y*w+x], 255)]++
-		}
-		row[y] = median(w)
-	}
-	for x := 0; x < w; x++ {
-		hist = [256]int{}
+	if wantRow {
 		for y := 0; y < h; y++ {
-			hist[minInt(gx[y*w+x], 255)]++
+			hist = [256]int{}
+			for x := 0; x < w; x++ {
+				hist[minInt(gy[y*w+x], 255)]++
+			}
+			row[y] = median(w)
 		}
-		col[x] = median(h)
+	}
+	if wantCol {
+		for x := 0; x < w; x++ {
+			hist = [256]int{}
+			for y := 0; y < h; y++ {
+				hist[minInt(gx[y*w+x], 255)]++
+			}
+			col[x] = median(h)
+		}
 	}
 	return row, col
 }

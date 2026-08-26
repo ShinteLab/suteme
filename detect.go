@@ -1011,7 +1011,9 @@ func axisProjection(img image.Image, r image.Rectangle, vertical bool) ([]float6
 			sub.Set(x-r.Min.X, y-r.Min.Y, img.At(x, y))
 		}
 	}
-	row, col := lineProjections(BoxBlur(ConvertGray(sub), 2))
+	// **要る軸だけ計算する。** ここは縦線か横線のどちらか一方しか使わないのに
+	// 両方求めていた（`lineProjectionsAxes`）
+	row, col := lineProjectionsAxes(BoxBlur(ConvertGray(sub), 2), !vertical, vertical)
 	if vertical {
 		return col, r.Min.X, true
 	}
