@@ -40,6 +40,7 @@ SFEN の駒文字マッピングや盤面文字列の組み立てを suteme 側�
 | `segment.go` | **盤領域の絞り込み**: 横線の線分抽出 → x/y 範囲のクラスタ → `boardROIs` |
 | `classify.go` | **空/先手/後手の分類**: 画像処理のみ（学習不要）・`BoardColor`・`BoardEmptyCover` |
 | `validate.go` | 盤面検出の妥当性チェック（背景色の均一性 × グリッド整合度）|
+| `embed.go` | **ファイル以外から認識器を渡す**: `PredictorFrom` / `StripJudgeFrom` / `OrientMatcherFrom`（`go:embed` 用）|
 | `orient.go` | **向き照合データの探索**: `orient_data_v1.bin`・`SetOrientMatcher`（NN を配る構成の穴埋め）|
 | `unslip.go` | **1マス滑りの補正(学習)**: 盤の縁の帯が盤か外かを k-NN で判定・`StripJudge`・帯データの入出力 |
 | `recognize.go` | **駒種認識(NN推論)**: gobrain `Model` 読み込み/推論・`CellToInput`・学習データ型・`ClassifyCellFor`（向きの回転照合）|
@@ -931,6 +932,14 @@ dist/strip_data_v1.bin       2.7 MB   そのまま複製（1マス滑りの補�
 | 配布用（間引き 1000/class・22MB）| 97.5% | 12/30 | 94.7% | 489ms |
 | 手元の全件（117MB）| 98.8% | 19/30 | 97.4% | 1.23s |
 
+**配った先で端から端まで通した実測**（`LoadSFEN` ＝自動検出、確認済み30局面）:
+**全マス 98.0%・完全一致 11/30**。**帯を抜くと 88.5%・完全一致 8** まで落ちるので、
+同梱の要否はここで確かめられる。
+
+**測るときは未確認の局面を混ぜないこと。** `verified` が false の局面の SFEN は
+**送り手（ikkyoku）の認識結果**であって正解ではない。混ぜて測ると
+実際より大幅に悪く出る（実測で 12 局面中 3 局面しか一致しない数字になった）。
+
 - **`dist/` に出す。カレントに直接書かない。** 受け取る側がそのまま使えるよう
   **ファイル名は正式名のまま**（`LoadPredictor` は決め打ちで探す）なので、
   同じディレクトリに書くと**手元の学習データ全件を上書きする**
@@ -952,6 +961,45 @@ dist/strip_data_v1.bin       2.7 MB   そのまま複製（1マス滑りの補�
 **NN の重みにはこの性質が無い**（個々の駒の絵を取り出せない）。
 公開するかどうかは中継画像の権利の判断であり、`.gitignore` の
 「大きい / 機密性あり」はこの意味。
+
+#### バイナリに埋め込んで配る（`embed.go`）
+
+**suteme はライブラリで、配布物は使う側のアプリのバイナリ。**
+既定の探索はカレントか実行ファイルの横を見るので、そのままだと
+**「モデルはファイルで添える」形に固定される**。ikkyoku のような Wails3 アプリは
+実行ファイル 1 つで配りたいので、`io.Reader` から渡せる口を用意してある。
+
+```go
+//go:embed model/training_data_v7.bin
+var modelData []byte
+
+//go:embed model/strip_data_v1.bin
+var stripData []byte
+
+func init() {
+	p, _ := suteme.PredictorFrom(bytes.NewReader(modelData), "embed:v7")
+	suteme.SetPredictor(p)
+	j, _ := suteme.StripJudgeFrom(bytes.NewReader(stripData), "embed:v1")
+	suteme.SetStripJudge(j)
+}
+```
+
+- **`PredictorFrom` は中身を見て形式を決める**（学習データなら k-NN、
+  JSON なら NN）ので、焼き込む側はどちらでも同じ呼び出しで済む。
+  **旧 JSON 形式の学習データだけは読めない**（NN モデルと区別が付かない。
+  v7 では旧形式を読まない方針なので実害は無い）
+- **第 2 引数は観測用のラベル。** 埋め込むと元のファイル名が残らないので、
+  **どの版を焼き込んだのかを名乗らせる**（`Debug` に
+  `predictor=knn(k=5, samples=8828) <- embed:v7` と出る）
+- **`embed.FS` 専用の口は用意しない。** `fsys.Open(name)` が返す
+  `io.Reader` をそのまま渡せる
+- **`LoadTrainingData` / `LoadStripData` / `LoadModel` はこの口を通る**
+  （開いて `Read*` に渡すだけ）。配布形態で読み方が分かれると、
+  片方だけ直すことになる
+
+実測（`dist/` を焼き込んだ 26.9MB の実行ファイル。**ファイルを 1 つも置かずに**
+別ディレクトリから実行）: 30局面で**全マス 98.0%・完全一致 11**、
+ファイルを置いた場合と**1 マスも違わない**。
 
 **版は suteme のコミットと一体。** `CellToInput` / `ExtractCell` /
 `SnapToGrid` を変えたら版を上げる規約なので、配るときは

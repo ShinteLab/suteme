@@ -269,15 +269,7 @@ func LoadTrainingData(path string) (*TrainingData, error) {
 	}
 	defer f.Close()
 
-	r := bufio.NewReaderSize(f, 1<<20)
-	head, err := r.Peek(1)
-	if err != nil {
-		return nil, err
-	}
-	if head[0] == '{' {
-		return readTrainingDataJSON(r)
-	}
-	return readTrainingData(r)
+	return ReadTrainingData(f)
 }
 
 func readTrainingData(r io.Reader) (*TrainingData, error) {
@@ -350,11 +342,7 @@ func LoadModel(path string) (*Model, error) {
 		return nil, err
 	}
 	defer f.Close()
-	var nn gobrain.FeedForward
-	if err := json.NewDecoder(f).Decode(&nn); err != nil {
-		return nil, err
-	}
-	return &Model{NN: &nn}, nil
+	return ReadModel(f)
 }
 
 // Predict はマス画像から駒を推論する

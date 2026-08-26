@@ -434,8 +434,12 @@ func LoadStripData(path string) ([]StripSample, error) {
 		return nil, err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 1<<20)
+	return ReadStripData(f)
+}
 
+// readStripData は帯データの本体を読む。
+// **ファイル以外（埋め込み）からも読めるよう Reader で受ける**（embed.go）。
+func readStripData(r io.Reader) ([]StripSample, error) {
 	var head [stripDataHeader]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
 		return nil, fmt.Errorf("帯データのヘッダが読めません: %w", err)
