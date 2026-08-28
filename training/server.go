@@ -1161,7 +1161,7 @@ func samplesFromRegion(img image.Image, br *suteme.BoardRegion, board string) ([
 			cell = suteme.Rotate180(cell)
 		}
 		samples = append(samples, suteme.TrainingSample{
-			Input: suteme.CellToInput(cell),
+			Input: suteme.SampleInput(cell, class),
 			Label: class,
 		})
 	})
@@ -1180,7 +1180,7 @@ func samplesFromRegion(img image.Image, br *suteme.BoardRegion, board string) ([
 				continue
 			}
 			samples = append(samples, suteme.TrainingSample{
-				Input: suteme.CellToInput(cell),
+				Input: suteme.SampleInput(cell, suteme.ClassEmpty),
 				Label: suteme.ClassEmpty,
 			})
 		}

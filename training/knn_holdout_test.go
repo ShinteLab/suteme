@@ -278,9 +278,12 @@ func TestKNNCellHoldout(t *testing.T) {
 				// このマス自身のサンプルを訓練データから除く
 				self := suteme.CellToInput(cell)
 				selfRot := suteme.CellToInput(suteme.Rotate180(cell))
+				// 空サンプルはマス全体で作ってあるので、そちらも除く
+				selfFull := suteme.CellToInputFull(cell)
 				train := make([]suteme.TrainingSample, 0, len(all))
 				for _, s := range all {
-					if equalInput(s.Input, self) || equalInput(s.Input, selfRot) {
+					if equalInput(s.Input, self) || equalInput(s.Input, selfRot) ||
+						equalInput(s.Input, selfFull) {
 						continue
 					}
 					train = append(train, s)

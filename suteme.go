@@ -16,6 +16,11 @@ import (
 // **入力ベクトルの作り方（CellToInput / resizeGray）を変えたら版を上げること。**
 // MergeSamples は入力の内容でマージするので、表現の違うサンプルを同じファイルに
 // 混ぜると古いものが消えずに残り続ける。
+// v8: 空マス（ClassEmpty）の入力をマス全体で作るようにした（CellToInputFull 参照。
+//
+//	外接矩形は駒にしか定義できず、空マスでは木目を囲んだでたらめな矩形になる。
+//	駒サンプルの表現は v7 と同じ）
+//
 // v7: 盤面座標を `SnapToGrid` で格子線へ寄せてから切り出すようにした
 //
 //	（学習データも検出も同じ一点で切り出す。全マスの入力が変わる）
@@ -28,16 +33,17 @@ import (
 //
 // v3: リサイズを最近傍法から面積平均に変更（v2 は標準化・回転正規化・空クラス対応）
 const (
-	DefaultDataFile  = "training_data_v7.bin"
-	DefaultModelFile = "model_v7.json"
+	DefaultDataFile  = "training_data_v8.bin"
+	DefaultModelFile = "model_v8.json"
 )
 
 // LegacyDataFiles は既定のファイルが無いときに読みにいく旧版の学習データ。
 //
-// **v6 以前は入れない。** v7 で切り出す座標そのものが変わったので、
-// 古いファイルのベクトルは今の切り出しと別物になっている。
+// **v7 以前は入れない。** v8 で空マスの入力ベクトルが別物になったので、
+// 混ぜると `MergeSamples` が畳めず、切り揃えた古い空サンプルが残り続ける
+// （そちらは推論時に作る空の入力と一致しないので、ただの死荷重になる）。
 // 学習データは `data/history.json` の画像と正解 SFEN から作り直せるので、
-// 履歴タブで全件を選んで学習し直せば v7 のファイルができる。
+// 履歴タブで全件を選んで学習し直せば v8 のファイルができる。
 var LegacyDataFiles []string
 
 // minBoardConfidence は盤面領域を採用する最低信頼度（ValidateBoard の値）。
@@ -127,7 +133,7 @@ func defaultPredictor() (Predictor, error) {
 // 持ち駒や検証結果も要るなら Recognize を使う。
 //
 // 駒種の推論器はカレントディレクトリ、次に実行ファイルのディレクトリから
-// 自動で読み込む（training_data_v7.bin → k-NN 優先、無ければ model_v7.json）。
+// 自動で読み込む（training_data_v8.bin → k-NN 優先、無ければ model_v8.json）。
 // 明示的に指定する場合は SetPredictor / WithPredictor を使う。
 //
 // 既定では盤面の検証は行うがエラーにはしない。おかしい盤面をエラーにしたい場合は

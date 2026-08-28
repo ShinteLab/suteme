@@ -18,14 +18,14 @@ import (
 // 埋め込みたい（ikkyoku のような Wails3 アプリでは実行ファイル 1 つで
 // 配りたい）ときに、置き場所の約束を持ち込まずに渡せるようにする。
 //
-//	//go:embed model/training_data_v7.bin
+//	//go:embed model/training_data_v8.bin
 //	var modelData []byte
 //
 //	//go:embed model/strip_data_v1.bin
 //	var stripData []byte
 //
 //	func init() {
-//		p, err := suteme.PredictorFrom(bytes.NewReader(modelData), "embed:v7")
+//		p, err := suteme.PredictorFrom(bytes.NewReader(modelData), "embed:v8")
 //		if err != nil { log.Fatal(err) }
 //		suteme.SetPredictor(p)
 //		if j, err := suteme.StripJudgeFrom(bytes.NewReader(stripData), "embed:v1"); err == nil {
@@ -73,7 +73,7 @@ func ReadModel(r io.Reader) (*Model, error) {
 // **中身を見て形式を決める**（学習データなら k-NN、JSON なら gobrain の NN）ので、
 // 埋め込む側はどちらを焼き込んでも同じ呼び出しで済む。
 // **旧 JSON 形式の学習データはここでは読めない**（NN モデルと区別が付かないため）。
-// v7 では旧形式を読まない方針なので実害は無い（`LegacyDataFiles` は空）。
+// v8 では旧形式を読まない方針なので実害は無い（`LegacyDataFiles` は空）。
 func PredictorFrom(r io.Reader, name string) (Predictor, error) {
 	br := asPeeker(r)
 	head, err := br.Peek(1)

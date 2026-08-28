@@ -125,6 +125,9 @@ const emptyDistNorm = 2 * inputSize
 // 信頼度は勝者クラスの重み比率。
 func (kn *KNN) Predict(cell image.Image) (int, float64) {
 	input := CellToInput(cell)
+	// 空サンプルはマス全体で作ってあるので、こちらも切り揃えない版で測る
+	// （CellToInputFull 参照。外接矩形は駒にしか定義できない）
+	full := [2][]float64{CellToInputFull(cell), CellToInputFull(Rotate180(cell))}
 
 	type neighbor struct {
 		dist  float64
@@ -133,16 +136,29 @@ func (kn *KNN) Predict(cell image.Image) (int, float64) {
 	nbrs := make([]neighbor, 0, len(kn.samples))
 	nearestEmpty := math.Inf(1)
 	for _, s := range kn.samples {
+		if s.Label == ClassEmpty {
+			// 空には向きが無い。呼び出し側が後手と見て 180 度回したマスも
+			// 空の可能性があるので、両向きの近いほうで測る
+			// （空サンプルは回転させずに 1 通りしか持っていない）
+			for _, in := range full {
+				d := 0.0
+				for j, v := range in {
+					diff := v - s.Input[j]
+					d += diff * diff
+					if d >= nearestEmpty {
+						break
+					}
+				}
+				if d < nearestEmpty {
+					nearestEmpty = d
+				}
+			}
+			continue
+		}
 		d := 0.0
 		for j, v := range input {
 			diff := v - s.Input[j]
 			d += diff * diff
-		}
-		if s.Label == ClassEmpty {
-			if d < nearestEmpty {
-				nearestEmpty = d
-			}
-			continue
 		}
 		nbrs = append(nbrs, neighbor{dist: d, label: s.Label})
 	}

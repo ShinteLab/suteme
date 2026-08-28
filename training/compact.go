@@ -19,7 +19,7 @@ import (
 // クラスごとに間引くと、同じサイズ帯では NN より強い。実測（30局面・
 // 手動座標・**その局面を学習済みの条件**なので絶対値は高く出る）:
 //
-//	model_v7.json + orient_data_v1.bin   8.7MB   90.8%
+//	model_v8.json + orient_data_v1.bin   8.7MB   90.8%
 //	間引き  250/class ( 2793件)          5.7MB   93.8%
 //	間引き 1000/class ( 8828件)           19MB   97.5%
 //	全件      (51932件)                  114MB   98.8%
@@ -33,7 +33,7 @@ import (
 const CompactPerClass = 1000
 
 // distDir は書き出し先。**カレントに直接書かない。**
-// 名前は受け取る側でそのまま使える正式名（`training_data_v7.bin`）にするので、
+// 名前は受け取る側でそのまま使える正式名（`training_data_v8.bin`）にするので、
 // 同じディレクトリに置くと**手元の学習データ全件を上書きしてしまう**。
 const distDir = "dist"
 

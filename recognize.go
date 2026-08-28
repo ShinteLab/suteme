@@ -137,6 +137,39 @@ func CellToInput(cell image.Image) []float64 {
 	if box, ok := pieceBox(cell); ok {
 		cell = cropImage(cell, box)
 	}
+	return cellVector(cell)
+}
+
+// CellToInputFull は外接矩形に切り揃えずマス全体を入力ベクトルにする（v8）。
+//
+// **空マスの照合はこちらを使う。外接矩形は駒にしか定義できない。**
+// `pieceBox` は「地色と異なる画素」の外接矩形なので、駒の無いマスでは
+// 木目やグリッド線の切れ端を囲んだ**でたらめな矩形**になる。それを 24x24 に
+// 引き伸ばすと、**同じ盤の同じマスを撮り直しただけで別のベクトル**になる。
+//
+// 実測（同じ対局を撮った 3 枚、9八 の空マス。正規化済み距離）:
+//
+//	              外接矩形あり  マス全体
+//	A 対 B            0.936      0.005
+//	A 対 C            0.982      0.010
+//	B 対 C            0.021      0.011
+//
+// 外接矩形は A だけ幅 17px（他の 2 枚は 27px）に囲まれていた。
+// 空の一致判定は `emptyMatchMax`(0.10) の絶対しきい値なので、
+// この食い違いは**同じ盤を何枚学習させても空を拾えない**ことを意味する。
+func CellToInputFull(cell image.Image) []float64 { return cellVector(cell) }
+
+// SampleInput は学習サンプルの入力ベクトルを作る。
+// 空（ClassEmpty）だけマス全体を使う（CellToInputFull 参照）。
+func SampleInput(cell image.Image, class int) []float64 {
+	if class == ClassEmpty {
+		return CellToInputFull(cell)
+	}
+	return CellToInput(cell)
+}
+
+// cellVector は与えられた画像を 24x24 に落として標準化する。
+func cellVector(cell image.Image) []float64 {
 	resized := resizeGray(cell, cellSize, cellSize)
 	input := make([]float64, inputSize)
 	bounds := resized.Bounds()
