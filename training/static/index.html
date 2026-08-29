@@ -31,6 +31,34 @@ body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; pa
 .loading { display: none; text-align: center; padding: 24px; color: #4cc9f0; }
 .loading.active { display: block; }
 
+/* **読み込み中は画面全体を覆う。** 履歴からの再入力は
+   「画像の取得 → 盤面の切り出し → SFEN の反映 → マス画像の読み込み」と
+   数秒かかる工程が続くのに、その間ずっと操作できて終わりも分からなかった。
+   マスクで操作を止め、いま何をしているかを工程として出す */
+.busy {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(10,10,20,0.72); z-index: 200;
+  display: none; align-items: center; justify-content: center;
+}
+.busy.active { display: flex; }
+.busy-box {
+  background: #16213e; border: 1px solid #4cc9f0; border-radius: 8px;
+  padding: 20px 24px; min-width: 320px; max-width: 480px;
+}
+.busy-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.busy-spin {
+  width: 18px; height: 18px; flex: none; border-radius: 50%;
+  border: 2px solid #2a5a6a; border-top-color: #4cc9f0;
+  animation: busy-spin 0.8s linear infinite;
+}
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+.busy-title { font-size: 14px; font-weight: 600; color: #4cc9f0; }
+.busy-step { font-size: 12px; color: #4cc9f0; padding: 2px 0 2px 18px; position: relative; line-height: 1.6; }
+.busy-step::before { content: "▸"; position: absolute; left: 2px; }
+/* 済んだ工程は落ち着かせる（いま走っているのが一番下の 1 行だと分かる） */
+.busy-step.done { color: #888; }
+.busy-step.done::before { content: "✓"; color: #74c69d; }
+
 .pipeline {
   display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
   max-width: 1400px; margin: 0 auto 32px;
@@ -579,6 +607,13 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
 </div>
 </div><!-- /tab-analyze -->
 
+<!-- 読み込み中のマスク。操作を止めて、工程を順に出す（busyStart / busyStep / busyEnd） -->
+<div class="busy" id="busy">
+  <div class="busy-box">
+    <div class="busy-head"><div class="busy-spin"></div><div class="busy-title" id="busy-title">処理中...</div></div>
+    <div id="busy-steps"></div>
+  </div>
+</div>
 <div class="overlay" id="overlay"></div>
 <div class="piece-select" id="piece-select">
   <h3 id="select-title">ラベリング</h3>
@@ -787,6 +822,58 @@ function showBoardStep(rect, source, conf, by) {
       '">' + conf + '%</span>' : '');
 }
 
+// 読み込み中のマスク。**押せてしまう時間を作らない**ための仕組みで、
+// 履歴からの再入力のように工程が続くものは busyStep で途中経過を出す。
+// 入れ子で呼ばれる（reenterHistory → analyze → runRecognition）ので
+// 深さで数え、いちばん外側が閉じたときだけ消す
+let busyDepth = 0;
+let busyCurrentStep = null;
+
+function busyStart(title) {
+  busyDepth++;
+  if (busyDepth > 1) return; // 入れ子。表題は外側のものを残す
+  document.getElementById('busy-title').textContent = title || '処理中...';
+  document.getElementById('busy-steps').innerHTML = '';
+  busyCurrentStep = null;
+  document.getElementById('busy').classList.add('active');
+}
+
+// いま何をしているかを 1 行足す。直前の行は済みにする
+function busyStep(text) {
+  if (!busyDepth) return;
+  if (busyCurrentStep) busyCurrentStep.classList.add('done');
+  const el = document.createElement('div');
+  el.className = 'busy-step';
+  el.textContent = text;
+  document.getElementById('busy-steps').appendChild(el);
+  busyCurrentStep = el;
+}
+
+function busyEnd() {
+  if (busyDepth > 0) busyDepth--;
+  if (busyDepth > 0) return;
+  if (busyCurrentStep) busyCurrentStep.classList.add('done');
+  busyCurrentStep = null;
+  document.getElementById('busy').classList.remove('active');
+}
+
+// **画像が出そろうまでを「読み込み中」に含める。** fetch が返った時点で
+// 隠すと、81 マスの写真が抜けたままの盤を操作できてしまう。
+// 取れなかった画像（セッション切れ等）は imageFailed がその場に出すので、
+// ここでは待つのをやめるだけにする
+function waitForImages(root, timeoutMs = 8000) {
+  const imgs = Array.from(root.querySelectorAll('img'))
+    .filter(im => im.src && !im.complete);
+  if (!imgs.length) return Promise.resolve();
+  return Promise.race([
+    Promise.all(imgs.map(im => new Promise(done => {
+      im.addEventListener('load', done, { once: true });
+      im.addEventListener('error', done, { once: true });
+    }))),
+    new Promise(done => setTimeout(done, timeoutMs)),
+  ]);
+}
+
 // 盤面の指定はドラッグ・座標入力・履歴からの復元のすべてがここを通る。
 // recognize=false は履歴からの復元用（この後 SFEN で上書きするので推論は要らない）
 async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual', by } = {}) {
@@ -806,6 +893,9 @@ async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual
     alert('盤面の範囲が小さすぎます（9マスに割れません）');
     return false;
   }
+  busyStart('盤面を反映しています');
+  try {
+  busyStep('盤面を切り出しています…');
   const res = await fetch('/api/setboard', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -831,7 +921,10 @@ async function setBoardRect(x1, y1, x2, y2, { recognize = true, source = 'manual
       : '盤面を指定しました';
     await runRecognition();
   }
+  busyStep('マス画像を読み込んでいます…');
+  await waitForImages(document.getElementById('cell-grid'));
   return true;
+  } finally { busyEnd(); }
 }
 
 // 座標欄から指定する。ドラッグでは数px の詰めがしづらいので、
@@ -892,6 +985,7 @@ function getImgCoord(img, clientX, clientY) {
 
 // Ctrl+V ペースト対応
 document.addEventListener('paste', e => {
+  if (busyDepth) return; // 読み込み中はマスクで押せないので、貼り付けも受けない
   const items = e.clipboardData && e.clipboardData.items;
   if (!items) return;
   for (const item of items) {
@@ -908,6 +1002,7 @@ document.addEventListener('paste', e => {
 // （入力タブを素通りしてスピナーだけ見せる遷移になっていた）
 async function analyze(file, { tab = 'input' } = {}) {
   switchTab(tab);
+  busyStart('画像を解析しています');
   // 前の画像の入力を持ち越さない。SFEN 欄が残っていると次の画像の
   // ラベリング中も古い局面が画面に居座って紛らわしい
   document.getElementById('sfen-input').value = '';
@@ -936,6 +1031,7 @@ async function analyze(file, { tab = 'input' } = {}) {
   form.append('image', file);
 
   try {
+    busyStep('盤面を検出しています…');
     const res = await fetch('/api/analyze', { method: 'POST', body: form });
     const data = await res.json();
     currentSessionId = data.id;
@@ -967,6 +1063,8 @@ async function analyze(file, { tab = 'input' } = {}) {
       cellSuggestions = data.suggestions || null;
       renderCells(data.id, data.categories);
       await runRecognition();
+      busyStep('マス画像を読み込んでいます…');
+      await waitForImages(document.getElementById('cell-grid'));
     } else {
       // 検出に失敗しても手動指定すれば先に進める。
       // 「検出できませんでした」だけだと手詰まりに見えるので、そのまま
@@ -980,7 +1078,10 @@ async function analyze(file, { tab = 'input' } = {}) {
       document.getElementById('board-card-note').textContent = '（この候補は信頼度不足で棄却）';
     }
   } catch (e) { alert('エラー: ' + e.message); }
-  finally { document.getElementById('loading').classList.remove('active'); }
+  finally {
+    document.getElementById('loading').classList.remove('active');
+    busyEnd();
+  }
 }
 
 function renderCells(id, categories) {
@@ -1881,6 +1982,11 @@ async function reenterHistory(row) {
   const bounds = normalizeBounds(row.dataset.bounds ? JSON.parse(row.dataset.bounds) : null);
   const boundsBy = row.dataset.boundsBy || '';
 
+  // **読み込みの間は操作させない。** 画像の取得から SFEN の反映まで
+  // 数秒かかる工程が続くので、マスクを掛けて途中経過を出す
+  busyStart('履歴から読み込んでいます（' + id.slice(0, 8) + '）');
+  try {
+  busyStep('保存済みの画像を取得しています…');
   const res = await fetch('/api/history/' + id + '/image');
   if (!res.ok) { alert('画像の読み込みに失敗しました'); return; }
   processedHistory.add(id); // 処理済みマーク（セッション内のみ）
@@ -1896,6 +2002,7 @@ async function reenterHistory(row) {
 
   // 保存した盤面座標を復元。この後 SFEN でラベルを上書きするので推論は走らせない
   if (bounds && currentSessionId) {
+    busyStep('保存済みの盤面座標を反映しています…');
     await setBoardRect(bounds.x1, bounds.y1, bounds.x2, bounds.y2,
       { recognize: false, source: 'saved', by: boundsBy });
   }
@@ -1904,15 +2011,19 @@ async function reenterHistory(row) {
   // **手番・持ち駒も入力欄に戻す。** 戻さないと、確認して保存し直すだけで
   // 記録されていた駒台が消える（API から来た完全形の SFEN で実際に起きていた）
   if (sfen) {
+    busyStep('保存済みの SFEN を81マスに反映しています…');
     document.getElementById('sfen-input').value = sfen;
     await applyFromSFEN();
     const f = sfen.trim().split(/\s+/);
     setHands(f[2] || '-');
     applyTurnFields(f[1], f[3]);
   }
+  busyStep('マス画像を読み込んでいます…');
+  await waitForImages(document.getElementById('cell-grid'));
   document.getElementById('analyze-status').textContent = sfen
     ? '履歴から読み込みました — 保存済みの SFEN を81マスに反映しています（○ が入力済み）'
     : '履歴から読み込みました — この局面に SFEN は保存されていません';
+  } finally { busyEnd(); }
 }
 
 // 履歴の削除（エントリと保存画像の両方をサーバから消す）。
@@ -2079,6 +2190,9 @@ async function applyFromSFEN() {
 // マス目のラベルには触らない（確定は解析タブの操作で行う）
 async function runRecognition() {
   if (!currentSessionId) return;
+  busyStart('認識しています');
+  try {
+  busyStep('駒を認識しています…');
   const sec = document.getElementById('recog-section');
   const out = document.getElementById('recog-sfen');
   sec.style.display = 'block';
@@ -2122,6 +2236,7 @@ async function runRecognition() {
   document.getElementById('recog-board-wrap').style.display = ''; // CSS の flex に戻す
 
   if (data.validation) renderPieceCounts(data.validation);
+  } finally { busyEnd(); }
 }
 
 // 駒数テーブル（盤面 + 駒台 = 全駒 の検証結果）
