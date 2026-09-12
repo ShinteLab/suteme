@@ -713,7 +713,8 @@ fileInput.addEventListener('change', () => { if (fileInput.files.length) analyze
 
 // 盤面手動指定
 let boardSelectMode = false;
-let selectDragStart = null;
+let selectDragStart = null; // { img:{x,y}, local:{x,y} } ＝ どちらもスクロール不変
+let selectDragLast = null;  // 最後のマウス位置（スクロール中の描き直し用）
 
 // ラベリングのマスの大きさ。**既定は小さいほう。**
 // 入力が要らないときに画面の大半を盤が占めるのが邪魔なので、
@@ -761,6 +762,7 @@ function startBoardSelect() {
 function endBoardSelect() {
   boardSelectMode = false;
   selectDragStart = null;
+  selectDragLast = null;
   document.getElementById('select-hint').style.display = 'none';
   document.getElementById('img-original-wrapper').style.cursor = 'default';
   document.getElementById('pipeline').classList.remove('selecting');
@@ -948,33 +950,59 @@ function getImgCoord(img, clientX, clientY) {
   const wrapper = document.getElementById('img-original-wrapper');
   const canvas = document.getElementById('select-canvas');
 
-  wrapper.addEventListener('mousedown', e => {
-    if (!boardSelectMode) return;
-    selectDragStart = { clientX: e.clientX, clientY: e.clientY };
-    e.preventDefault();
-  });
-
-  wrapper.addEventListener('mousemove', e => {
-    if (!boardSelectMode || !selectDragStart) return;
+  // 枠はラッパ内の座標で描く（ラッパはページと一緒に動くのでスクロール不変）。
+  // 追う先はマウスの下にある画像の点なので、現在位置だけ clientX/Y から取り直す
+  function drawSelectRect(clientX, clientY) {
     const wRect = wrapper.getBoundingClientRect();
     canvas.width = wrapper.offsetWidth;
     canvas.height = wrapper.offsetHeight;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const x1 = selectDragStart.clientX - wRect.left;
-    const y1 = selectDragStart.clientY - wRect.top;
-    const x2 = e.clientX - wRect.left;
-    const y2 = e.clientY - wRect.top;
+    const x1 = selectDragStart.local.x;
+    const y1 = selectDragStart.local.y;
+    const x2 = clientX - wRect.left;
+    const y2 = clientY - wRect.top;
     ctx.strokeStyle = '#4cc9f0';
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 2]);
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  }
+
+  wrapper.addEventListener('mousedown', e => {
+    if (!boardSelectMode) return;
+    const wRect = wrapper.getBoundingClientRect();
+    // **開始点をビューポート基準（clientX/Y）で持ってはいけない。**
+    // 大きい画像は下端まで引くのにホイールでのスクロールが要るのに、
+    // スクロールすると `getBoundingClientRect` が動くので、mouseup で
+    // 画像座標に変換する時点で**開始点だけがスクロール量ぶんずれる**
+    // （縦に丸ごとずれた枠がそのまま盤として登録される）。
+    // 画像座標もラッパ内の座標もスクロールでは動かないので、
+    // 押した時点で両方に直しておく
+    selectDragStart = {
+      img: getImgCoord(document.getElementById('img-original'), e.clientX, e.clientY),
+      local: { x: e.clientX - wRect.left, y: e.clientY - wRect.top },
+    };
+    selectDragLast = { clientX: e.clientX, clientY: e.clientY };
+    e.preventDefault();
+  });
+
+  wrapper.addEventListener('mousemove', e => {
+    if (!boardSelectMode || !selectDragStart) return;
+    selectDragLast = { clientX: e.clientX, clientY: e.clientY };
+    drawSelectRect(e.clientX, e.clientY);
+  });
+
+  // ホイールで動かしてもマウス自体は動かないので mousemove は来ない。
+  // 枠が古い位置に残ると、どこを引いているのか分からなくなる
+  window.addEventListener('scroll', () => {
+    if (!boardSelectMode || !selectDragStart || !selectDragLast) return;
+    drawSelectRect(selectDragLast.clientX, selectDragLast.clientY);
   });
 
   wrapper.addEventListener('mouseup', async e => {
     if (!boardSelectMode || !selectDragStart) return;
     const img = document.getElementById('img-original');
-    const c1 = getImgCoord(img, selectDragStart.clientX, selectDragStart.clientY);
+    const c1 = selectDragStart.img;
     const c2 = getImgCoord(img, e.clientX, e.clientY);
     // 元の 3 枚並びに戻してから設定する（盤面検出の画像も見せたいので）
     endBoardSelect();
