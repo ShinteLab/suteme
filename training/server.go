@@ -295,13 +295,23 @@ func currentPredictor() suteme.Predictor {
 	return nil
 }
 
-// predictCells は全マスの駒種を推論し、SFENラベルの9x9グリッドを返す
-// 推論器なし・盤面未検出時は nil を返す。空マスは "none"
-func predictCells(s *session) *[9][9]map[string]interface{} {
-	m := currentPredictor()
-	if m == nil || s.Result == nil || s.Result.Board == nil {
-		return nil
+// predictCells は全マスの「空/手前/奥」と駒種候補を **1 回の判断から** 返す。
+// 盤面未検出なら両方 nil、推論器が無ければ候補だけ nil（色分けは返す）。
+//
+// **色分け（categories）を `suteme.ClassifyBoard` で別に作ってはいけない。**
+// あちらは画像処理だけの一次判定で、**向きを回転照合で決め直さないし、
+// 推論器の空クラスによる覆しも通らない**。同じレスポンスに載る候補
+// （suggestions）や保存される SFEN と食い違うので、画面では
+// 「学習させたのに色（空・向き）が外れたまま」に見える。
+// 実測（直近8局面 648マス）: 向きの反転が **113 件** 対 最終 SFEN の 0 件、
+// 空→駒 5 件 対 0 件。CLAUDE.md「空/先手/後手 を出すところは必ず
+// `BoardOrient.Classify` を通すこと」はこの食い違いのこと。
+func predictCells(s *session) (*[9][9]int, *[9][9]map[string]interface{}) {
+	if s == nil || s.Result == nil || s.Result.Board == nil {
+		return nil, nil
 	}
+	m := currentPredictor()
+	var cats [9][9]int
 	var grid [9][9]map[string]interface{}
 	bc := suteme.BoardColor(s.Original, s.Result.Board)
 	bo := suteme.NewBoardOrient(s.Original, s.Result.Board, bc)
@@ -312,6 +322,10 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 				continue
 			}
 			cat, _ := bo.Classify(cell, bc, m)
+			cats[row][col] = int(cat)
+			if m == nil {
+				continue
+			}
 			if cat == suteme.CellEmpty {
 				grid[row][col] = map[string]interface{}{"label": suteme.EmptyLabel, "confidence": 95}
 				continue
@@ -321,8 +335,10 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 				ncell = suteme.Rotate180(cell)
 			}
 			class, conf := m.Predict(ncell)
-			// 推論器が空と言うなら分類より優先する（RecognizeBoard と同じ判断）
+			// 推論器が空と言うなら分類より優先する（RecognizeBoard と同じ判断）。
+			// **色分けも一緒に覆す。** 覆さないと「空と書いてあるのに赤いマス」になる
 			if class == suteme.ClassEmpty {
+				cats[row][col] = int(suteme.CellEmpty)
 				grid[row][col] = map[string]interface{}{
 					"label":      suteme.EmptyLabel,
 					"confidence": int(conf * 100),
@@ -344,7 +360,10 @@ func predictCells(s *session) *[9][9]map[string]interface{} {
 			}
 		}
 	}
-	return &grid
+	if m == nil {
+		return &cats, nil
+	}
+	return &cats, &grid
 }
 
 func abs(n int) int {
@@ -417,21 +436,16 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if hasBoard && confidence >= 0.5 {
-		cats := suteme.ClassifyBoard(img, result.Board)
-		catGrid := [9][9]int{}
-		for r := 0; r < 9; r++ {
-			for c := 0; c < 9; c++ {
-				catGrid[r][c] = int(cats[r][c])
-			}
-		}
-		resp["categories"] = catGrid
-
-		// モデルがあれば駒種の推論候補も返す（ラベリング支援用）
+		// 色分けと駒種候補は同じ判断から出す（predictCells のコメント参照）
 		mu.RLock()
-		if sug := predictCells(sessions[id]); sug != nil {
+		cats, sug := predictCells(sessions[id])
+		mu.RUnlock()
+		if cats != nil {
+			resp["categories"] = cats
+		}
+		if sug != nil {
 			resp["suggestions"] = sug
 		}
-		mu.RUnlock()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -866,7 +880,6 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 
 	mu.Lock()
 	s, ok := sessions[req.Session]
-	var cats [9][9]suteme.CellCategory
 	if ok {
 		// **人が引いた枠も格子線へ寄せる（`SnapToGrid`）。**
 		// 学習も検出も同じ一点で切り出す、というのがこの画面の前提なので、
@@ -880,7 +893,6 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 		s.Result.Board = br
 		s.BoundsBy = normalizeBoundsBy(req.By)
 		s.BoardImg = s.Result.DrawBoard(s.Original)
-		cats = suteme.ClassifyBoard(s.Original, br)
 	}
 	mu.Unlock()
 
@@ -889,12 +901,10 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	catGrid := [9][9]int{}
-	for row := 0; row < 9; row++ {
-		for col := 0; col < 9; col++ {
-			catGrid[row][col] = int(cats[row][col])
-		}
-	}
+	// 色分けと駒種候補は同じ判断から出す（predictCells のコメント参照）
+	mu.RLock()
+	catGrid, sug := predictCells(s)
+	mu.RUnlock()
 
 	// 実際に使われた矩形を返す（正規化されるので、入れ替わった座標や
 	// ドラッグの向きに関わらず画面の座標欄と一致する）
@@ -902,19 +912,19 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 	bb := s.Result.Board.Bounds
 	mu.RUnlock()
 	resp := map[string]interface{}{
-		"status":     "ok",
-		"categories": catGrid,
+		"status": "ok",
 		"bounds": map[string]int{
 			"x1": bb.Min.X, "y1": bb.Min.Y,
 			"x2": bb.Max.X, "y2": bb.Max.Y,
 		},
 		"bounds_by": normalizeBoundsBy(req.By),
 	}
-	mu.RLock()
-	if sug := predictCells(s); sug != nil {
+	if catGrid != nil {
+		resp["categories"] = catGrid
+	}
+	if sug != nil {
 		resp["suggestions"] = sug
 	}
-	mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

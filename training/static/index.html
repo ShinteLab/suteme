@@ -1789,7 +1789,7 @@ async function refreshHistory() {
     const unverified = e.source === 'api' && !e.verified;
     return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
       data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}"
-      data-bounds-by="${e.bounds_by || ''}">
+      data-bounds-by="${e.bounds_by || ''}" data-unverified="${unverified ? '1' : ''}">
       <div class="hist-sel-cell" title="${unverified ? '未確認の局面は学習に使えません' : '学習に使う'}">
         <input type="checkbox" class="hist-sel" data-id="${e.id}" ${unverified ? 'disabled' : ''}></div>
       <span class="hist-check">${done ? '○' : ''}</span>
@@ -2009,6 +2009,13 @@ async function reenterHistory(row) {
   const sfen = row.dataset.sfen;
   const bounds = normalizeBounds(row.dataset.bounds ? JSON.parse(row.dataset.bounds) : null);
   const boundsBy = row.dataset.boundsBy || '';
+  // **未確認（API 登録）の局面の SFEN は正解ではない。** 送り手（ikkyoku）が
+  // 登録した時点の認識結果で、しかも向こうは焼き込んだ配布モデルなので
+  // **学習しても永久に変わらない**。これでラベルを上書きすると、
+  // 学習したばかりの k-NN の推論候補が画面に出る前に捨てられる＝
+  // **「学習しても認識率が上がった気がしない」**の正体。
+  // 確認済みの局面は人が直した正解なので従来どおり戻す
+  const unverified = row.dataset.unverified === '1';
 
   // **読み込みの間は操作させない。** 画像の取得から SFEN の反映まで
   // 数秒かかる工程が続くので、マスクを掛けて途中経過を出す
@@ -2036,21 +2043,28 @@ async function reenterHistory(row) {
   }
 
   // 保存済み SFEN を欄に戻してラベルへ展開する。
-  // **手番・持ち駒も入力欄に戻す。** 戻さないと、確認して保存し直すだけで
-  // 記録されていた駒台が消える（API から来た完全形の SFEN で実際に起きていた）
+  // **手番・持ち駒は未確認でも戻す。** 戻さないと、確認して保存し直すだけで
+  // 記録されていた駒台が消える（API から来た完全形の SFEN で実際に起きていた）。
+  // **81マスへの展開は確認済みのときだけ**（上の unverified のコメント）。
+  // 未確認なら欄に入れるだけにして、人が「SFENから入力」を押せば
+  // 送り手の読みから始められる
   if (sfen) {
-    busyStep('保存済みの SFEN を81マスに反映しています…');
     document.getElementById('sfen-input').value = sfen;
-    await applyFromSFEN();
+    if (!unverified) {
+      busyStep('保存済みの SFEN を81マスに反映しています…');
+      await applyFromSFEN();
+    }
     const f = sfen.trim().split(/\s+/);
     setHands(f[2] || '-');
     applyTurnFields(f[1], f[3]);
   }
   busyStep('マス画像を読み込んでいます…');
   await waitForImages(document.getElementById('cell-grid'));
-  document.getElementById('analyze-status').textContent = sfen
-    ? '履歴から読み込みました — 保存済みの SFEN を81マスに反映しています（○ が入力済み）'
-    : '履歴から読み込みました — この局面に SFEN は保存されていません';
+  document.getElementById('analyze-status').textContent =
+    !sfen ? '履歴から読み込みました — この局面に SFEN は保存されていません'
+    : unverified ? '履歴から読み込みました（未確認）— 水色はいまの学習データでの推論候補です。'
+        + '送り手が登録した SFEN は欄に入れてあるので、そちらから始めるなら「SFENから入力」'
+    : '履歴から読み込みました — 保存済みの SFEN を81マスに反映しています（○ が入力済み）';
   } finally { busyEnd(); }
 }
 
