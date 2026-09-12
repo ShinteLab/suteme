@@ -1,11 +1,9 @@
 package suteme
 
 import (
-	"encoding/json"
 	"image"
 	_ "image/png"
 	"math"
-	"os"
 	"testing"
 )
 
@@ -53,77 +51,72 @@ func TestDetectBoardMatchesManual(t *testing.T) {
 	SetStripJudge(nil) // nil = 判定器を使わない
 	t.Cleanup(ResetStripJudge)
 
-	dir := findDataDir()
-	if dir == "" {
-		t.Skip("data/history.json が無いのでスキップ")
-	}
-	f, err := os.Open(dir + "/history.json")
-	if err != nil {
-		t.Skip(err)
-	}
-	var h historyFile
-	err = json.NewDecoder(f).Decode(&h)
-	f.Close()
-	if err != nil {
-		t.Fatalf("history.json: %v", err)
-	}
+	dir, entries := loadSavedBoards(t)
 
-	ok, total, slipped := 0, 0, 0
-	for _, e := range h.Entries {
-		imgF, err := os.Open(dir + "/" + e.ID + ".png")
-		if err != nil {
-			continue
-		}
-		img, _, err := image.Decode(imgF)
-		imgF.Close()
-		if err != nil {
-			continue
-		}
-		total++
-
+	// 1 局面ぶんの測定結果。**判定とログは並列の外で行う**（mapSavedBoards の説明）
+	type res struct {
+		id             string
+		found          bool
+		over           float64
+		detB, imgB     image.Rectangle
+		dx, dy, dw, dh float64
+		worst, conf    float64
+	}
+	rs := mapSavedBoards(dir, entries, func(e historyEntry, img image.Image) res {
+		r := res{id: e.ID, imgB: img.Bounds()}
 		man := image.Rect(e.Bounds.X1, e.Bounds.Y1, e.Bounds.X2, e.Bounds.Y2)
 		cw, ch := float64(man.Dx())/9, float64(man.Dy())/9
-
 		det := DetectBoard(img)
 		if det == nil {
-			t.Logf("%s: 検出できず", e.ID)
+			return r
+		}
+		r.found = true
+		r.detB = det.Bounds
+		r.over = overflowCells(det.Bounds, img.Bounds(), cw, ch)
+		r.dx = float64(det.Bounds.Min.X-man.Min.X) / cw
+		r.dy = float64(det.Bounds.Min.Y-man.Min.Y) / ch
+		r.dw = float64(det.Bounds.Dx()-man.Dx()) / cw
+		r.dh = float64(det.Bounds.Dy()-man.Dy()) / ch
+		r.worst = math.Max(math.Max(math.Abs(r.dx), math.Abs(r.dy)), math.Max(math.Abs(r.dw), math.Abs(r.dh)))
+		r.conf = ValidateBoard(img, det)
+		return r
+	})
+
+	ok, total, slipped := 0, 0, 0
+	for _, r := range rs {
+		total++
+		if !r.found {
+			t.Logf("%s: 検出できず", r.id)
 			continue
 		}
 		// **1マス以上はみ出した領域を返さない（`unslipRegion`）。**
 		// はみ出しは「窓が1マス滑った」印であると同時に、
 		// そのままでは ExtractCell が画像の外を読むことになる。
 		// 数px は `SnapToGrid` の当てはめ由来なので許す（`detectOverflowTolCells`）
-		if over := overflowCells(det.Bounds, img.Bounds(), cw, ch); over > detectOverflowTolCells {
+		if r.over > detectOverflowTolCells {
 			t.Errorf("%s: 検出 %v が画像 %v から %.2fマスはみ出している",
-				e.ID, det.Bounds, img.Bounds(), over)
+				r.id, r.detB, r.imgB, r.over)
 		}
-		dx := float64(det.Bounds.Min.X-man.Min.X) / cw
-		dy := float64(det.Bounds.Min.Y-man.Min.Y) / ch
-		dw := float64(det.Bounds.Dx()-man.Dx()) / cw
-		dh := float64(det.Bounds.Dy()-man.Dy()) / ch
-		worst := math.Max(math.Max(math.Abs(dx), math.Abs(dy)), math.Max(math.Abs(dw), math.Abs(dh)))
-		conf := ValidateBoard(img, det)
+		t.Logf("%s: dx=%+.2f dy=%+.2f dw=%+.2f dh=%+.2f conf=%.2f", r.id, r.dx, r.dy, r.dw, r.dh, r.conf)
 
-		t.Logf("%s: dx=%+.2f dy=%+.2f dw=%+.2f dh=%+.2f conf=%.2f", e.ID, dx, dy, dw, dh, conf)
-
-		if worst <= detectTolCells {
+		if r.worst <= detectTolCells {
 			ok++
-			if conf < minBoardConfidence {
-				t.Errorf("%s: 座標は合っている(最大 %.2fマス)のに conf=%.2f で棄却される", e.ID, worst, conf)
+			if r.conf < minBoardConfidence {
+				t.Errorf("%s: 座標は合っている(最大 %.2fマス)のに conf=%.2f で棄却される", r.id, r.worst, r.conf)
 			}
 			continue
 		}
 		// **1マスの滑りだけは別扱い。** 大きさは合っているのに位置だけが
 		// 1マスぶん動いた検出は、判定器を外している以上ここでは落とせない
 		// （`detectSlipMaxRatio`）。件数だけ数えておく
-		if isOneCellSlip(dx, dy, dw, dh) {
+		if isOneCellSlip(r.dx, r.dy, r.dw, r.dh) {
 			slipped++
-			t.Logf("%s: 1マス滑り（判定器の領分。TestUnslipHoldout が直すこと）", e.ID)
+			t.Logf("%s: 1マス滑り（判定器の領分。TestUnslipHoldout が直すこと）", r.id)
 			continue
 		}
 		// それ以外で外した場合は、黙って通してはいけない（ValidateBoard が気付くこと）
-		if conf >= minBoardConfidence {
-			t.Errorf("%s: %.2fマスずれているのに conf=%.2f で採用される", e.ID, worst, conf)
+		if r.conf >= minBoardConfidence {
+			t.Errorf("%s: %.2fマスずれているのに conf=%.2f で採用される", r.id, r.worst, r.conf)
 		}
 	}
 
@@ -196,80 +189,67 @@ func TestDetectBoardCropInvariance(t *testing.T) {
 	SetStripJudge(nil) // 環境にファイルがあるかで結果が変わらないように
 	t.Cleanup(ResetStripJudge)
 
-	dir := findDataDir()
-	if dir == "" {
-		t.Skip("data/history.json が無いのでスキップ")
-	}
-	f, err := os.Open(dir + "/history.json")
-	if err != nil {
-		t.Skip(err)
-	}
-	var h historyFile
-	err = json.NewDecoder(f).Decode(&h)
-	f.Close()
-	if err != nil {
-		t.Fatalf("history.json: %v", err)
-	}
+	dir, entries := loadSavedBoards(t)
 
-	n, same, slip, wobble, worstWobble := 0, 0, 0, 0, 0
-	for _, e := range h.Entries {
-		imgF, err := os.Open(dir + "/" + e.ID + ".png")
-		if err != nil {
-			continue
-		}
-		img, _, err := image.Decode(imgF)
-		imgF.Close()
-		if err != nil {
-			continue
-		}
+	type res struct {
+		id    string
+		use   bool
+		cell  float64
+		worst int
+		rects []image.Rectangle
+	}
+	rs := mapSavedBoards(dir, entries, func(e historyEntry, img image.Image) res {
+		r := res{id: e.ID}
 		man := image.Rect(e.Bounds.X1, e.Bounds.Y1, e.Bounds.X2, e.Bounds.Y2)
 		if man.Dx() < 90 || man.Dy() < 90 {
-			continue
+			return r
 		}
-		cell := math.Min(float64(man.Dx()), float64(man.Dy())) / 9
+		r.cell = math.Min(float64(man.Dx()), float64(man.Dy())) / 9
 
 		var rects []image.Rectangle
 		for _, m := range cropInvarianceMargins {
 			crop := man.Inset(-m).Intersect(img.Bounds())
 			// 余白が取れない画像（盤が画像いっぱい）は比べようが無い
 			if crop.Dx() < man.Dx()+10 || crop.Dy() < man.Dy()+10 {
-				rects = nil
-				break
+				return r
 			}
 			br := DetectBoard(cropSubImage(img, crop))
 			if br == nil {
-				rects = nil
-				break
+				return r
 			}
 			rects = append(rects, br.Bounds.Add(crop.Min)) // 元画像の座標へ戻す
 		}
-		if len(rects) < len(cropInvarianceMargins) {
-			continue
-		}
-
-		n++
-		worst := 0
-		for _, r := range rects[1:] {
+		r.use, r.rects = true, rects
+		for _, x := range rects[1:] {
 			for _, d := range []int{
-				r.Min.X - rects[0].Min.X, r.Min.Y - rects[0].Min.Y,
-				r.Max.X - rects[0].Max.X, r.Max.Y - rects[0].Max.Y,
+				x.Min.X - rects[0].Min.X, x.Min.Y - rects[0].Min.Y,
+				x.Max.X - rects[0].Max.X, x.Max.Y - rects[0].Max.Y,
 			} {
-				if d = absInt(d); d > worst {
-					worst = d
+				if d = absInt(d); d > r.worst {
+					r.worst = d
 				}
 			}
 		}
+		return r
+	})
+
+	n, same, slip, wobble, worstWobble := 0, 0, 0, 0, 0
+	for _, r := range rs {
+		if !r.use {
+			continue
+		}
+		n++
 		switch {
-		case worst == 0:
+		case r.worst == 0:
 			same++
-		case float64(worst) >= cell/2:
+		case float64(r.worst) >= r.cell/2:
 			slip++
 			t.Logf("%s: 余白でマスがずれる（%dpx = %.2fマス）%v",
-				e.ID, worst, float64(worst)/cell, rects)
+				r.id, r.worst, float64(r.worst)/r.cell, r.rects)
 		default:
-			wobble += worst
-			if worst > worstWobble {
-				worstWobble = worst
+			wobble += r.worst
+			if r.worst > worstWobble {
+				worstWobble = r.worst
 			}
 		}
 	}

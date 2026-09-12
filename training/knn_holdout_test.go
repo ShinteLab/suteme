@@ -82,6 +82,7 @@ func predictCellBO(cell image.Image, bc uint8, bo *suteme.BoardOrient, p suteme.
 }
 
 func TestKNNHoldout(t *testing.T) {
+	requireSlow(t)
 	if !chdirToData(t) {
 		t.Skip("data/history.json が無いのでスキップ")
 	}
@@ -222,6 +223,7 @@ func TestKNNHoldout(t *testing.T) {
 // 評価するマス自身のサンプルだけを除外し（完全一致の照合になるのを防ぐ）、
 // 同じ画像の他のマスは訓練データに残す。
 func TestKNNCellHoldout(t *testing.T) {
+	requireSlow(t)
 	if !chdirToData(t) {
 		t.Skip("data/history.json が無いのでスキップ")
 	}

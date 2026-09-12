@@ -29,9 +29,7 @@ import (
 //   - 局面ホールドアウト … その局面だけを学習から外す（同じ見た目の他の枚は残る）
 //   - 見た目ホールドアウト … 同じ見た目の局面を丸ごと外す＝**その盤を初めて見る条件**
 func TestSourceCoverage(t *testing.T) {
-	if os.Getenv("SUTEME_COVERAGE") == "" {
-		t.Skip("SUTEME_COVERAGE が空なのでスキップ（調査用）")
-	}
+	requireSlow(t, "SUTEME_COVERAGE")
 	if !chdirToData(t) {
 		t.Fatal("data/history.json が見つかりません")
 	}

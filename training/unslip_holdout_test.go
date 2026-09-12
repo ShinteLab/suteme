@@ -6,6 +6,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/ShinteLab/suteme"
@@ -68,6 +70,49 @@ func TestUnslipHoldout(t *testing.T) {
 	// **元に戻す（自動探索）。** 他のテストが既定の判定器を見る
 	t.Cleanup(suteme.ResetStripJudge)
 
+	// ずれ（マス単位）。局面ごとに手動座標と比べる
+	offOf := func(e ent, br *suteme.BoardRegion) float64 {
+		if br == nil {
+			return math.Inf(1)
+		}
+		mcw, mch := float64(e.man.Dx())/9, float64(e.man.Dy())/9
+		r := br.Bounds
+		return math.Max(
+			math.Max(math.Abs(float64(r.Min.X-e.man.Min.X))/mcw,
+				math.Abs(float64(r.Min.Y-e.man.Min.Y))/mch),
+			math.Max(math.Abs(float64(r.Dx()-e.man.Dx()))/mcw,
+				math.Abs(float64(r.Dy()-e.man.Dy()))/mch))
+	}
+
+	// **判定器を外した検出（before）だけ先に並列で済ませる。**
+	// 全局面が同じ「判定器なし」を使うので、グローバルを 1 回 nil にすれば
+	// 同時に走らせられる。leave-one-out の after は局面ごとに別の判定器が
+	// 要り、`SetStripJudge` はプロセス全体の状態なので逐次のまま
+	// （並列にするには DetectBoard が判定器を引数で受ける必要がある）。
+	// 実測ではこの前半が全体のほぼ半分
+	suteme.SetStripJudge(nil)
+	befores := make([]float64, len(ents))
+	var next int
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for w := 0; w < runtime.GOMAXPROCS(0); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				i := next
+				next++
+				mu.Unlock()
+				if i >= len(ents) {
+					return
+				}
+				befores[i] = offOf(ents[i], suteme.DetectBoard(ents[i].img))
+			}
+		}()
+	}
+	wg.Wait()
+
 	okWith, okWithout, fixed, broke := 0, 0, 0, 0
 	for i, e := range ents {
 		var train []suteme.StripSample
@@ -76,23 +121,9 @@ func TestUnslipHoldout(t *testing.T) {
 				train = append(train, o.strips...)
 			}
 		}
-		mcw, mch := float64(e.man.Dx())/9, float64(e.man.Dy())/9
-		off := func(br *suteme.BoardRegion) float64 {
-			if br == nil {
-				return math.Inf(1)
-			}
-			r := br.Bounds
-			return math.Max(
-				math.Max(math.Abs(float64(r.Min.X-e.man.Min.X))/mcw,
-					math.Abs(float64(r.Min.Y-e.man.Min.Y))/mch),
-				math.Max(math.Abs(float64(r.Dx()-e.man.Dx()))/mcw,
-					math.Abs(float64(r.Dy()-e.man.Dy()))/mch))
-		}
-
-		suteme.SetStripJudge(nil)
-		before := off(suteme.DetectBoard(e.img))
+		before := befores[i]
 		suteme.SetStripJudge(suteme.NewStripJudge(train))
-		after := off(suteme.DetectBoard(e.img))
+		after := offOf(e, suteme.DetectBoard(e.img))
 
 		if before <= 0.5 {
 			okWithout++

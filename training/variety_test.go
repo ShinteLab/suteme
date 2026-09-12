@@ -27,9 +27,7 @@ import (
 // 対象の見た目は**必ず学習から丸ごと外す**ので、どちらの条件でも
 // 「初めて見る盤」を読んでいることになる。
 func TestVarietyVsThickness(t *testing.T) {
-	if os.Getenv("SUTEME_VARIETY") == "" {
-		t.Skip("SUTEME_VARIETY が空なのでスキップ（調査用）")
-	}
+	requireSlow(t, "SUTEME_VARIETY")
 	if !chdirToData(t) {
 		t.Fatal("data/history.json が見つかりません")
 	}

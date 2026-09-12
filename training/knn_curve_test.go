@@ -23,6 +23,7 @@ import (
 // という一番厳しい条件を測っていることになる。同じ中継・同じゲーム画面を
 // 繰り返し読む運用ではもっと有利になる（`TestKNNCellHoldout` が同じ盤での値）。
 func TestLearningCurve(t *testing.T) {
+	requireSlow(t)
 	if !chdirToData(t) {
 		t.Skip("no data")
 	}

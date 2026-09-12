@@ -24,6 +24,7 @@ import (
 // 最も枚数の多いサイズをグループとみなすので、data/ に同一出所が
 // 複数入っていなければ意味のある数字にならない。
 func TestSameSourceEffect(t *testing.T) {
+	requireSlow(t)
 	if !chdirToData(t) {
 		t.Skip("no data")
 	}

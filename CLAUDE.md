@@ -27,6 +27,72 @@ SFEN の駒文字マッピングや盤面文字列の組み立てを suteme 側�
 
 ---
 
+## テストの走らせ方
+
+**`data/` の局面が増えるほど費用が伸びる。3 段階に分けてある。**
+
+```powershell
+go test -short ./...                  # 67s   いま書いたコードが通るか
+go test ./...                         # 5分36秒  判定を持つテスト全部（既定）
+$env:SUTEME_SLOW=1; go test -timeout 6h ./...   # 計測まで全部
+```
+
+**分ける基準は「合否を判定するか」。**
+
+| 段 | 中身 |
+|---|---|
+| `-short` | 重い leave-one-out（`TestShiftRobustness` / `TestUnslipHoldout`）を外す |
+| 既定 | **t.Error を持つテストは全部走る。** 落ちうるものを外さない |
+| `SUTEME_SLOW=1` | `t.Error` を 1 つも持たない計測（`TestKNNHoldout` / `TestKNNCellHoldout` / `TestLearningCurve` / `TestSameSourceEffect` / `TestEvaluateSavedBoards` / `TestSourceCoverage` / `TestVarietyVsThickness`）と、判定に使っていない数字（`TestShiftRobustness` の +2/+4px と局面ホールドアウト）|
+
+**`SUTEME_SLOW` はファイルを書き換えるものには効かない。**
+`SUTEME_REBUILD`（学習データの作り直し）と CSV を吐くダンプ系
+（`SUTEME_LOOKSIG` / `SUTEME_LOOKHELP` / `SUTEME_LOOKCHECK` / `SUTEME_ORIENT`）は
+別の名前のまま＝「うっかり全部走らせた」で資産が変わらないようにする。
+
+### 188 局面で 600 秒に収まらなくなった（2026-09-13）
+
+`go test ./...` が**標準のタイムアウト 600 秒で落ちるようになった**。
+タイムアウトはパッケージ単位なので、**軽い回帰テストの結果まで巻き添えで消える**。
+
+費用の内訳（188局面。修正前）:
+
+| テスト | 前 | 後 | 判定 |
+|---|---|---|---|
+| `TestShiftRobustness` | **2690.8s** | **127.7s** | あり |
+| `TestDetectBoardCropInvariance` | 252.2s | **27.4s** | あり |
+| `TestUnslipHoldout` | 248.3s | **136.8s** | あり |
+| `TestDetectBoardMatchesManual` | 138.8s | **14.5s** | あり |
+| `TestValidateBoardDiscriminates` | 42.3s | **4.7s** | あり |
+| `TestEvaluateSavedBoards` ほか 6 本 | 数十分 | **0**（`SUTEME_SLOW`）| **なし** |
+| ルートパッケージ合計 | 442.2s | **63.7s** | |
+| `training` パッケージ合計 | 600s で打ち切り（未完）| **271.8s** | |
+| `go test ./...` 合計 | **落ちる** | **5分36秒** | |
+
+**局面をサンプルして減らす道は採らない。** 上の 5 本は CLAUDE.md の数字
+（「0.5マス以内 181/188」など）の出所でもあるので、間引くと
+**何件で測ったのかが環境ごとに変わる**。代わりに次の 3 つで畳んだ。
+
+- **局面ごとのループを並列にする**（`mapSavedBoards`。ルートの
+  `data_parallel_test.go`）。1 局面の処理は互いに独立で、この機械は 20 コア。
+  **結果は入力順に並べ直してから判定とログに渡す**ので、
+  ログの並びも合否も逐次版と同じになる。並列にした痕跡がテストの出力に
+  出ないのが正しい
+- **判定に使っていない計算をやめる**（`SUTEME_SLOW` で戻る）。
+  `TestShiftRobustness` は合否に `missAll` の +0px と +1px しか使わないのに、
+  **局面ごとに「その局面を外した k-NN」を 6 万サンプルから組み直していた**
+  （188 回）。しかも**全データの k-NN は局面によらず同じなのにループの中で
+  毎回作り直していた**。外に出すと map の反復順にも依らなくなる
+- **グローバルな状態が邪魔をするところは半分だけ畳む。**
+  `TestUnslipHoldout` の `before`（判定器なしの検出）は全局面が同じ状態を
+  使うので並列にできるが、leave-one-out の `after` は局面ごとに別の判定器が
+  要り、`SetStripJudge` はプロセス全体の状態なので逐次のまま。
+  全部畳むには `DetectBoard` が判定器を引数で受ける必要がある
+
+**答えが変わらないことは必ず確かめること。** 逐次版と並列版を続けて流して
+`diff` を取る（実測では**差はログの行番号だけ**）。速くしたテストは
+CLAUDE.md の数字の出所なので、「速いが少し違う」は記録を全部測り直す羽目になる。
+
 ## ファイル構成
 
 | ファイル | 役割 |

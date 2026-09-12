@@ -163,6 +163,7 @@ func TestEvalHistoryRoundTrip(t *testing.T) {
 // **accuracy.json には書かない。** 記録を残すのは画面からの実行だけにする
 // （テストを回すたびに実行履歴が増えると版の比較が読みにくくなる）。
 func TestEvaluateSavedBoards(t *testing.T) {
+	requireSlow(t)
 	if testing.Short() {
 		t.Skip("-short のためスキップ")
 	}

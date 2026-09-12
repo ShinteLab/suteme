@@ -1,10 +1,8 @@
 package suteme
 
 import (
-	"encoding/json"
 	"image"
 	_ "image/png"
-	"os"
 	"testing"
 )
 
@@ -18,78 +16,67 @@ import (
 //
 // data/ は .gitignore 対象なので、無ければスキップする。
 func TestValidateBoardDiscriminates(t *testing.T) {
-	dir := findDataDir()
-	if dir == "" {
-		t.Skip("data/history.json が無いのでスキップ")
-	}
-	f, err := os.Open(dir + "/history.json")
-	if err != nil {
-		t.Skip(err)
-	}
-	var h historyFile
-	err = json.NewDecoder(f).Decode(&h)
-	f.Close()
-	if err != nil {
-		t.Fatalf("history.json: %v", err)
-	}
+	dir, entries := loadSavedBoards(t)
 
-	n, clear := 0, 0
-	for _, e := range h.Entries {
-		imgF, err := os.Open(dir + "/" + e.ID + ".png")
-		if err != nil {
-			continue
-		}
-		img, _, err := image.Decode(imgF)
-		imgF.Close()
-		if err != nil {
-			continue
-		}
-		n++
-
+	// 歪めた領域の名前。**並列の中で t.Errorf を呼ばない**ので、
+	// 結果を持ち帰ってから順に判定する（mapSavedBoards の説明）
+	badNames := []string{
+		"横半マスずれ", "縦半マスずれ", "上下左右半マス縮小",
+		"半周期(左上)", "半周期(中央)", "半周期(右下)",
+	}
+	type res struct {
+		id   string
+		want float64
+		got  []float64
+	}
+	rs := mapSavedBoards(dir, entries, func(e historyEntry, img image.Image) res {
 		x1, y1, x2, y2 := e.Bounds.X1, e.Bounds.Y1, e.Bounds.X2, e.Bounds.Y2
 		cw, ch := (x2-x1)/9, (y2-y1)/9
 
 		want := ValidateBoard(img, BoardRegionFromRect(x1, y1, x2, y2))
-		if want >= minBoardConfidence {
-			clear++
-		}
 
-		// 位置ずれ（周期は正しい）と周期ずれ。いずれも正解を上回ってはいけない
-		bad := []struct {
-			name string
-			br   *BoardRegion
-		}{
-			{"横半マスずれ", BoardRegionFromRect(x1+cw/2, y1, x2+cw/2, y2)},
-			{"縦半マスずれ", BoardRegionFromRect(x1, y1+ch/2, x2, y2+ch/2)},
-			{"上下左右半マス縮小", BoardRegionFromRect(x1+cw/2, y1+ch/2, x2-cw/2, y2-ch/2)},
-			// 周期が半分（マス2つぶんを1マスとみなす）。格子線に1本おきに
-			// 乗るので**内側の色の均一性では区別が付かず**、盤の 1/4 が
-			// 信頼度 1.00 で返っていた。ikkyoku のガイド枠の自動フィットが
-			// これを掴んで枠を潰す（axisAlignment のパリティ参照）
-			{"半周期(左上)", BoardRegionFromRect(x1, y1, x1+cw*9/2, y1+ch*9/2)},
-			{"半周期(中央)", BoardRegionFromRect(x1+cw*9/4, y1+ch*9/4, x1+cw*27/4, y1+ch*27/4)},
-			{"半周期(右下)", BoardRegionFromRect(x2-cw*9/2, y2-ch*9/2, x2, y2)},
+		// 位置ずれ（周期は正しい）と周期ずれ。いずれも正解を上回ってはいけない。
+		// 周期が半分（マス2つぶんを1マスとみなす）は格子線に1本おきに
+		// 乗るので**内側の色の均一性では区別が付かず**、盤の 1/4 が
+		// 信頼度 1.00 で返っていた。ikkyoku のガイド枠の自動フィットが
+		// これを掴んで枠を潰す（axisAlignment のパリティ参照）
+		bad := []*BoardRegion{
+			BoardRegionFromRect(x1+cw/2, y1, x2+cw/2, y2),
+			BoardRegionFromRect(x1, y1+ch/2, x2, y2+ch/2),
+			BoardRegionFromRect(x1+cw/2, y1+ch/2, x2-cw/2, y2-ch/2),
+			BoardRegionFromRect(x1, y1, x1+cw*9/2, y1+ch*9/2),
+			BoardRegionFromRect(x1+cw*9/4, y1+ch*9/4, x1+cw*27/4, y1+ch*27/4),
+			BoardRegionFromRect(x2-cw*9/2, y2-ch*9/2, x2, y2),
 		}
 		got := make([]float64, len(bad))
-		for i, b := range bad {
-			got[i] = ValidateBoard(img, b.br)
-			if got[i] > want {
-				t.Errorf("%s: %s のスコア %.2f が正解 %.2f を上回った", e.ID, b.name, got[i], want)
+		for i, br := range bad {
+			got[i] = ValidateBoard(img, br)
+		}
+		return res{id: e.ID, want: want, got: got}
+	})
+
+	n, clear := 0, 0
+	for _, r := range rs {
+		n++
+		if r.want >= minBoardConfidence {
+			clear++
+		}
+		for i, name := range badNames {
+			if r.got[i] > r.want {
+				t.Errorf("%s: %s のスコア %.2f が正解 %.2f を上回った", r.id, name, r.got[i], r.want)
 			}
 		}
-
 		// 正解が採用される画像では、歪めた領域は棄却されなければならない。
 		// 正解自体が閾値に届かない画像（後述）では比較する意味が無い
-		if want >= minBoardConfidence {
-			for i, b := range bad {
-				if got[i] >= minBoardConfidence {
-					t.Errorf("%s: %s が棄却されない conf=%.2f", e.ID, b.name, got[i])
+		if r.want >= minBoardConfidence {
+			for i, name := range badNames {
+				if r.got[i] >= minBoardConfidence {
+					t.Errorf("%s: %s が棄却されない conf=%.2f", r.id, name, r.got[i])
 				}
 			}
 		}
-
 		t.Logf("%s: 正解=%.2f 横半マス=%.2f 縦半マス=%.2f 縮小=%.2f 半周期=%.2f/%.2f/%.2f",
-			e.ID, want, got[0], got[1], got[2], got[3], got[4], got[5])
+			r.id, r.want, r.got[0], r.got[1], r.got[2], r.got[3], r.got[4], r.got[5])
 	}
 	if n == 0 {
 		t.Skip("画像が無いのでスキップ")
