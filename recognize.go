@@ -12,7 +12,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/ShinteLab/core/sfen"
 	"github.com/goml/gobrain"
@@ -394,6 +397,23 @@ func (m *Model) Predict(cell image.Image) (int, float64) {
 	return bestClass, bestConf
 }
 
+// ConcurrentPredictor は複数のゴルーチンから同時に `Predict` を呼べる推論器。
+//
+// **81マスを並列に読むかどうかはこれで決まる**（`recognizeCells`）。
+// 名乗らない推論器は逐次で呼ぶ —— gobrain の `FeedForward.Update` は
+// 内部の配列を書き換えるので、`*Model` は同時に呼べない。
+// **「たぶん安全だろう」で並列にしない**（壊れ方が認識結果の揺らぎとして出る
+// ので、原因に辿り着けない）。
+//
+// 実装しているのは `*KNN`（学習データを読むだけで何も書き換えない）。
+// 自前の推論器を `WithPredictor` / `SetPredictor` で渡す側は、
+// 同時に呼べるなら空のメソッドを足せば並列になる。
+type ConcurrentPredictor interface {
+	Predictor
+	// ConcurrentPredict は表明のためだけのメソッド（中身は空でよい）。
+	ConcurrentPredict()
+}
+
 // BoardOrient は盤ごとの空判定の境目（`BoardEmptyCover`）を持つ。
 //
 // **向きは回転照合（`OrientationMatcher`）で決める。分類器の向き判定は
@@ -513,67 +533,129 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 
 // recognizeBoardDetail は RecognizeBoard の本体で、盤面文字列に加えて
 // マスごとの認識過程（Result.Debug 用）と盤の地色を返す。
+//
+// **81マスは互いに独立なので並列に読む**（`recognizeCells`）。中継の指し手を
+// 追いかける用途（ikkyoku）では 1 枚あたりの時間がそのまま追従の遅さになり、
+// k-NN は全件走査なので学習データが増えるほどここが伸びる。
+// **結果はマスごとに決まった場所へ書く**ので、並びも答えも逐次版と同じ
+// （並列にした痕跡が出力に出ないのが正しい）。
 func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string, []CellDebug, uint8) {
 	// 各マスの SFEN 表記("" は空マス)を組み立て、盤面文字列化(空マスの
 	// ランレングス圧縮・段区切り)は core/sfen に委譲する。
 	var grid [9][9]string
 	bc := BoardColor(img, br)
 	bo := NewBoardOrient(img, br, bc)
-	cells := make([]CellDebug, 0, 81)
-	for r := 0; r < 9; r++ {
-		for c := 0; c < 9; c++ {
-			d := CellDebug{Row: r, Col: c, Rect: br.Cells[r][c], Class: -1}
-			// 先に登録して、以降は d を書き換えつつ continue できるようにする
-			// （マスごとの記録を取りこぼさないため）。
-			cells = append(cells, d)
-			cur := &cells[len(cells)-1]
+	cells := make([]CellDebug, 81)
 
-			cell := br.ExtractCell(img, r, c)
-			if cell == nil {
-				continue
-			}
+	recognizeCells(m, func(i int) {
+		r, c := i/9, i%9
+		cur := &cells[i]
+		*cur = CellDebug{Row: r, Col: c, Rect: br.Cells[r][c], Class: -1}
 
-			cat, byMatch := bo.Classify(cell, bc, m)
-			cur.Category = cat
-			if byMatch {
-				cur.OrientBy = "match"
-			}
-			if cat == CellEmpty {
-				continue
-			}
+		cell := br.ExtractCell(img, r, c)
+		if cell == nil {
+			return
+		}
 
-			if m != nil {
-				// gobrain で駒種を推論（後手は180度回転して先手向きに正規化）
-				ncell := cell
-				if cat == CellPieceDown {
-					ncell = Rotate180(cell)
-				}
-				class, conf := m.Predict(ncell)
-				cur.Class, cur.Confidence = class, conf
-				if class == ClassEmpty {
-					continue
-				}
-				base := ClassToBaseLabel(class)
-				if cat == CellPieceDown {
-					if len(base) > 0 {
-						if base[0] == '+' {
-							grid[r][c] = "+" + strings.ToLower(base[1:])
-						} else {
-							grid[r][c] = strings.ToLower(base)
-						}
+		cat, byMatch := bo.Classify(cell, bc, m)
+		cur.Category = cat
+		if byMatch {
+			cur.OrientBy = "match"
+		}
+		if cat == CellEmpty {
+			return
+		}
+
+		if m != nil {
+			// 駒種を推論（後手は180度回転して先手向きに正規化）
+			ncell := cell
+			if cat == CellPieceDown {
+				ncell = Rotate180(cell)
+			}
+			class, conf := m.Predict(ncell)
+			cur.Class, cur.Confidence = class, conf
+			if class == ClassEmpty {
+				return
+			}
+			base := ClassToBaseLabel(class)
+			if cat == CellPieceDown {
+				if len(base) > 0 {
+					if base[0] == '+' {
+						grid[r][c] = "+" + strings.ToLower(base[1:])
+					} else {
+						grid[r][c] = strings.ToLower(base)
 					}
-				} else {
-					grid[r][c] = base
 				}
 			} else {
-				// モデルなし: 向き不問で駒があることだけを示す
-				grid[r][c] = "?"
+				grid[r][c] = base
 			}
-			cur.Piece = grid[r][c]
+		} else {
+			// モデルなし: 向き不問で駒があることだけを示す
+			grid[r][c] = "?"
 		}
-	}
+		cur.Piece = grid[r][c]
+	})
+
 	board := sfen.FormatBoard(func(rank, file int) string { return grid[rank][file] })
 	return board, cells, bc
+}
+
+// recognizeCells は 81マスの処理 fn(0..80) を走らせる。
+//
+// **並列にしてよいかは推論器が決める**（`ConcurrentPredictor`）。
+// gobrain の `FeedForward.Update` は内部の配列を書き換えるので、
+// `*Model` を同時に呼ぶと壊れる。**名乗らない推論器は逐次**にする
+// （外から渡される推論器が安全かどうかは、こちらからは分からない）。
+//
+// fn が書き込むのはマスごとに決まった場所（`cells[i]` と `grid[r][c]`）だけで、
+// 集計や追記はしない。**この約束を破ると並列にした瞬間に競合する**ので、
+// fn を書き換えるときは「i 番目の置き場所にしか触らない」ことを保つこと。
+func recognizeCells(m Predictor, fn func(i int)) {
+	const n = 81
+	if !concurrentPredictor(m) {
+		for i := 0; i < n; i++ {
+			fn(i)
+		}
+		return
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > n {
+		workers = n
+	}
+	if workers < 2 {
+		for i := 0; i < n; i++ {
+			fn(i)
+		}
+		return
+	}
+
+	var next atomic.Int32
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				fn(i)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// concurrentPredictor は推論器を同時に呼んでよいかを返す。
+// 推論器が無い（分類だけで読む）場合も並列でよい。
+func concurrentPredictor(m Predictor) bool {
+	if m == nil {
+		return true
+	}
+	_, ok := m.(ConcurrentPredictor)
+	return ok
 }
 
 // resizeGray は画像を指定サイズのグレースケールにリサイズする（面積平均）。
