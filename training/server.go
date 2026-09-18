@@ -654,6 +654,10 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 		// HistoryID があればその履歴を上書きする。保存し直すたびに
 		// 同じ画像の局面が増えないようにするため（空なら新規保存）
 		HistoryID string `json:"history_id"`
+		// BasedOn は画面がこの保存を始めたときに読み込んでいた盤面（SFEN の第1欄）。
+		// **入力済みの局面を上書きするなら、画面はその入力を見ていたと名乗ること。**
+		// 名乗れない／食い違うなら 409 で断る（後述の checkBasedOn）
+		BasedOn string `json:"based_on"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -685,6 +689,15 @@ func handleSaveSession(w http.ResponseWriter, r *http.Request) {
 	historyMu.RUnlock()
 
 	overwrite := id != ""
+	if overwrite {
+		// **入力を認識器の読みで黙って置き換えさせない。**
+		// 画面のバグ（ラベルを展開せずに保存する等）は必ずこの形で現れるので、
+		// サーバ側で止める。画面が正しく動いているかに依らせないための門番
+		if err := checkBasedOn(req.BasedOn, prev.SFEN); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+	}
 	if !overwrite {
 		// **古い局面を押し出して消すのはやめた。** 手でラベル付けした正解が
 		// 黙って失われる（実際に過去そうなった）ため、上限に達したら断る。
@@ -846,6 +859,31 @@ func mergeSFEN(board, prev string) string {
 		return f[0]
 	}
 	return f[0] + " " + strings.Join(rest, " ")
+}
+
+// checkBasedOn は「入力済みの盤面を持つ局面の上書き」を、画面がその入力を
+// 読み込んでいた場合だけ通す。based は画面が名乗る読み込み時の盤面、
+// prev は履歴に入っている SFEN。
+//
+// **盤面の中身が正しいかは見ない。** 見るのは「画面が既存の入力を見ていたか」だけ。
+// 二歩や玉の枚数で断ると、そういう盤を記録したい場面（認識の誤りをそのまま
+// 残す・詰将棋・駒落ち）で保存できなくなる。認識器にとって盤面の合法性は
+// 保存の条件にしてよい性質のものではない。
+func checkBasedOn(based, prev string) error {
+	pf := strings.Fields(prev)
+	if len(pf) == 0 || pf[0] == "" {
+		return nil // 元々盤面が無い（失う入力が無い）
+	}
+	bf := strings.Fields(based)
+	if len(bf) == 0 {
+		return fmt.Errorf("この局面には入力済みの盤面があります。" +
+			"画面が読み込んだ盤面を名乗らない保存は受け付けません（based_on が空）")
+	}
+	if bf[0] != pf[0] {
+		return fmt.Errorf("画面が読み込んだ盤面と履歴の盤面が違います。" +
+			"別の場所で保存された可能性があるので、履歴から読み直してください")
+	}
+	return nil
 }
 
 // handleSetBoard: 手動指定の矩形で盤面を再設定する
