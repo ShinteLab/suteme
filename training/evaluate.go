@@ -95,7 +95,7 @@ func (m *EvalMetrics) add(o EvalMetrics) {
 //
 // **棄却された候補もずれと信頼度を残す。** 「盤を見つけられなかった」だけだと
 // 惜しかったのか全然違う場所を見ていたのかが分からず、次の版で直ったかを
-// 追えない（CLAUDE.md の「dx=+3.57 を conf 0.00 で棄却」のような記録が要る）。
+// 追えない（AGENTS.md の「dx=+3.57 を conf 0.00 で棄却」のような記録が要る）。
 type EvalDetect struct {
 	// Found は信頼度を満たして採用されたか。false でも Candidate が真なら
 	// 棄却された候補の位置・信頼度が入っている

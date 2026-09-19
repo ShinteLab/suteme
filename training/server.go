@@ -304,7 +304,7 @@ func currentPredictor() suteme.Predictor {
 // （suggestions）や保存される SFEN と食い違うので、画面では
 // 「学習させたのに色（空・向き）が外れたまま」に見える。
 // 実測（直近8局面 648マス）: 向きの反転が **113 件** 対 最終 SFEN の 0 件、
-// 空→駒 5 件 対 0 件。CLAUDE.md「空/先手/後手 を出すところは必ず
+// 空→駒 5 件 対 0 件。AGENTS.md「空/先手/後手 を出すところは必ず
 // `BoardOrient.Classify` を通すこと」はこの食い違いのこと。
 func predictCells(s *session) (*[9][9]int, *[9][9]map[string]interface{}) {
 	if s == nil || s.Result == nil || s.Result.Board == nil {
@@ -884,7 +884,7 @@ func handleSetBoard(w http.ResponseWriter, r *http.Request) {
 		// **人が引いた枠も格子線へ寄せる（`SnapToGrid`）。**
 		// 学習も検出も同じ一点で切り出す、というのがこの画面の前提なので、
 		// ここだけ手加減した枠を通すと**同じ盤なのに引き方で結果が変わる**
-		// （それを無くすための工程。CLAUDE.md「切り出しを撮り方に依らせない」）。
+		// （それを無くすための工程。AGENTS.md「切り出しを撮り方に依らせない」）。
 		// **寄せた結果はレスポンスの `bounds` で画面に返る**ので、
 		// 人は実際に使われた座標を見て、必要ならもう一度引き直せる。
 		// 格子が読めなければ引いた枠がそのまま残る。

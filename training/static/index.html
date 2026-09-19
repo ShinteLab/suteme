@@ -626,7 +626,7 @@ Authorization: Bearer &lt;token&gt;   ※トークンを要求する設定のと
     <span class="select-label">分類:</span>
     <button class="sel-btn" id="sel-empty" onclick="selCat(0)">空</button>
     <!-- 「先手」「後手」とは書かない。駒の向きで見分けるものなので「手前」「奥」。
-         手前が後手というゲーム画面があるため（CLAUDE.md「先後の割り当て」） -->
+         手前が後手というゲーム画面があるため（AGENTS.md「先後の割り当て」） -->
     <button class="sel-btn" id="sel-up" onclick="selCat(1)">↑ 手前</button>
     <button class="sel-btn" id="sel-down" onclick="selCat(2)">↓ 奥</button>
   </div>
@@ -2774,7 +2774,7 @@ function escapeHTML(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
-// 局面 ID の表示。**先頭 8 桁で呼ぶ**（CLAUDE.md の実測値も `26e06136` のように
+// 局面 ID の表示。**先頭 8 桁で呼ぶ**（AGENTS.md の実測値も `26e06136` のように
 // 8 桁で局面を指している）。日付時刻しか手掛かりが無いと事例を人に伝えられないので、
 // 履歴の行・評価の内訳・解析タブの見出しで同じ書き方に揃える。
 // クリックすると全桁をクリップボードへ入れる（行クリックの選択には流さない）

@@ -109,7 +109,7 @@ func TestEvaluateNegativesSkipsUnjudgeable(t *testing.T) {
 }
 
 // 一様な画像は盤面ではないので棄却される（＝負例として正しく扱われる）。
-// **格子線の無い一様な板は detectBoardRegion が nil を返す**（CLAUDE.md）
+// **格子線の無い一様な板は detectBoardRegion が nil を返す**（AGENTS.md）
 func TestEvaluateNegativesRejectsFlatImage(t *testing.T) {
 	chdirTemp(t)
 	writeNegativeFile(t, testImage(t, 200, 200, color.RGBA{180, 150, 100, 255}))

@@ -8,14 +8,14 @@ import (
 )
 
 // detectTolCells は DetectBoard が手動指定座標からずれてよい範囲（マス単位）。
-// 修正前は 1〜3マスずれていた（詳細は CLAUDE.md「盤面検出」）
+// 修正前は 1〜3マスずれていた（詳細は AGENTS.md「盤面検出」）
 const detectTolCells = 0.5
 
 // detectSlipMaxRatio は**判定器を外した素の検出**に残ってよい 1マス滑りの割合。
 //
 // **1マスの滑りは `ValidateBoard` では原理的に見分けられない。**
 // `gridAlignment` は全マスシフトに不変なので、周期が正しいまま窓が 1マス
-// 滑った検出は**信頼度 1.00 のまま通る**（CLAUDE.md「盤面検出の検証」）。
+// 滑った検出は**信頼度 1.00 のまま通る**（AGENTS.md「盤面検出の検証」）。
 // この見分けは帯の判定器（`unslipByJudge`）の領分で、このテストは
 // 環境に依らない数字を出すためにその判定器を**外して**測っている。
 // つまり「滑ったのに黙って通る」ことをここで責めるのは筋が違う。
@@ -157,7 +157,7 @@ func overflowCells(r, outer image.Rectangle, cw, ch float64) float64 {
 //
 // **周期が違う検出（半分の周期・盤の一部）と区別するために大きさも見る。**
 // あちらは `pickTaper` や `gridAlignment` で落とせるので、
-// 見逃してよい理由が無い（CLAUDE.md「半分の周期」）。
+// 見逃してよい理由が無い（AGENTS.md「半分の周期」）。
 func isOneCellSlip(dx, dy, dw, dh float64) bool {
 	if math.Abs(dw) > detectTolCells || math.Abs(dh) > detectTolCells {
 		return false

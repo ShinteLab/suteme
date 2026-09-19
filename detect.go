@@ -97,10 +97,10 @@ type candidate struct {
 // candidateSet は検出候補を集めて 1 つ選ぶ。
 //
 // **信頼度が同点で並ぶ候補があり、そこで負けていた。** `gridAlignment` は
-// 全マスシフトに対して不変なので（CLAUDE.md「盤面検出の検証」）、正しい窓と
+// 全マスシフトに対して不変なので（AGENTS.md「盤面検出の検証」）、正しい窓と
 // 1マス滑った窓が **どちらも 1.00** で並ぶ。以前の実装は `conf > bestConf` の
 // 狭義比較だったため、**先に評価された候補がそのまま残っていた**。
-// 必要なのは信頼度の改善ではなく**同点を割る材料**（CLAUDE.md「今後の課題」）。
+// 必要なのは信頼度の改善ではなく**同点を割る材料**（AGENTS.md「今後の課題」）。
 //
 // 材料は「**別々の ROI から同じ窓が出たか**」。盤の格子線は複数の絞り込み方
 // （横線のクラスタ / 縦線のクラスタ / その組み合わせ）から同じ位置に出るのに対し、
@@ -193,7 +193,7 @@ const snapMargin = 0.3
 
 // snapToOuterFrame は1マス滑った窓を外枠へ寄せ直す。
 //
-// **`gridAlignment` は全マスシフトに対して不変**なので（CLAUDE.md
+// **`gridAlignment` は全マスシフトに対して不変**なので（AGENTS.md
 // 「盤面検出の検証」）、周期が正しいまま窓が1マス滑った検出は
 // 信頼度 1.00 のまま通る。`unslipRegion` が拾えるのは画像からはみ出した
 // 場合だけで、**収まったまま滑る**ものは見分けられなかった。
@@ -298,7 +298,7 @@ func snapToOuterFrame(img image.Image, br *BoardRegion) *BoardRegion {
 //
 // **盤の外枠線を切り落とした画像では、検出器から見て一番外の縦線が
 // 1本目の内側の線になり、周期は正しいまま窓が1マス滑る**
-// （CLAUDE.md「盤面検出」の `pickTaper` の項）。滑った窓は格子線には
+// （AGENTS.md「盤面検出」の `pickTaper` の項）。滑った窓は格子線には
 // 乗っているので `gridAlignment` では見分けられず、**信頼度 1.00 のまま
 // 通る**という質の悪い壊れ方をする。
 //
@@ -799,7 +799,7 @@ const cellPadding = 0.15
 // 向きの反転が 242 → 623 件に増える。
 //
 // **外周マスの入力ベクトルが変わるので、学習データの版を上げること**
-// （v5 → v6。CLAUDE.md「シフト不変性」の末尾）。
+// （v5 → v6。AGENTS.md「シフト不変性」の末尾）。
 func (br *BoardRegion) ExtractCell(src image.Image, row, col int) image.Image {
 	return br.extractCell(src, row, col, true)
 }
@@ -913,7 +913,7 @@ const gridSnapMaxPitch = 0.06
 // 同じ基準に正規化したいときに使う。格子が読めなければ渡した窓をそのまま返す。
 //
 // **`Recognize` の `WithRegion` / `WithRect` は通していない。** 手動指定は
-// 検証せずそのまま使う（CLAUDE.md「公開 API」）という約束があり、
+// 検証せずそのまま使う（AGENTS.md「公開 API」）という約束があり、
 // 学習データもその座標で作られているので、認識側だけ黙って動かすと
 // 学習と推論で切り出しが食い違う。
 func SnapToGrid(img image.Image, br *BoardRegion) *BoardRegion {

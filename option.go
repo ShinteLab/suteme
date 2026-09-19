@@ -69,7 +69,7 @@ func WithPredictor(p Predictor) Option {
 }
 
 // WithRegion は盤面領域を明示指定する。盤の座標が既に分かっている場合は
-// 検出を挟まないぶん確実(CLAUDE.md の「盤面座標が分かっているなら
+// 検出を挟まないぶん確実(AGENTS.md の「盤面座標が分かっているなら
 // BoardRegionFromRect を直接使う」に相当)。
 func WithRegion(br *BoardRegion) Option {
 	return func(c *config) { c.region = br }
