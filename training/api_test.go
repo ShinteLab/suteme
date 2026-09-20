@@ -223,7 +223,7 @@ func TestSaveSessionVerifiesAPIEntry(t *testing.T) {
 	id, _ := resp["id"].(string)
 
 	sess := newTestSession(t)
-	postSave(t, sess, "9/9/9/9/9/9/9/9/9", id)
+	postSave(t, sess, "9/9/9/9/9/9/9/9/9", id, "9/9/9/9/9/9/9/9/9")
 
 	entries := loadHistory().Entries
 	if len(entries) != 1 {
@@ -257,7 +257,7 @@ func TestVerifyKeepsHandsAndTurn(t *testing.T) {
 	// 解析タブからの保存。画面が送るのは盤面部分だけ
 	board := "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL"
 	sess := newTestSession(t)
-	saved := postSave(t, sess, board, id)
+	saved := postSave(t, sess, board, id, board)
 
 	if got := loadHistory().Entries[0].SFEN; got != full {
 		t.Errorf("確認後に手番・持ち駒が失われた\n got = %q\nwant = %q", got, full)
@@ -514,8 +514,9 @@ func TestSaveSessionFullReturns507(t *testing.T) {
 		t.Errorf("entries = %d, want %d", n, maxHistory)
 	}
 
-	// 上書きは通る
-	body, _ = json.Marshal(map[string]string{"session": sess, "sfen": "上書き", "history_id": existing})
+	// 上書きは通る（入力済みの盤面を上書きするので based_on を名乗る）
+	body, _ = json.Marshal(map[string]string{
+		"session": sess, "sfen": "上書き", "history_id": existing, "based_on": "entry0"})
 	w = httptest.NewRecorder()
 	handleSaveSession(w, httptest.NewRequest(http.MethodPost, "/api/savesession", bytes.NewReader(body)))
 	if w.Code != http.StatusOK {

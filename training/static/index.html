@@ -694,6 +694,13 @@ let currentCell = null;
 let cellCategories = null;
 let boardLabels = null; // 9x9 のラベル状態（SFEN生成用）。null=未入力, 'none'=空, それ以外=SFEN駒文字
 let cellSuggestions = null; // 9x9 のモデル推論候補 {label, confidence}。モデル未学習時は null
+// **いまのラベルが「入力されたもの」か「認識器の表示」かを覚える。**
+// boardLabels の null は「人が見て直さなかった」と「そもそも展開していない」の
+// 2 つを意味してしまうので、埋めてよいのは後者が起こり得ない場合だけ。
+// SFEN から展開した局面（履歴の再入力・「SFENから入力」）では埋めない
+let labelsFromSFEN = false;
+// 上書き対象の履歴に入っている盤面（SFEN の第1欄）。保存時に based_on で送る
+let currentHistoryBoard = '';
 let selectedCat = -1;
 let selectedPiece = null;
 let originalCat = -1;
@@ -1115,6 +1122,7 @@ async function analyze(file, { tab = 'input' } = {}) {
 function renderCells(id, categories) {
   cellCategories = categories;
   boardLabels = Array.from({ length: 9 }, () => Array(9).fill(null));
+  labelsFromSFEN = false; // 画面に出ているのは認識器の一次判定
   const grid = document.getElementById('cell-grid');
   grid.innerHTML = '';
 
@@ -1361,20 +1369,30 @@ PIECE_TYPES.forEach(pt => {
   pieceBtns.appendChild(btn);
 });
 
+// 未入力（null）のマスの数
+function countUnlabeledCells() {
+  if (!boardLabels) return 0;
+  let n = 0;
+  for (let r = 0; r < 9; r++) for (let c = 0; c < 9; c++) if (boardLabels[r][c] === null) n++;
+  return n;
+}
+
 // 81マスのうち何マスを入力（確定）したかを見出しに出す。
-// boardLabels が入力の実体で、null が未入力。保存時は未入力を推論候補で埋めるので、
-// **残りが何マスあって、何で埋まるのか**が分かる必要がある
+// boardLabels が入力の実体で、null が未入力。**何で埋まるのかまで出す**
+// ―― 認識器の表示から始めたなら推論候補で埋まり、SFEN から展開した局面では
+// 埋めずに保存を止める（意味が違うので文言も変える）
 function updateLabelProgress() {
   const el = document.getElementById('label-progress');
   if (!el) return;
   if (!boardLabels) { el.textContent = ''; return; }
-  let n = 0;
-  for (let r = 0; r < 9; r++) for (let c = 0; c < 9; c++) if (boardLabels[r][c] !== null) n++;
+  const n = 81 - countUnlabeledCells();
   if (n === 81) {
     el.innerHTML = '<span style="color:#74c69d">入力済み 81/81 マス</span>';
   } else {
     el.innerHTML = '<span style="color:#f0a030">入力済み ' + n + '/81 マス</span>' +
-      '<span style="color:#888"> — 残り ' + (81 - n) + ' マスは保存時に推論候補で埋めます</span>';
+      (labelsFromSFEN
+        ? '<span style="color:#e07a5f"> — 残り ' + (81 - n) + ' マスは入力し直してください（推論候補では埋めません）</span>'
+        : '<span style="color:#888"> — 残り ' + (81 - n) + ' マスは保存時に推論候補で埋めます</span>');
   }
 }
 
@@ -1396,8 +1414,12 @@ function applyLabel(r, c, pieceId, displayHtml, bgColor) {
 
 // 編集中の局面を差し替える。ID は保存先（上書きか新規か）であると同時に
 // **その事例の呼び名**なので、代入と同時に画面にも出す
-function setCurrentHistoryId(id) {
+// 上書き対象の履歴 ID と、その時点で読み込んでいた盤面を対で持つ。
+// board は保存時に based_on としてサーバへ送り、**入力済みの盤面を
+// 見ないまま上書きすることを server 側で断れるようにする**ためのもの
+function setCurrentHistoryId(id, board) {
   currentHistoryId = id || null;
+  currentHistoryBoard = currentHistoryId ? (board || '').trim().split(/\s+/)[0] || '' : '';
   const el = document.getElementById('analyze-id');
   if (!el) return;
   el.style.display = currentHistoryId ? '' : 'none';
@@ -1789,7 +1811,7 @@ async function refreshHistory() {
     const unverified = e.source === 'api' && !e.verified;
     return `<div class="hist-row${done ? ' hist-done' : ''}" data-id="${e.id}" data-sfen="${e.sfen.replace(/"/g,'&quot;')}"
       data-bounds="${e.board_bounds ? JSON.stringify(e.board_bounds).replace(/"/g,'&quot;') : ''}"
-      data-bounds-by="${e.bounds_by || ''}" data-unverified="${unverified ? '1' : ''}">
+      data-bounds-by="${e.bounds_by || ''}">
       <div class="hist-sel-cell" title="${unverified ? '未確認の局面は学習に使えません' : '学習に使う'}">
         <input type="checkbox" class="hist-sel" data-id="${e.id}" ${unverified ? 'disabled' : ''}></div>
       <span class="hist-check">${done ? '○' : ''}</span>
@@ -2009,13 +2031,6 @@ async function reenterHistory(row) {
   const sfen = row.dataset.sfen;
   const bounds = normalizeBounds(row.dataset.bounds ? JSON.parse(row.dataset.bounds) : null);
   const boundsBy = row.dataset.boundsBy || '';
-  // **未確認（API 登録）の局面の SFEN は正解ではない。** 送り手（ikkyoku）が
-  // 登録した時点の認識結果で、しかも向こうは焼き込んだ配布モデルなので
-  // **学習しても永久に変わらない**。これでラベルを上書きすると、
-  // 学習したばかりの k-NN の推論候補が画面に出る前に捨てられる＝
-  // **「学習しても認識率が上がった気がしない」**の正体。
-  // 確認済みの局面は人が直した正解なので従来どおり戻す
-  const unverified = row.dataset.unverified === '1';
 
   // **読み込みの間は操作させない。** 画像の取得から SFEN の反映まで
   // 数秒かかる工程が続くので、マスクを掛けて途中経過を出す
@@ -2032,7 +2047,7 @@ async function reenterHistory(row) {
   // 入力タブに出る認識結果はこの後の setboard / applyFromSFEN で上書きされる）
   await analyze(file, { tab: 'analyze' });
   // 再入力なので、保存は新規登録ではなくこの履歴の上書きにする
-  setCurrentHistoryId(id);
+  setCurrentHistoryId(id, sfen);
   resetSaveButton();
 
   // 保存した盤面座標を復元。この後 SFEN でラベルを上書きするので推論は走らせない
@@ -2043,17 +2058,21 @@ async function reenterHistory(row) {
   }
 
   // 保存済み SFEN を欄に戻してラベルへ展開する。
-  // **手番・持ち駒は未確認でも戻す。** 戻さないと、確認して保存し直すだけで
-  // 記録されていた駒台が消える（API から来た完全形の SFEN で実際に起きていた）。
-  // **81マスへの展開は確認済みのときだけ**（上の unverified のコメント）。
-  // 未確認なら欄に入れるだけにして、人が「SFENから入力」を押せば
-  // 送り手の読みから始められる
+  // **API から来た SFEN も「すでに入力されたデータ」として必ず展開する。**
+  // 未確認（Verified=false）は「人がまだ一度も開いていない」という印であって
+  // 「中身が認識器の当て推量」という意味ではない。送り手は入力を済ませてから
+  // 送ってくるので、再入力の動作は画面で入力して保存した局面と同じでよい。
+  // **展開を飛ばすと、触っていない 81マスが保存時に推論候補で埋められて
+  // 入力を丸ごと失う**（2026-09-13〜09-18 に実際に起きた）。
+  // 手番・持ち駒も同じ理由で欄に戻す（確認しただけで駒台が消えないように）
   if (sfen) {
     document.getElementById('sfen-input').value = sfen;
-    if (!unverified) {
-      busyStep('保存済みの SFEN を81マスに反映しています…');
-      await applyFromSFEN();
-    }
+    // **展開の前に立てる。** SFEN の解析に失敗すると applyFromSFEN は
+    // 途中で戻るので、成功後に立てる作りだと「入力があるのに 81マス空」の
+    // ままフィルが働いてしまう。入力を持つ局面だと分かった時点で止める
+    labelsFromSFEN = true;
+    busyStep('保存済みの SFEN を81マスに反映しています…');
+    await applyFromSFEN();
     const f = sfen.trim().split(/\s+/);
     setHands(f[2] || '-');
     applyTurnFields(f[1], f[3]);
@@ -2062,8 +2081,6 @@ async function reenterHistory(row) {
   await waitForImages(document.getElementById('cell-grid'));
   document.getElementById('analyze-status').textContent =
     !sfen ? '履歴から読み込みました — この局面に SFEN は保存されていません'
-    : unverified ? '履歴から読み込みました（未確認）— 水色はいまの学習データでの推論候補です。'
-        + '送り手が登録した SFEN は欄に入れてあるので、そちらから始めるなら「SFENから入力」'
     : '履歴から読み込みました — 保存済みの SFEN を81マスに反映しています（○ が入力済み）';
   } finally { busyEnd(); }
 }
@@ -2091,6 +2108,20 @@ async function deleteHistory(id) {
 // 履歴から復元した SFEN が残っている場合に、画面と保存内容が食い違う。
 async function saveSession() {
   if (!currentSessionId) return;
+  // **入力のある局面では推論候補で埋めない。** 埋めてよいのは
+  // 「認識器の表示を人が見て直さなかった」ときだけで、SFEN から展開した
+  // 局面で null が残っているのは展開できなかったということ。
+  // ここで埋めると**入力を認識器の読みで黙って置き換える**ことになる。
+  // 保存できないほうが、入力を失うよりましという判断（歯止め）
+  if (labelsFromSFEN) {
+    const missing = countUnlabeledCells();
+    if (missing) {
+      alert('入力済みの局面ですが ' + missing + ' マスが空です。' + '\n' +
+        '「SFENから入力」で入力し直すか、マスをクリックして入力してから保存してください。' +
+        '（推論候補では埋めません）');
+      return;
+    }
+  }
   // 触っていないマスは推論候補で埋める（何マス埋めたかは保存後に出す）
   const filled = fillUnlabeledCells();
   const built = buildSFEN();
@@ -2111,7 +2142,8 @@ async function saveSession() {
   const res = await fetch('/api/savesession', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session: currentSessionId, sfen, history_id: currentHistoryId || '' }),
+    body: JSON.stringify({ session: currentSessionId, sfen,
+      history_id: currentHistoryId || '', based_on: currentHistoryBoard }),
   });
   if (!res.ok) {
     // 履歴が上限のとき（507）など。**古い局面を消して場所を空けることはしない**ので、
@@ -2122,8 +2154,9 @@ async function saveSession() {
   }
   const data = await res.json();
   if (data.status === 'ok') {
-    // 以後の保存も同じ履歴を上書きする（直すたびに別データが増えないように）
-    setCurrentHistoryId(data.id);
+    // 以後の保存も同じ履歴を上書きする（直すたびに別データが増えないように）。
+    // いま保存した盤面が次の based_on になる
+    setCurrentHistoryId(data.id, built.sfen);
     btn.textContent = data.overwrote ? '上書き済' : '保存済';
     btn.disabled = true;
     btn.style.opacity = '0.4';
@@ -2222,6 +2255,8 @@ async function applyFromSFEN() {
       if (cellEl) cellEl.classList.add('labeled');
     }
   }
+  // 81マス全部を入力で埋めたので、以降は推論候補で埋めない
+  labelsFromSFEN = true;
   document.getElementById('analyze-status').textContent = 'SFEN入力完了 — ' + labels.filter(l => l.piece !== 'none').length + '駒';
   updateBoardPreview(sfen); // 入力した SFEN を盤で表示
   enableSaveButton();

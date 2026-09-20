@@ -46,9 +46,16 @@ func newTestSession(t *testing.T) string {
 	return id
 }
 
-func postSave(t *testing.T, sess, sfen, historyID string) map[string]interface{} {
+// postSave は解析タブからの保存。basedOn は画面が読み込んでいた盤面で、
+// 上書きのときだけ要る（省略すると空＝名乗らない）
+func postSave(t *testing.T, sess, sfen, historyID string, basedOn ...string) map[string]interface{} {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"session": sess, "sfen": sfen, "history_id": historyID})
+	based := ""
+	if len(basedOn) > 0 {
+		based = basedOn[0]
+	}
+	body, _ := json.Marshal(map[string]string{
+		"session": sess, "sfen": sfen, "history_id": historyID, "based_on": based})
 	rec := httptest.NewRecorder()
 	handleSaveSession(rec, httptest.NewRequest(http.MethodPost, "/api/savesession", strings.NewReader(string(body))))
 	if rec.Code != http.StatusOK {
@@ -75,7 +82,7 @@ func TestSaveSessionOverwritesHistory(t *testing.T) {
 	}
 
 	// 直して保存し直す: 同じ ID を上書きし、履歴は増えない
-	second := postSave(t, sess, "lnsgkgsnl/9/9/9/9/9/9/9/9", id)
+	second := postSave(t, sess, "lnsgkgsnl/9/9/9/9/9/9/9/9", id, "9/9/9/9/9/9/9/9/9")
 	if second["id"] != id {
 		t.Errorf("上書きなのに別 ID になった: %v (want %s)", second["id"], id)
 	}
