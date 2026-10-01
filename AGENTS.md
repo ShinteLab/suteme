@@ -1655,10 +1655,22 @@ UI は `training/static/index.html`（embed）。
 ### 起動
 
 ```
-go run ./_cmd/suteme-training/ 8888
+go run ./_cmd/suteme-training/ -port 8888 [データディレクトリ]
 ```
 
 起動時に `model_v8.json` があれば自動ロード。
+
+**データは位置引数のディレクトリ（省略時はカレント）に読み書きする。**
+`training` のパスはすべてカレントからの相対（`dataDir` / `dataFile` ほか）なので、
+コマンドは起動時に `os.Chdir` するだけ。`go install` したバイナリは
+`%GOPATH%\bin` にあり、データは入っていない（実行ファイルの横も見ない）。
+
+- **無いディレクトリは作らずにエラーにする。** 作ると空の `data/` で起動して
+  「履歴が消えた」ように見える
+- **以前は位置引数がポートだった**（`suteme-training 8888`）。数字だけの
+  引数が無いディレクトリなら「`-port` で指定」と案内して止める
+- **worktree で起動しないこと。** `data/` と `*.bin` は gitignore なので
+  worktree には無い（本体のチェックアウトを位置引数で渡す）
 
 ### API エンドポイント
 

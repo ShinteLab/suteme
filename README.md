@@ -153,8 +153,16 @@ r.Debug.LowConfidenceCells(0.6)  // 怪しいマスだけ絞り込む
 
 ```bash
 cd suteme
-go run ./_cmd/suteme-training/ 8888
+go run ./_cmd/suteme-training/ -port 8888
 # http://localhost:8888
+```
+
+データ（`data/`・`training_data_v8.bin` など）は**起動したディレクトリ**に読み書きする。
+別の場所に置くなら位置引数で渡す（`go install` したバイナリを使う場合はこちら）。
+
+```bash
+go install ./_cmd/suteme-training
+suteme-training -port 8888 D:/path/to/suteme-data
 ```
 
 5 つのタブで工程を分けてある。
