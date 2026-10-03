@@ -36,7 +36,6 @@ import (
 	"image"
 	_ "image/jpeg"
 	"image/png"
-	"log"
 	"math"
 	"net/http"
 	"os"
@@ -222,7 +221,7 @@ func loadEvalHistory() *EvalHistory {
 	defer f.Close()
 	var h EvalHistory
 	if err := json.NewDecoder(f).Decode(&h); err != nil {
-		log.Printf("loadEvalHistory: %v", err)
+		logger().Warn("loadEvalHistory", "err", err)
 	}
 	if h.Runs == nil {
 		h.Runs = []EvalRun{}
@@ -421,7 +420,7 @@ func holdoutPredictors(entries []HistoryEntry, keyOf func(HistoryEntry) string) 
 		}
 		s, err := samplesFromHistory(e)
 		if err != nil {
-			log.Printf("evaluate: %s のサンプル化に失敗 (%v)", e.ID, err)
+			logger().Warn("evaluate: サンプル化に失敗", "id", e.ID, "err", err)
 			continue
 		}
 		k := keyOf(e)
@@ -499,7 +498,7 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 
 	var holdoutKNN, lookKNN map[string]*suteme.KNN
 	if holdout {
-		log.Printf("evaluate: leave-one-out 用の学習データを作成中（%d 局面）", len(h.Entries))
+		logger().Info("evaluate: leave-one-out 用の学習データを作成中", "boards", len(h.Entries))
 		holdoutKNN = holdoutPredictors(h.Entries, func(e HistoryEntry) string { return e.ID })
 		run.ManualHoldout = &EvalMetrics{}
 		run.AutoHoldout = &EvalMetrics{}
@@ -598,8 +597,8 @@ func runEvaluation(ids []string, label string, holdout bool) (*EvalRun, error) {
 		case !res.Detect.Found:
 			det += "（棄却）"
 		}
-		log.Printf("evaluate [%d/%d] %s: 手動 %d/81 自動 %d/81 検出 %s",
-			i+1, len(targets), t.entry.ID, res.Manual.OK, res.Auto.OK, det)
+		logger().Info(fmt.Sprintf("evaluate [%d/%d] %s: 手動 %d/81 自動 %d/81 検出 %s",
+			i+1, len(targets), t.entry.ID, res.Manual.OK, res.Auto.OK, det))
 	}
 	// **人が引いた座標（ui）を先頭に置く。** 検出の実力に近いのはこちらで、
 	// api は「検出できた局面だけ」が集まる標本なので後ろでよい
@@ -667,9 +666,9 @@ func handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	if run.Negative != nil {
 		neg = fmt.Sprintf(" 負例 %d/%d 棄却", run.Negative.Rejected, run.Negative.Images)
 	}
-	log.Printf("evaluate: %s 手動 %d/%d 自動 %d/%d 検出 %d/%d%s (%.1fs)",
+	logger().Info(fmt.Sprintf("evaluate: %s 手動 %d/%d 自動 %d/%d 検出 %d/%d%s (%.1fs)",
 		run.Label, run.Manual.OK, run.Manual.Cells, run.Auto.OK, run.Auto.Cells,
-		run.DetectSummary.Aligned, run.DetectSummary.Boards, neg, run.Seconds)
+		run.DetectSummary.Aligned, run.DetectSummary.Boards, neg, run.Seconds))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(run)
 }

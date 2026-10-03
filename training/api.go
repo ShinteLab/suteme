@@ -26,7 +26,6 @@ import (
 	"image"
 	"image/png"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -76,7 +75,7 @@ func loadSettings() {
 	defer f.Close()
 	var s APISettings
 	if err := json.NewDecoder(f).Decode(&s); err != nil {
-		log.Printf("loadSettings: %v", err)
+		logger().Warn("loadSettings", "err", err)
 		return
 	}
 	settingsMu.Lock()
@@ -234,7 +233,7 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 			httpJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		log.Printf("API settings: enabled=%v external=%v token=%v", s.Enabled, s.External, s.Token != "")
+		logger().Info("API settings", "enabled", s.Enabled, "external", s.External, "token", s.Token != "")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(s)
 	default:
@@ -366,7 +365,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.Entries = append([]HistoryEntry{entry}, h.Entries...)
 	saveHistoryFile(h)
 
-	log.Printf("registered %s from %s (%d entries)", id, r.RemoteAddr, len(h.Entries))
+	logger().Info("registered", "id", id, "from", r.RemoteAddr, "entries", len(h.Entries))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "ok", "id": id, "verified": false, "entries": len(h.Entries),

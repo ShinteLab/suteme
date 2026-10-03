@@ -113,6 +113,7 @@ AGENTS.md の数字の出所なので、「速いが少し違う」は記録を�
 | `knn.go` | **駒種認識(k-NN)**: 学習不要・距離重み付き投票。現在の主認識器。`Predictor` IF・上位k件の打ち切り（`topK` / `dist2`）|
 | `training/training.go` | **学習パッケージ**: `Train` / `BalanceData` / `ClassDistribution` / `SaveModel` |
 | `training/server.go` | **学習用Webサーバ**: `Serve(port)`・APIハンドラ・履歴管理・UI embed |
+| `training/logger.go` | **ログの差し込み口**: `SetLogger`（受け口は `*slog.Logger` だけ。設定は持たない）|
 | `training/api.go` | **外部からの訓練データ登録**: アクセス制御・`/api/status`・`/api/settings`・`/api/register` |
 | `training/evaluate.go` | **認識率の記録**: 保存済み局面の正解と突き合わせ・盤面検出のずれ・実行ごとの記録（評価タブ）|
 | `training/negative.go` | **盤面が写っていない画像（負例）**: `data/negative/` に置くだけで登録・誤検出率の計測 |
@@ -1640,6 +1641,10 @@ r.Debug.LowConfidenceCells(0.6) // 怪しいマスだけ絞り込む
 サーバ本体（ハンドラ・セッション管理・履歴・静的ファイル embed）は `training` パッケージの
 `Serve(port)` として実装されている。`_cmd/suteme-training` はそれを起動するだけのコマンド。
 UI は `training/static/index.html`（embed）。
+
+**ログは `training.SetLogger(*slog.Logger)` で受け取るだけ**（`training/logger.go`。未設定なら呼ぶたびに `slog.Default()`）。
+ライブラリはレベルも出力先も持たず、`slog.SetDefault` も呼ばない —— 決めるのはアプリ。
+⚠️ `log.Printf` に戻さないこと・slog に printf の書式（`%v`）を渡さないこと。
 
 ### 共有フロント資産（`@shinte/web`）
 

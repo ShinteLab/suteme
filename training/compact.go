@@ -3,7 +3,6 @@ package training
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 
@@ -95,8 +94,8 @@ func ExportCompact(perClass int) ([]ExportedFile, error) {
 		return nil, err
 	}
 
-	log.Printf("Exported distribution set to %s/ (%d samples, <= %d per class)",
-		distDir, len(compact), perClass)
+	logger().Info("Exported distribution set",
+		"dir", distDir, "samples", len(compact), "perClass", perClass)
 	return out, nil
 }
 

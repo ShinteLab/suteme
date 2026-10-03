@@ -11,7 +11,6 @@ import (
 	"image/png"
 	_ "image/png"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -141,7 +140,7 @@ func loadHistory() *HistoryData {
 func saveHistoryFile(h *HistoryData) {
 	os.MkdirAll(dataDir, 0755)
 	if err := writeJSONFile(historyFile, h); err != nil {
-		log.Printf("saveHistory: %v", err)
+		logger().Error("saveHistory", "err", err)
 	}
 }
 
@@ -182,14 +181,14 @@ func Serve(port string) error {
 	if data != nil {
 		if kn := suteme.NewKNN(data.Samples); kn != nil {
 			knn = kn
-			log.Printf("Built k-NN from %d samples in %s", kn.Len(), dataPath)
+			logger().Info("Built k-NN", "samples", kn.Len(), "file", dataPath)
 		}
 	}
 	// 盤の縁の帯の判定器（1マス滑りの補正）。無ければ補正しないだけ
 	if ss, err := suteme.LoadStripData(stripFile); err == nil {
 		if j := suteme.NewStripJudge(ss); j != nil {
 			suteme.SetStripJudge(j)
-			log.Printf("Loaded strip judge from %s (%d strips)", stripFile, j.Samples())
+			logger().Info("Loaded strip judge", "file", stripFile, "strips", j.Samples())
 		}
 	}
 	// **帯を裏で温めておく。** 学習のたびに帯データを全局面から作り直すが、
@@ -205,7 +204,7 @@ func Serve(port string) error {
 		// NN は既定では学習し直さないので、前回の起動より前に置き去りになっている
 		// ことがある。学習データより古ければ比較用 SFEN に断りを出す
 		nnStale = olderThan(modelFile, dataPath)
-		log.Printf("Loaded model from %s (stale=%v)", modelFile, nnStale)
+		logger().Info("Loaded model", "file", modelFile, "stale", nnStale)
 	}
 
 	mux := http.NewServeMux()
@@ -241,7 +240,7 @@ func Serve(port string) error {
 	addr := ":" + port
 	fmt.Printf("http://localhost%s\n", addr)
 	if s := currentSettings(); s.External {
-		log.Printf("外部公開: 有効 / 登録受付: %v / トークン: %v", s.Enabled, s.Token != "")
+		logger().Info(fmt.Sprintf("外部公開: 有効 / 登録受付: %v / トークン: %v", s.Enabled, s.Token != ""))
 	}
 	srv := &http.Server{
 		Addr:              addr,
@@ -259,7 +258,7 @@ func loadExistingTrainingData() (*suteme.TrainingData, string) {
 		data, err := suteme.LoadTrainingData(path)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				log.Printf("学習データが読めません (%s): %v", path, err)
+				logger().Error("学習データが読めません", "file", path, "err", err)
 			}
 			continue
 		}
@@ -418,7 +417,7 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		confidence = suteme.ValidateBoard(img, result.Board)
 	}
 
-	log.Printf("session %s: board=%v confidence=%.0f%%", id, hasBoard, confidence*100)
+	logger().Info("session", "id", id, "board", hasBoard, "confidence", fmt.Sprintf("%.0f%%", confidence*100))
 
 	resp := map[string]interface{}{
 		"id":         id,
@@ -480,7 +479,7 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 		// 表示済みの画像が消えるときの原因はここ（セッションが無い＝
 		// サーバを再起動した等）。黙って 404 を返すと画面からは
 		// 「解析が消えた」としか見えないのでログに残す
-		log.Printf("image: unknown session %s (%s)", id, typ)
+		logger().Warn("image: unknown session", "id", id, "type", typ)
 		http.NotFound(w, r)
 		return
 	}
@@ -522,7 +521,7 @@ func handleCell(w http.ResponseWriter, r *http.Request) {
 	s, ok := sessions[id]
 	mu.RUnlock()
 	if !ok || s.Result.Board == nil {
-		log.Printf("cell: unknown session %s (row=%d col=%d)", id, row, col)
+		logger().Warn("cell: unknown session", "id", id, "row", row, "col", col)
 		http.NotFound(w, r)
 		return
 	}
@@ -979,7 +978,7 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Printf("handleTrainHistory panic: %v", rec)
+			logger().Error("handleTrainHistory panic", "panic", rec)
 			http.Error(w, fmt.Sprintf("training failed: %v", rec), http.StatusInternalServerError)
 		}
 	}()
@@ -1040,8 +1039,8 @@ func handleTrainHistory(w http.ResponseWriter, r *http.Request) {
 		results = append(results, entryResult{ID: id, Pieces: len(samples) - empty, Empty: empty})
 	}
 
-	log.Printf("Training from %d history entries (%d pieces, %d empty)",
-		len(req.IDs), len(fresh)-countEmpty(fresh), countEmpty(fresh))
+	logger().Info("Training from history entries",
+		"entries", len(req.IDs), "pieces", len(fresh)-countEmpty(fresh), "empty", countEmpty(fresh))
 	res, err := trainAndSave(fresh, req.NN)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1252,14 +1251,14 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 	var existing []suteme.TrainingSample
 	if e, path := loadExistingTrainingData(); e != nil {
 		existing = e.Samples
-		log.Printf("Loaded %d existing samples from %s", len(existing), path)
+		logger().Info("Loaded existing samples", "samples", len(existing), "file", path)
 	}
 
 	// 入力長が合わないサンプルを除外
 	existing, skippedOld := filterByInputSize(existing)
 	fresh, skippedNew := filterByInputSize(fresh)
 	if skipped := skippedOld + skippedNew; skipped > 0 {
-		log.Printf("Skipped %d samples with wrong input size", skipped)
+		logger().Warn("Skipped samples with wrong input size", "samples", skipped)
 	}
 
 	// 既存分と今回分を入力の内容でマージして重複を除く。
@@ -1270,7 +1269,7 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 	data.Samples = MergeSamples(existing, fresh)
 	duplicates := beforeMerge - len(data.Samples)
 	if duplicates > 0 {
-		log.Printf("Merged %d samples → %d (%d duplicates removed)", beforeMerge, len(data.Samples), duplicates)
+		logger().Info("Merged samples", "before", beforeMerge, "after", len(data.Samples), "duplicates", duplicates)
 	}
 
 	if len(data.Samples) == 0 {
@@ -1297,10 +1296,10 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 	if err != nil {
 		// **ここで失敗しても学習は成功扱いにする。** 帯データは history から
 		// いつでも作り直せるうえ、無ければ滑りの補正をしないだけで検出は動く
-		log.Printf("Strip data rebuild failed: %v", err)
+		logger().Warn("Strip data rebuild failed", "err", err)
 	}
 	if stripCount > 0 {
-		log.Printf("Rebuilt strip data: %d strips", stripCount)
+		logger().Info("Rebuilt strip data", "strips", stripCount)
 	}
 
 	// 向きの回転照合だけを担う間引きデータも作り直す（配布用）。
@@ -1309,7 +1308,7 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 	orientCount, err := rebuildOrientData(data.Samples)
 	if err != nil {
 		// 帯と同じく、失敗しても学習は成功扱い（いつでも作り直せる）
-		log.Printf("Orient data rebuild failed: %v", err)
+		logger().Warn("Orient data rebuild failed", "err", err)
 	}
 
 	res := map[string]interface{}{
@@ -1334,7 +1333,7 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 		// **UI 側に名前を書かないこと**（版が上がると嘘になる。実際
 		// v6 になっても「model_v3.json は古いままです」と出ていた）
 		res["model_file"] = modelFile
-		log.Printf("Training data updated (%d samples), NN training skipped", len(data.Samples))
+		logger().Info("Training data updated, NN training skipped", "samples", len(data.Samples))
 		return res, nil
 	}
 
@@ -1342,7 +1341,7 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 	balanced := BalanceData(data.Samples)
 	res["balanced"] = len(balanced)
 	res["distribution"] = ClassDistribution(balanced)
-	log.Printf("Training: %d raw → %d balanced", len(data.Samples), len(balanced))
+	logger().Info("Training", "raw", len(data.Samples), "balanced", len(balanced))
 
 	m := Train(&suteme.TrainingData{Samples: balanced})
 	SaveModel(modelFile, m)
@@ -1352,7 +1351,7 @@ func trainAndSave(fresh []suteme.TrainingSample, trainNN bool) (map[string]inter
 	nnStale = false
 	modelLock.Unlock()
 
-	log.Printf("Training complete, model saved to %s", modelFile)
+	logger().Info("Training complete, model saved", "file", modelFile)
 
 	return res, nil
 }

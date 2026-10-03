@@ -1,7 +1,6 @@
 package training
 
 import (
-	"log"
 	"sort"
 
 	"github.com/ShinteLab/suteme"
@@ -101,7 +100,7 @@ func rebuildOrientData(samples []suteme.TrainingSample) (int, error) {
 	if err := suteme.SaveTrainingData(orientFile, &suteme.TrainingData{Samples: out}); err != nil {
 		return 0, err
 	}
-	log.Printf("Rebuilt orient data: %d samples (<= %d per class) -> %s",
-		len(out), OrientPerClass, orientFile)
+	logger().Info("Rebuilt orient data",
+		"samples", len(out), "perClass", OrientPerClass, "file", orientFile)
 	return len(out), nil
 }

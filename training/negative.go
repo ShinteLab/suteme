@@ -32,7 +32,6 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -131,7 +130,7 @@ func evaluateNegatives(p suteme.Predictor) *NegativeEval {
 	for _, id := range ids {
 		img, err := loadNegativeImage(id)
 		if err != nil {
-			log.Printf("evaluate: 負例 %s を読めません (%v)", id, err)
+			logger().Warn("evaluate: 負例を読めません", "id", id, "err", err)
 			continue
 		}
 		res := NegativeResult{ID: id}
@@ -157,7 +156,7 @@ func evaluateNegatives(p suteme.Predictor) *NegativeEval {
 		default:
 			// 推論器が無いなど、盤があったかどうかを判定できていない。
 			// **棄却として数えない。** 数えると誤検出率が実態より良く見える
-			log.Printf("evaluate: 負例 %s を判定できません (%v)", id, err)
+			logger().Warn("evaluate: 負例を判定できません", "id", id, "err", err)
 			continue
 		}
 		ev.Images++
@@ -165,8 +164,8 @@ func evaluateNegatives(p suteme.Predictor) *NegativeEval {
 			ev.Rejected++
 		}
 		ev.Results = append(ev.Results, res)
-		log.Printf("evaluate(負例) %s: %s conf=%.2f", id,
-			map[bool]string{true: "誤検出", false: "棄却"}[res.Detected], res.Confidence)
+		logger().Info(fmt.Sprintf("evaluate(負例) %s: %s conf=%.2f", id,
+			map[bool]string{true: "誤検出", false: "棄却"}[res.Detected], res.Confidence))
 	}
 	if ev.Images == 0 {
 		return nil
@@ -278,7 +277,7 @@ func handleNegativeAdd(w http.ResponseWriter, r *http.Request) {
 		httpJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	log.Printf("negative: %s を登録しました（%d 枚）", id, len(ids)+1)
+	logger().Info("negative: 登録しました", "id", id, "count", len(ids)+1)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "ok", "id": id, "count": len(ids) + 1,

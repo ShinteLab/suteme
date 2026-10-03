@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image"
 	"image/png"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -183,7 +182,7 @@ func warmStripCache() {
 	}
 	st := time.Now()
 	n := len(BuildStripData(h.Entries))
-	log.Printf("Warmed strip cache: %d strips in %v", n, time.Since(st))
+	logger().Info("Warmed strip cache", "strips", n, "elapsed", time.Since(st))
 }
 
 // rebuildStripData は確認済みの全局面から帯データを作り直して保存し、
