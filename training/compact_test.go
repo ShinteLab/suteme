@@ -1,15 +1,37 @@
 package training
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"image"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/ShinteLab/suteme"
 )
+
+// writeStrip はカレントに帯の教師データを 2 本書く。
+// 帯の入力は StripInput で作る（長さが決まっているので手で組まない）
+func writeStrip(t *testing.T) {
+	t.Helper()
+	strip := image.NewGray(image.Rect(0, 0, 90, 10))
+	for i := range strip.Pix {
+		strip.Pix[i] = uint8(i % 251)
+	}
+	in := suteme.StripInput(strip, strip.Bounds(), false)
+	if in == nil {
+		t.Fatal("帯の入力が作れない")
+	}
+	if err := suteme.SaveStripData(stripFile, []suteme.StripSample{
+		{Input: in, Board: true},
+		{Input: in, Board: false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func writeSamples(t *testing.T, path string, samples []suteme.TrainingSample) {
 	t.Helper()
@@ -58,28 +80,14 @@ func TestExportCompactWritesSet(t *testing.T) {
 		samples = append(samples, sample(i%3, float64(i)))
 	}
 	writeSamples(t, suteme.DefaultDataFile, samples)
-	// 帯の入力は StripInput で作る（長さが決まっているので手で組まない）
-	strip := image.NewGray(image.Rect(0, 0, 90, 10))
-	for i := range strip.Pix {
-		strip.Pix[i] = uint8(i % 251)
-	}
-	in := suteme.StripInput(strip, strip.Bounds(), false)
-	if in == nil {
-		t.Fatal("帯の入力が作れない")
-	}
-	if err := suteme.SaveStripData(stripFile, []suteme.StripSample{
-		{Input: in, Board: true},
-		{Input: in, Board: false},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeStrip(t)
 
 	files, err := ExportCompact(2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 {
-		t.Fatalf("書き出したファイルが %d 個（学習データ + 帯の 2 つのはず）", len(files))
+	if len(files) != 3 {
+		t.Fatalf("書き出したファイルが %d 個（学習データ + 帯 + 記録の 3 つのはず）", len(files))
 	}
 
 	// 間引いたものが dist/ に、正式名で入っている
@@ -121,8 +129,72 @@ func TestExportCompactWithoutStrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 {
-		t.Errorf("帯が無いのに %d ファイル書き出した", len(files))
+	if len(files) != 2 {
+		t.Errorf("帯が無いのに %d ファイル書き出した（学習データ + 記録の 2 つのはず）", len(files))
+	}
+}
+
+// TestExportCompactToGzip は -out / -gzip（2026-10-04。ikkyoku が焼き込む形）を確かめる。
+//
+//   - **任意の場所に、.gz を付けて書く**（中身は展開すれば同じ学習データ）
+//   - **書き出しの記録（export.json）を置く**（受け取る側が新旧を比べる）
+//   - **前回の同じ名前のもの（圧縮しない版）は消す**（両方残ると受け取る側が古いほうを読む）。
+//     **知らない名前には触らない**（書き出し先は任意のディレクトリ）
+//   - **データディレクトリそのものへは書かない**（正式名で書くので全件を上書きしてしまう）
+func TestExportCompactToGzip(t *testing.T) {
+	chdirTemp(t)
+	writeSamples(t, suteme.DefaultDataFile, []suteme.TrainingSample{sample(0, 1), sample(1, 2), sample(1, 3)})
+	writeStrip(t)
+
+	out := t.TempDir()
+	stale := filepath.Join(out, suteme.DefaultDataFile)
+	writeSamples(t, stale, []suteme.TrainingSample{sample(0, 9)})
+	other := filepath.Join(out, "keep.txt")
+	if err := os.WriteFile(other, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ExportCompactTo(ExportOptions{Dir: out, PerClass: 1, Gzip: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("前回の圧縮しない版が残っている: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("知らないファイルが消えた: %v", err)
+	}
+
+	f, err := os.Open(filepath.Join(out, suteme.DefaultDataFile+".gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := suteme.PredictorFrom(zr, "test")
+	if err != nil || p == nil {
+		t.Fatalf("展開して読めない: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, stripFile+".gz")); err != nil {
+		t.Errorf("帯の .gz が無い: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(out, ExportInfoFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var info ExportInfo
+	if err := json.Unmarshal(b, &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Date.IsZero() || info.Samples != 2 || !info.Gzip || len(info.Files) != 2 {
+		t.Errorf("記録 = %+v", info)
+	}
+
+	if _, err := ExportCompactTo(ExportOptions{Dir: ".", PerClass: 1}); err == nil {
+		t.Error("データディレクトリへの書き出しを断っていない")
 	}
 }
 
