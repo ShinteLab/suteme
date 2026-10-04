@@ -48,14 +48,8 @@ sfen, err := suteme.LoadSFEN(img)
 go get github.com/ShinteLab/suteme
 ```
 
-`core` はまだタグを打っていないため、`go.mod` が相対パスの `replace` で参照している。
-**`suteme` と `core` を同じ親ディレクトリに並べて置くこと。**
-
-```
-shinte/
-├── core/
-└── suteme/
-```
+`core` はタグ（`v0.2.0`）で引いている（2026-10-05。それまでは相対パスの `replace`）。
+`core` を手元で直しても、タグを打って `go.mod` を上げるまで `suteme` には入らない。
 
 ---
 

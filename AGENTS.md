@@ -12,8 +12,9 @@
 
 独立した Go モジュール `github.com/ShinteLab/suteme`。
 import パスは `github.com/ShinteLab/suteme`, `github.com/ShinteLab/suteme/training`。
-`core` はタグ未発行のため `replace github.com/ShinteLab/core => ../core` の相対パス参照で引いている
-（この replace を外さないこと）。プロジェクト横断の方針は親ディレクトリの `CLAUDE.md` を参照。
+`core` は**タグで引いている**（`v0.2.0`。2026-10-05 に `replace ../core` から切り替えた）。
+手元の `core` を直しても、タグを打って `go get github.com/ShinteLab/core@<タグ>` するまで suteme には入らない。
+プロジェクト横断の方針は親ディレクトリの `AGENTS.md` を参照。
 
 依存:
 

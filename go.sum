@@ -1,2 +1,4 @@
+github.com/ShinteLab/core v0.2.0 h1:4euNvry5TDnZ7F+cx73jxWuV9XKio8JyDEHbIVhzWV0=
+github.com/ShinteLab/core v0.2.0/go.mod h1:QPvoFUYaiYPCSBLzdctbW3b7+yeGB+oDsrm6dQrIdkU=
 github.com/goml/gobrain v0.0.0-20201212123421-2e2d98ca8249 h1:Xst86cFqcrNSUxId+2A/o3NZUwm7H+H6bUcehmD2t4o=
 github.com/goml/gobrain v0.0.0-20201212123421-2e2d98ca8249/go.mod h1:imJK2QRE3080lm54nE96nRHXv7EvvVMCbF5N2QdGa9I=
