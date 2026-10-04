@@ -2,10 +2,16 @@
 // サーバ本体の実装は suteme/training パッケージにある。
 //
 //	suteme-training [-port 8080] [データディレクトリ]
+//	suteme-training -export [-per-class 1000] [データディレクトリ]
 //
 // データディレクトリ（data/・training_data_v8.bin など）を省略すると
 // カレントディレクトリを使う。training パッケージのパスはすべて
 // カレントディレクトリからの相対なので、起動時にそこへ移る。
+//
+// -export はサーバを起動せず、**配布用の書き出し**（履歴タブ「配布用に書き出す」・
+// `POST /api/export` と同じ `training.ExportCompact`）だけをして終わる。
+// 認識器を焼き込んで配る側（ikkyoku の `task model:copy`）が、画面を開かずに
+// `dist/` を作るための口（2026-10-04）。
 package main
 
 import (
@@ -21,8 +27,12 @@ import (
 
 func main() {
 	port := flag.String("port", "8080", "待ち受けるポート")
+	export := flag.Bool("export", false, "サーバを起動せず、配布用の認識器を dist/ に書き出して終わる")
+	perClass := flag.Int("per-class", training.CompactPerClass, "-export で 1クラスあたりに残す件数")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "使い方: %s [-port 8080] [データディレクトリ]\n", filepath.Base(os.Args[0]))
+		name := filepath.Base(os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "使い方: %s [-port 8080] [データディレクトリ]\n", name)
+		fmt.Fprintf(flag.CommandLine.Output(), "        %s -export [-per-class %d] [データディレクトリ]\n", name, training.CompactPerClass)
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -37,7 +47,31 @@ func main() {
 	}
 	wd, _ := os.Getwd()
 	log.Printf("データディレクトリ: %s", wd)
+	if *export {
+		if err := exportCompact(*perClass); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	log.Fatal(training.Serve(*port))
+}
+
+// exportCompact は配布用の書き出しをして、書いたファイルを並べる。
+// **中身は画面の「配布用に書き出す」と同じ**（`training.ExportCompact`）。
+// 出力先はデータディレクトリの下の `dist/`（手元の全件を上書きしないため。compact.go）。
+func exportCompact(perClass int) error {
+	files, err := training.ExportCompact(perClass)
+	if err != nil {
+		return fmt.Errorf("配布用に書き出せませんでした: %w", err)
+	}
+	for _, f := range files {
+		fmt.Printf("%s  %.1f MB", f.Path, float64(f.Bytes)/(1<<20))
+		if f.Samples > 0 {
+			fmt.Printf("  %d サンプル", f.Samples)
+		}
+		fmt.Printf("\n    %s\n", f.Note)
+	}
+	return nil
 }
 
 // enterDataDir はデータディレクトリへ移る。**無いディレクトリは作らない。**

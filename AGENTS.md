@@ -1067,7 +1067,17 @@ gobrain の `FeedForward.Update` は内部の配列を書き換えるので `*Mo
 **どれにも `strip_data_v1.bin`(2.7MB) を足すこと**（無いと盤面検出が
 157/157 → 152/157。1マス滑りが直らない）。
 
-#### 書き出し方（履歴タブ「配布用に書き出す」/ `POST /api/export`）
+#### 書き出し方（履歴タブ「配布用に書き出す」/ `POST /api/export` / `-export`）
+
+サーバを起動せずに書き出すなら（2026-10-04。ikkyoku の `task model:copy` が `dist/` が無いときに呼ぶ）:
+
+```
+go run ./_cmd/suteme-training -export [-per-class 1000] [データディレクトリ]
+```
+
+**中身は画面・API と同じ `ExportCompact`。** 書いたファイルを並べて終わる（実測 0.7 秒）。
+⚠️ **worktree で走らせないこと**（学習データ `*.bin` が無いので「学習データがありません」で止まる。
+本体のチェックアウトをデータディレクトリに渡す）
 
 `ExportCompact(perClass)` が **`dist/` に配布セットを組む**。実測（157局面
 51932 サンプルから既定の 1000/class）:
@@ -1664,6 +1674,9 @@ go run ./_cmd/suteme-training/ -port 8888 [データディレクトリ]
 ```
 
 起動時に `model_v8.json` があれば自動ロード。
+
+`-export` を付けるとサーバを起動せず、配布用の書き出し（`dist/`）だけをして終わる
+（下の「書き出し方」）。
 
 **データは位置引数のディレクトリ（省略時はカレント）に読み書きする。**
 `training` のパスはすべてカレントからの相対（`dataDir` / `dataFile` ほか）なので、
