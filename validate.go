@@ -35,9 +35,18 @@ func ValidateBoard(img image.Image, br *BoardRegion) float64 {
 // ここは「この領域が本当に盤か」を測る場所で、領域が間違っている前提で呼ばれる。
 // 外枠で切ると外れた候補も自分の箱の中しか見なくなり、均一に見えてしまう。
 func cellUniformity(img image.Image, br *BoardRegion) float64 {
+	return cellUniformitySkip(img, br, nil)
+}
+
+// cellUniformitySkip は cellUniformity のうち、skip が立ったマスを数えないもの
+// （割合の分母からも外す）。遮られたマスを外して比べるのに使う（`unslipRegion`）。
+func cellUniformitySkip(img image.Image, br *BoardRegion, skip *[9][9]bool) float64 {
 	medians := make([]uint8, 0, 81)
 	for r := 0; r < 9; r++ {
 		for c := 0; c < 9; c++ {
+			if skip != nil && skip[r][c] {
+				continue
+			}
 			cell := br.extractCellUnclipped(img, r, c)
 			if cell == nil {
 				return 0
@@ -67,7 +76,10 @@ func cellUniformity(img image.Image, br *BoardRegion) float64 {
 		}
 	}
 
-	return float64(ok) / 81.0
+	if len(medians) == 0 {
+		return 0
+	}
+	return float64(ok) / float64(len(medians))
 }
 
 // gridAlignFull は gridAlignment の値をこれ以上なら整合度 1.0 とみなす基準。

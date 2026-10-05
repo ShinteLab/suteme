@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	_ "image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,6 +75,9 @@ type occludedCase struct {
 	Hidden []string `json:"hidden"`
 	// Clean は隠れていない画像（見えないマスが 1 つも無いこと）。
 	Clean bool `json:"clean"`
+	// Region は検出されるべき盤の外枠（x1, y1, x2, y2）。0.5 マス以内で合うこと。
+	// 頭が上辺を覆うと検出が 1 段ずれていた（`unslipRegion` / `occludedConfidence`）。
+	Region []int `json:"region,omitempty"`
 	// Note は何が写っているか。
 	Note string `json:"note,omitempty"`
 }
@@ -115,6 +119,15 @@ func TestHiddenCellsOccluded(t *testing.T) {
 		if br == nil {
 			t.Errorf("%s: 盤を検出できない", c.File)
 			continue
+		}
+		if len(c.Region) == 4 {
+			want := image.Rect(c.Region[0], c.Region[1], c.Region[2], c.Region[3])
+			cw, ch := float64(want.Dx())/9, float64(want.Dy())/9
+			d := br.Bounds
+			if math.Abs(float64(d.Min.X-want.Min.X)) > cw/2 || math.Abs(float64(d.Min.Y-want.Min.Y)) > ch/2 ||
+				math.Abs(float64(d.Max.X-want.Max.X)) > cw/2 || math.Abs(float64(d.Max.Y-want.Max.Y)) > ch/2 {
+				t.Errorf("%s: 盤の検出がずれている %v（正しくは %v。%s）", c.File, d, want, c.Note)
+			}
 		}
 		h := HiddenCells(img, br)
 		var got []string

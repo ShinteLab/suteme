@@ -312,3 +312,52 @@ func hiddenCells(img image.Image, br *BoardRegion, boardColor uint8) [9][9]bool 
 func HiddenCells(img image.Image, br *BoardRegion) [9][9]bool {
 	return hiddenCells(img, br, BoardColor(img, br))
 }
+
+// occludedCells は「罫線はあるのに、途中を何かが覆っている」マスを返す。
+//
+// hiddenCells との違いは**罫線そのものがあるか**を見ること。窓が盤からずれて
+// 盤の外を含むと、その辺の罫線は丸ごと見えない（隠れているのではなく無い）。
+// 線ごとに、測れる交点の半分以上で見えていれば「その線はある」とみなし、
+// ある線どうしの交点が隠れているときだけ遮られているとする。
+func occludedCells(img image.Image, br *BoardRegion, boardColor uint8) [9][9]bool {
+	seen := intersectionSeen(img, br, boardColor)
+	var hid, ok [10][10]bool // ok = 測れて見えている
+	for j := 0; j < 10; j++ {
+		for i := 0; i < 10; i++ {
+			min := armSeenMin
+			if i == 0 || i == 9 || j == 0 || j == 9 {
+				min = frameArmSeenMin
+			}
+			hid[j][i] = seen[j][i] >= 0 && seen[j][i] < min
+			ok[j][i] = seen[j][i] >= min
+		}
+	}
+	exists := func(n, seenN int) bool { return n > 0 && seenN*2 >= n }
+	var hx, vx [10]bool
+	for k := 0; k < 10; k++ {
+		hn, hs, vn, vs := 0, 0, 0, 0
+		for m := 0; m < 10; m++ {
+			if hid[k][m] || ok[k][m] {
+				hn++
+			}
+			if ok[k][m] {
+				hs++
+			}
+			if hid[m][k] || ok[m][k] {
+				vn++
+			}
+			if ok[m][k] {
+				vs++
+			}
+		}
+		hx[k], vx[k] = exists(hn, hs), exists(vn, vs)
+	}
+	occ := func(i, j int) bool { return hid[j][i] && hx[j] && vx[i] }
+	var out [9][9]bool
+	for r := 0; r < 9; r++ {
+		for c := 0; c < 9; c++ {
+			out[r][c] = occ(c, r) || occ(c+1, r) || occ(c, r+1) || occ(c+1, r+1)
+		}
+	}
+	return out
+}

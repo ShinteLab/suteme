@@ -316,6 +316,10 @@ func snapToOuterFrame(img image.Image, br *BoardRegion) *BoardRegion {
 // 戻した窓は格子線から外れて信頼度が落ちるので、そちらは元のまま残る。
 // **はみ出したままの領域はどのみち `ExtractCell` が画像外を読む**ので、
 // 収まる候補が同点なら収まるほうが良い。
+//
+// **頭や手が盤に被っている画像では、遮られたマスを外して比べ直す**
+// （`occludedConfidence`）。戻した窓のほうが遮られたマスを多く含み、
+// 均一性で負けるため。
 func unslipRegion(img image.Image, br *BoardRegion) *BoardRegion {
 	if br == nil {
 		return nil
@@ -349,10 +353,51 @@ func unslipRegion(img image.Image, br *BoardRegion) *BoardRegion {
 		return br
 	}
 	cand := BoardRegionFromRect(r.Min.X, r.Min.Y, r.Max.X, r.Max.Y)
-	if ValidateBoard(img, cand) < ValidateBoard(img, br) {
-		return br
+	if ValidateBoard(img, cand) >= ValidateBoard(img, br) {
+		return cand
 	}
-	return cand
+	// 遮られたマス（頭・手）を外せば負けないなら戻す
+	c, snapped := occludedConfidence(img, cand)
+	if base, _ := occludedConfidence(img, br); c >= base-occludedTol {
+		// 格子線に合わせた窓を返す。戻しただけの窓は大きさが数px 違うことがあり
+		// （実測 `134033/x001`: 幅 388 対 404）、そのまま次の `snapToOuterFrame` に
+		// 渡すと、1 本ずれた弱い線を理由に横へ 1 マス動かされる
+		return snapped
+	}
+	return br
+}
+
+// occludedTol は `occludedConfidence` で戻した窓が負けてよい幅（2 マスぶん）。
+// 遮られたマスを外すと分母が窓ごとに変わるので、マス 1 つにも満たない差で
+// 順位が入れ替わる（実測 `143758/x014`: 正 0.959 対 滑り 0.963）。盤の外の 1 段を
+// 含む窓なら 9 マスぶん落ちるので、この幅では通らない。
+const occludedTol = 2.0 / 81
+
+// occludedConfidence は「遮られたマス」（`occludedCells`）を均一性から外した信頼度。
+//
+// **頭が盤の上辺を覆うと、窓が 1 マス下へ滑る。** 上辺の外枠が見えなくなり、
+// 1 段下の罫線を外枠と取り違えるため（10/05 の大盤の中継の録画で 484 枚中 113 枚。
+// 帯の判定器あり＝ikkyoku と同じ条件。これを入れて 9 枚）。
+// 滑った窓は下辺が画像からはみ出すので上の 1 マス戻しの出番だが、戻した窓
+// （＝正しい窓）は**髪が被ったマスが暗く、均一性で負ける**（実測 `134033/x015`:
+// 正 0.91 対 滑り 0.98。罫線の整合度は正のほうが上で 0.75 対 0.69）。
+//
+// 遮られたマスは「罫線はあるのに途中が隠れている」マスなので、**盤の外のマス
+// （罫線そのものが無い）は外れない**。盤が本当に画像の外へ続いている中継で
+// 戻した窓が盤の外を含めば、従来どおり均一性で負けて元の窓が残る。
+//
+// 比べる前に両方を `SnapToGrid` に通す（交点の判定は罫線の位置が数px の精度で
+// 合っている前提。戻しただけの窓は 6px ずれていて、外枠を見失う）。
+// 費用は `SnapToGrid` 2 回ぶんだが、通るのは画像からはみ出したときだけ。
+// 戻り値の 2 つ目は格子線に合わせた窓。
+func occludedConfidence(img image.Image, br *BoardRegion) (float64, *BoardRegion) {
+	s := SnapToGrid(img, br)
+	occ := occludedCells(img, s, BoardColor(img, s))
+	u := cellUniformitySkip(img, s, &occ)
+	if u == 0 {
+		return 0, s
+	}
+	return u * gridConfidence(img, s), s
 }
 
 // refineRegion は外枠を整合度が最大になる位置に寄せ、その領域と信頼度を返す。
