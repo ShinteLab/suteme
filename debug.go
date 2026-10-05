@@ -88,6 +88,11 @@ type CellDebug struct {
 	Confidence float64 `json:"confidence"`
 	// Piece は最終的に採用した SFEN 表記（空マスなら ""）。
 	Piece string `json:"piece"`
+	// Hidden は「このマスは見えない」（手や頭などが盤に被っている）という印。
+	// **Piece / Category はそのまま読んだ結果で、空きにはしていない**
+	// （空きは「駒が無い」という読みなので、手の根拠になってしまう）。
+	// 呼び出し側は Hidden のマスを盤面の根拠に使わないこと（判定は visible.go）。
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 // Debug は認識1回分の観測情報。
@@ -148,7 +153,21 @@ func (d *Debug) LowConfidenceCells(th float64) []CellDebug {
 	return out
 }
 
-// Dump は盤の形に並べた文字列を返す（マスの表記と確信度）。
+// HiddenCells は「見えない」（手や頭などが被っている）マスを返す。
+func (d *Debug) HiddenCells() []CellDebug {
+	if d == nil {
+		return nil
+	}
+	var out []CellDebug
+	for _, c := range d.Cells {
+		if c.Hidden {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Dump は盤の形に並べた文字列を返す（マスの表記と確信度。見えないマスは表記の前に `#`）。
 func (d *Debug) Dump() string {
 	if d == nil {
 		return "<no debug>"
@@ -166,7 +185,11 @@ func (d *Debug) Dump() string {
 			if p == "" {
 				p = "."
 			}
-			fmt.Fprintf(&b, " %-3s%3.0f%%", p, cell.Confidence*100)
+			mark := " "
+			if cell.Hidden {
+				mark = "#"
+			}
+			fmt.Fprintf(&b, "%s%-3s%3.0f%%", mark, p, cell.Confidence*100)
 		}
 		b.WriteByte('\n')
 	}

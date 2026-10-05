@@ -134,7 +134,11 @@ fmt.Println(r.Debug)
 
 fmt.Print(r.Debug.Dump())        // 盤の形に並べた表記と確信度
 r.Debug.LowConfidenceCells(0.6)  // 怪しいマスだけ絞り込む
+r.Debug.HiddenCells()            // 手や頭が被って見えないマス
 ```
+
+**中継で手や頭が盤に被ったマスには `CellDebug.Hidden` が立つ。** 読んだ駒（SFEN）は
+そのままなので、盤面の変化から指し手を割り出す側は、印の付いたマスを根拠に使わないこと。
 
 `RegionSource` が領域の決め方（`option` / `detect` / `whole`）を示す。
 **観測用であって認識の判断には使わない。**

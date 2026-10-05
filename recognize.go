@@ -545,12 +545,13 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 	var grid [9][9]string
 	bc := BoardColor(img, br)
 	bo := NewBoardOrient(img, br, bc)
+	hidden := hiddenCells(img, br, bc)
 	cells := make([]CellDebug, 81)
 
 	recognizeCells(m, func(i int) {
 		r, c := i/9, i%9
 		cur := &cells[i]
-		*cur = CellDebug{Row: r, Col: c, Rect: br.Cells[r][c], Class: -1}
+		*cur = CellDebug{Row: r, Col: c, Rect: br.Cells[r][c], Class: -1, Hidden: hidden[r][c]}
 
 		cell := br.ExtractCell(img, r, c)
 		if cell == nil {
