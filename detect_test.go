@@ -198,3 +198,83 @@ func TestOverflowCells(t *testing.T) {
 		t.Errorf("左へ 80px（1マス超）が %.2f マス扱い", got)
 	}
 }
+
+// makeDominantEdgeScene は**盤のすぐ下に黒い帯がある**画像を作る（2026-10-08 の中継の画面配置）。
+//
+// 格子線は細くて薄く（実盤の中継の盤）、盤の木目と黒い帯の境目は画像の幅いっぱいに続く濃い 1 本になる。
+// 横方向の投影では、この境目が格子線の数倍の強さで出る。
+func makeDominantEdgeScene() *image.Gray {
+	const board, line, bar = 220, 170, 10
+	w := slipBoardX*2 + slipCellW*9
+	h := slipBoardY + slipCellH*9 + 40
+	img := image.NewGray(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetGray(x, y, color.Gray{Y: 150}) // 背景
+		}
+	}
+	for y := slipBoardY; y <= slipBoardY+slipCellH*9; y++ {
+		for x := slipBoardX; x <= slipBoardX+slipCellW*9; x++ {
+			img.SetGray(x, y, color.Gray{Y: board})
+		}
+	}
+	for i := 0; i <= 9; i++ {
+		y := slipBoardY + i*slipCellH
+		for x := slipBoardX; x <= slipBoardX+slipCellW*9; x++ {
+			img.SetGray(x, y, color.Gray{Y: line})
+		}
+		x := slipBoardX + i*slipCellW
+		for y := slipBoardY; y <= slipBoardY+slipCellH*9; y++ {
+			img.SetGray(x, y, color.Gray{Y: line})
+		}
+	}
+	// 盤の下端のすぐ下から画像の下端まで、幅いっぱいの黒い帯（字幕）。
+	for y := slipBoardY + slipCellH*9 + 3; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetGray(x, y, color.Gray{Y: bar})
+		}
+	}
+	return img
+}
+
+// ⚠️ **盤のすぐ下に黒い帯があっても盤を見つけること**（`peakReference`。2026-10-08 に中継で踏んだ）。
+//
+// 盤の木目と黒い帯の境目が格子線の数倍の強さの 1 本になり、ピークのしきい値（最大値の 1/5）が本物の格子線を
+// 全部落として、横線が 2 本しか拾えず「盤面を検出できませんでした（信頼度 0%）」になった。
+func TestDetectBoardIgnoresDominantEdge(t *testing.T) {
+	img := makeDominantEdgeScene()
+	br := DetectBoard(img)
+	if br == nil {
+		t.Fatalf("盤を見つけられません")
+	}
+	want := image.Rect(slipBoardX, slipBoardY, slipBoardX+slipCellW*9, slipBoardY+slipCellH*9)
+	got := br.Bounds
+	if math.Abs(float64(got.Min.X-want.Min.X)) > slipCellW/2 || math.Abs(float64(got.Min.Y-want.Min.Y)) > slipCellH/2 ||
+		math.Abs(float64(got.Max.X-want.Max.X)) > slipCellW/2 || math.Abs(float64(got.Max.Y-want.Max.Y)) > slipCellH/2 {
+		t.Fatalf("盤の位置がずれています: got %v want %v", got, want)
+	}
+	if conf := ValidateBoard(img, br); conf < 0.5 {
+		t.Errorf("信頼度 %.2f（0.5 以上のはず）", conf)
+	}
+}
+
+// ⚠️ **飛び抜けた 1 本が無いときは、しきい値の基準が最大値のまま変わらないこと**（今までの検出を動かさない）。
+func TestPeakReferenceKeepsMaxWithoutDominantEdge(t *testing.T) {
+	// 外枠 2 本が強く、格子線 8 本がその 4 割ほど。
+	signal := make([]int, 500)
+	for i := 0; i <= 9; i++ {
+		v := 40
+		if i == 0 || i == 9 {
+			v = 100
+		}
+		signal[20+i*50] = v
+	}
+	if got := peakReference(signal, 10); got != 100 {
+		t.Errorf("peakReference = %d, want 100（最大値のまま）", got)
+	}
+	// 外の境目が 1 本だけ飛び抜けると頭打ちになる。
+	signal[495] = 500
+	if got := peakReference(signal, 10); got >= 500 {
+		t.Errorf("peakReference = %d（飛び抜けた 1 本で頭打ちになっていない）", got)
+	}
+}

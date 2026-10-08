@@ -3,6 +3,7 @@ package suteme
 import (
 	"image"
 	"math"
+	"sort"
 )
 
 type BoardRegion struct {
@@ -610,34 +611,75 @@ func findBoardColumns(colProj []int, colPeaks []int, cellW float64, w int) []int
 // 盤だけを切り出した画像では盤の外枠線が画像端（実測で x=2 / y=4 など）に
 // 来るため、外枠が原理的にピークになれなかった。保存済み局面は 11 件中 9 件が
 // この形（盤が画像の 92〜98% を占める）で、横方向が常に1マスずれる原因だった。
+//
+// **しきい値は「いちばん強いピーク」ではなく、飛び抜けた 1 本を抑えた基準の 1/5**（`peakReference`。2026-10-08）。
+// 中継の画面配置が変わって盤のすぐ下に黒い帯（字幕）が来ると、盤の木目と黒の境目が格子線の数倍の強さの
+// 1 本になり、最大値の 1/5 で切ると本物の格子線（その 15〜20%）が全部落ちて、横線が 2 本しか拾えなかった
+// （`TestDetectBoardIgnoresDominantEdge`）。
 func findPeaks(signal []int, minDist int) []int {
-	maxVal := 0
-	for _, v := range signal {
-		if v > maxVal {
-			maxVal = v
-		}
-	}
-	thresh := maxVal / 5
+	thresh := peakReference(signal, minDist) / 5
 
 	peaks := make([]int, 0)
 	for i := 0; i < len(signal); i++ {
 		if signal[i] < thresh {
 			continue
 		}
-		isPeak := true
-		for d := 1; d <= minDist && isPeak; d++ {
-			if i-d >= 0 && signal[i] < signal[i-d] {
-				isPeak = false
-			}
-			if i+d < len(signal) && signal[i] < signal[i+d] {
-				isPeak = false
-			}
-		}
-		if isPeak {
+		if isLocalMax(signal, i, minDist) {
 			peaks = append(peaks, i)
 		}
 	}
 	return peaks
+}
+
+// isLocalMax は signal[i] が前後 minDist の範囲で最大か（端は配列の内側だけを見る）。
+func isLocalMax(signal []int, i, minDist int) bool {
+	for d := 1; d <= minDist; d++ {
+		if i-d >= 0 && signal[i] < signal[i-d] {
+			return false
+		}
+		if i+d < len(signal) && signal[i] < signal[i+d] {
+			return false
+		}
+	}
+	return true
+}
+
+// peakDominance は、ピークのしきい値の基準を「上位のピークの中央値」の何倍で頭打ちにするか（`peakReference`）。
+//
+// ふつうの盤は外枠がいちばん強く、格子線はその 2〜5 割なので、上位 10 本の中央値の 2.5 倍は最大値を超え、
+// **基準は今までどおり最大値のまま**になる。盤の外の強い境目（盤のすぐ下の黒い帯）が 1 本だけ飛び抜けたときに
+// だけ頭打ちが効く。
+const peakDominance = 2.5
+
+// peakTopN は `peakReference` が中央値を取る上位のピークの本数（盤の格子線は 10 本）。
+const peakTopN = 10
+
+// peakReference はピークのしきい値の基準（`findPeaks`）。最大値を、上位 `peakTopN` 本のピークの中央値の
+// `peakDominance` 倍で頭打ちにする。
+func peakReference(signal []int, minDist int) int {
+	maxVal := 0
+	for _, v := range signal {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+	var tops []int
+	for i := range signal {
+		if signal[i] > 0 && isLocalMax(signal, i, minDist) {
+			tops = append(tops, signal[i])
+		}
+	}
+	if len(tops) < 3 {
+		return maxVal
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(tops)))
+	if len(tops) > peakTopN {
+		tops = tops[:peakTopN]
+	}
+	if c := int(float64(tops[len(tops)/2]) * peakDominance); c < maxVal {
+		return c
+	}
+	return maxVal
 }
 
 // pickWithSpacing は投影のピーク列から等間隔 count 本の並びを選ぶ。
