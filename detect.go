@@ -903,8 +903,19 @@ func (br *BoardRegion) extractCellUnclipped(src image.Image, row, col int) image
 	return br.extractCell(src, row, col, false)
 }
 
+// ExtractCellShifted は窓を (dx, dy) px ずらしてマスを切り出す。
+// 余白・盤の外枠でのクリップは `ExtractCell` と同じ規則（クリップするのは
+// **ずらす前の**盤の外枠。ずらした窓が盤の外へ出たぶんは切り落とす）。
+// 空サンプルとの照合で、窓の 1px の食い違いを吸収するために使う（`emptyByShift`）。
+func (br *BoardRegion) ExtractCellShifted(src image.Image, row, col, dx, dy int) image.Image {
+	return br.extractCellAt(src, br.Cells[row][col].Add(image.Pt(dx, dy)), true)
+}
+
 func (br *BoardRegion) extractCell(src image.Image, row, col int, clip bool) image.Image {
-	cell := br.Cells[row][col]
+	return br.extractCellAt(src, br.Cells[row][col], clip)
+}
+
+func (br *BoardRegion) extractCellAt(src image.Image, cell image.Rectangle, clip bool) image.Image {
 	pad := int(float64(cell.Dx()) * cellPadding)
 	expanded := image.Rect(
 		cell.Min.X-pad, cell.Min.Y-pad,
