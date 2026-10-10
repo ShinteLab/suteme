@@ -126,7 +126,7 @@ func TestSourceCoverage(t *testing.T) {
 					continue
 				}
 				total++
-				if predictCellBO(cell, bc, bo, kn) == b.want[r][c] {
+				if predictCellBO(r, c, cell, bc, bo, kn) == b.want[r][c] {
 					ok++
 				}
 			}

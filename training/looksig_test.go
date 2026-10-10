@@ -204,7 +204,7 @@ func TestLookHelpVsDistance(t *testing.T) {
 					continue
 				}
 				total++
-				if predictCellBO(cell, bc, bo, kn) == target.want[r][c] {
+				if predictCellBO(r, c, cell, bc, bo, kn) == target.want[r][c] {
 					ok++
 				}
 			}
@@ -335,7 +335,7 @@ func TestLookGroupingCheck(t *testing.T) {
 					continue
 				}
 				total++
-				if predictCellBO(cell, bc, bo, kn) == target.want[r][c] {
+				if predictCellBO(r, c, cell, bc, bo, kn) == target.want[r][c] {
 					ok++
 				}
 			}

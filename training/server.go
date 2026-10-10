@@ -323,7 +323,7 @@ func predictCells(s *session) (*[9][9]int, *[9][9]map[string]interface{}) {
 			if cell == nil {
 				continue
 			}
-			cat, _ := bo.Classify(cell, bc, m)
+			cat, _ := bo.ClassifyAt(row, col, cell, bc, m)
 			cats[row][col] = int(cat)
 			if m == nil {
 				continue
@@ -1411,7 +1411,7 @@ func handleRecognize(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// 空/向きは盤の地色を基準に判定（低確信のマスは推論器との回転照合）
-			cat, _ := bo.Classify(cell, bc, m)
+			cat, _ := bo.ClassifyAt(row, col, cell, bc, m)
 			if cat == suteme.CellEmpty {
 				cells[row][col] = map[string]interface{}{
 					"label": "none", "confidence": 95,

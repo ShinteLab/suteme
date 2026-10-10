@@ -52,14 +52,15 @@ func wantGrid(s string) (*[9][9]string, error) { return boardGrid(s) }
 
 // predictCell は RecognizeBoard と同じ判断でマスのラベルを返す
 func predictCell(cell image.Image, bc uint8, p suteme.Predictor) string {
-	return predictCellBO(cell, bc, nil, p)
+	return predictCellBO(-1, -1, cell, bc, nil, p)
 }
 
-// predictCellBO は盤ごとの向き判定（BoardOrient）を使う版。bo が nil なら定数版
-func predictCellBO(cell image.Image, bc uint8, bo *suteme.BoardOrient, p suteme.Predictor) string {
+// predictCellBO は盤ごとの向き判定（BoardOrient）を使う版。bo が nil なら定数版。
+// row, col はマスの位置（`BoardOrient.ClassifyAt` が窓をずらして切り出し直すのに使う）
+func predictCellBO(row, col int, cell image.Image, bc uint8, bo *suteme.BoardOrient, p suteme.Predictor) string {
 	var cat suteme.CellCategory
 	if bo != nil {
-		cat, _ = bo.Classify(cell, bc, p)
+		cat, _ = bo.ClassifyAt(row, col, cell, bc, p)
 	} else {
 		cat, _ = suteme.ClassifyCellFor(cell, bc, p)
 	}
@@ -153,7 +154,7 @@ func TestKNNHoldout(t *testing.T) {
 				if cell == nil {
 					continue
 				}
-				got := predictCellBO(cell, bc, bo, kn)
+				got := predictCellBO(r, c, cell, bc, bo, kn)
 				totalCells++
 				if got == want[r][c] {
 					ok++
@@ -294,7 +295,7 @@ func TestKNNCellHoldout(t *testing.T) {
 				if kn == nil {
 					continue
 				}
-				got := predictCellBO(cell, bc, bo, kn)
+				got := predictCellBO(r, c, cell, bc, bo, kn)
 
 				if want[r][c] == suteme.EmptyLabel {
 					emptyTotal++

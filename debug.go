@@ -85,6 +85,10 @@ type CellDebug struct {
 	// 駒サンプルとの照合で駒に戻したなら "match"（`overturnEmpty`）、
 	// 分類器が駒と言ったなら ""。
 	PieceBy string `json:"piece_by,omitempty"`
+	// EmptyBy は分類器が駒と言ったのを空にした材料。窓を ±1px ずらした照合で
+	// 空サンプルと一致したなら "shift"（`emptyByShift`）。ずらさない窓で一致した
+	// ときは従来どおり Class が ClassEmpty になる（こちらは ""）。
+	EmptyBy string `json:"empty_by,omitempty"`
 	// Class は Predictor が返した駒種クラス（推論しなかったら -1、
 	// ClassEmpty なら分類を覆して空にしたということ）。
 	Class int `json:"class"`

@@ -101,7 +101,7 @@ func TestVarietyVsThickness(t *testing.T) {
 					continue
 				}
 				total++
-				if predictCellBO(cell, bc, bo, kn) == tb.want[r][c] {
+				if predictCellBO(r, c, cell, bc, bo, kn) == tb.want[r][c] {
 					ok++
 				}
 			}

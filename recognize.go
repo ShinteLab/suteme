@@ -421,8 +421,13 @@ type ConcurrentPredictor interface {
 // 25% のマスだけ回転照合に回す」という境目（`OrientMarginQuantile`）を
 // 持っていたが、局面が増えて回転照合が単独で分類器を大きく上回ったので
 // 不要になった（`classifyCellInfo` の実測表）。
+//
+// 盤の画像と領域も持つ。窓をずらして切り出し直すため（`emptyByShift`）。
+// 読むだけで書き換えないので、81マスを並列に読んでも共有してよい。
 type BoardOrient struct {
 	emptyMax float64
+	img      image.Image
+	br       *BoardRegion
 }
 
 // NewBoardOrient は盤ごとの空判定の境目を求める。
@@ -430,14 +435,30 @@ func NewBoardOrient(img image.Image, br *BoardRegion, boardColor uint8) *BoardOr
 	if img == nil || br == nil {
 		return &BoardOrient{emptyMax: emptyCoverMax}
 	}
-	return &BoardOrient{emptyMax: BoardEmptyCover(img, br, boardColor)}
+	return &BoardOrient{emptyMax: BoardEmptyCover(img, br, boardColor), img: img, br: br}
 }
 
 // Classify はマスを 空/先手/後手 に分類する。
 // byMatch は向きを回転照合で決めたかどうか（観測用。`CellDebug.OrientBy`）。
+//
+// **マスの位置が分かるなら `ClassifyAt` を使うこと。** こちらは窓をずらした
+// 空の照合（`emptyByShift`）をしない。
 func (bo *BoardOrient) Classify(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
 	c := classifyCellInfo(cell, boardColor, bo.emptyMax, m)
 	return c.cat, c.byMatch
+}
+
+// ClassifyAt は (row, col) のマスを 空/先手/後手 に分類する。cell はそのマスを
+// `ExtractCell` で切り出したもの。`Classify` に加えて、窓を ±1px ずらして
+// 空サンプルと照合する（`emptyByShift`）。`RecognizeBoard` と同じ判断になる。
+func (bo *BoardOrient) ClassifyAt(row, col int, cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
+	c := bo.classifyAt(row, col, cell, boardColor, m)
+	return c.cat, c.byMatch
+}
+
+func (bo *BoardOrient) classifyAt(row, col int, cell image.Image, boardColor uint8, m Predictor) cellClass {
+	c := classifyCellInfo(cell, boardColor, bo.emptyMax, m)
+	return bo.emptyByShift(c, row, col, m)
 }
 
 // EmptyMax はこの盤の空判定の境目（被覆率）を返す（観測用。`Debug.EmptyCover`）。
@@ -445,7 +466,7 @@ func (bo *BoardOrient) EmptyMax() float64 { return bo.emptyMax }
 
 // ClassifyCellFor は推論器も使ってマスを 空/先手/後手 に分類する。
 //
-// **空/先手/後手 を出すところは必ずこれか `BoardOrient.Classify` を通すこと。**
+// **空/先手/後手 を出すところは必ずこれか `BoardOrient.ClassifyAt` を通すこと。**
 // `ClassifyCellWith` は画像処理だけの一次判定で、向きは推論器との回転照合で
 // 決め直される。素の `ClassifyCellWith` を別途呼ぶと `RecognizeBoard` が返す
 // SFEN と食い違う。
@@ -526,6 +547,9 @@ func classifyCellInfo(cell image.Image, boardColor uint8, emptyMax float64, m Pr
 	} else {
 		res.cat = CellPieceDown
 	}
+	if _, isKNN := m.(*KNN); isKNN {
+		res.pieceDist = math.Min(up, down)
+	}
 	return res
 }
 
@@ -535,6 +559,11 @@ type cellClass struct {
 	byMatch    bool    // 向きを回転照合で決めた
 	cover      float64 // 一次マスクの被覆率（観測用。`CellDebug.Cover`）
 	overturned bool    // 分類器の「空」を照合で駒に戻した（`CellDebug.PieceBy`）
+	// pieceDist は駒サンプルへの最近傍の 2 乗距離（向きを決めた近いほう）。
+	// 推論器が `*KNN` で、分類器が駒と言ったマスだけ。それ以外は 0（使わない）。
+	pieceDist float64
+	// shifted は窓をずらした照合で空にしたこと（`CellDebug.EmptyBy`）。
+	shifted bool
 }
 
 const (
@@ -608,6 +637,64 @@ func overturnEmpty(cell image.Image, res cellClass, emptyMax float64, m Predicto
 	return res
 }
 
+// shiftCoverMax は窓をずらした空の照合に回す被覆率の上限（その盤の境目に対する倍率）。
+const shiftCoverMax = 2.0
+
+// shiftOffsets は空の照合で試す窓のずらし量（そのままの窓は `KNN.Predict` が測る）。
+// 縦横の 4 通りだけ。斜めを足しても直るマスは増えなかった（`emptyByShift`）。
+var shiftOffsets = []image.Point{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
+
+// emptyByShift は分類器が駒と言ったマスを、窓を ±1px ずらして空サンプルと照合し直す。
+//
+// **空の一致判定（`emptyMatchMax` = 0.10）は距離の絶対しきい値なので、同じ盤を
+// 学習済みでも窓が 1px 違うだけで届かないことがある。** 木目の強い実盤は空マスの
+// 濃淡が小さく、標準化で縦の細い縞が主な信号になるので、1px 動くと別物のベクトルになる
+// （履歴 `72af86de` の 9八: そのままの窓で 0.112、上へ 1px ずらすと 0.089）。
+// 学習データの `shiftAugment` を増やす道は採らない（空サンプルは学習データの 2/3 を
+// 占めるのでファイルが膨らみ、配布用の書き出しのクラスごとの上限で別の盤の空が押し出される）。
+//
+// 照合するのは **被覆率が境目の `shiftCoverMax` 倍未満**のマスだけ（駒の大半は被覆率が
+// 境目の 2 倍以上ある。速さのためにも要る）。どれかの窓で空サンプルへの最近傍が
+// `emptyMatchMax` 未満、かつ**駒サンプルへの最近傍より近ければ**空にする
+// （ずらさない窓の判定 `KNN.Predict` と同じ条件）。
+//
+// 実測（`TestShiftEmptyDump`。確認済み 238 局面の局面 LOO / 判定済み 83 局面・16 見た目の
+// 見た目 LOO、格子線へ寄せた座標と保存座標の 2 通り）。直る / 壊す マス数:
+//
+//	条件（被覆率の倍率 / 窓）     局面LOO 寄せ / 保存   見た目LOO 寄せ / 保存
+//	1.5 / 縦横                     0/0   0/0            3/0   1/0
+//	**2.0 / 縦横（採用）**        **1/0   1/0**         **3/0   1/0**
+//	2.5 / 縦横                     1/0   1/0            3/0   1/0
+//	3.0 / 縦横                     1/0   1/1            3/0   1/0
+//	無制限 / 縦横                  1/0   1/1            3/0   1/0
+//	無制限 / 縦横（駒との比較なし） 1/2   1/2            3/0   1/0
+//
+// 斜めを足した 8 通りでも全条件で同じ数（縦横で届かないマスは斜めでも届かない）。
+// **駒サンプルとの比較を外してはいけない**（被覆率の高い駒、`413c7504` の 4八 の玉などが
+// 空サンプルと 0.002 でほぼ一致する。比較があれば駒のほうが近いので残る）。
+func (bo *BoardOrient) emptyByShift(c cellClass, row, col int, m Predictor) cellClass {
+	kn, ok := m.(*KNN)
+	if !ok || kn == nil || bo.img == nil || bo.br == nil {
+		return c
+	}
+	if c.cat == CellEmpty || c.overturned || c.pieceDist <= 0 ||
+		c.cover < 0 || c.cover >= bo.emptyMax*shiftCoverMax {
+		return c
+	}
+	for _, d := range shiftOffsets {
+		sc := bo.br.ExtractCellShifted(bo.img, row, col, d.X, d.Y)
+		if sc == nil {
+			continue
+		}
+		full := [2][]float64{CellToInputFull(sc), CellToInputFull(Rotate180(sc))}
+		if e := kn.nearestEmpty(full); e < emptyDistCap && e < c.pieceDist {
+			c.cat, c.shifted = CellEmpty, true
+			return c
+		}
+	}
+	return c
+}
+
 // RecognizeBoard は盤面全体を認識してSFENを返す
 //
 // 空/駒は ClassifyCellWith が判定し、向きは Predictor との回転照合
@@ -650,7 +737,7 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 			return
 		}
 
-		cc := classifyCellInfo(cell, bc, bo.emptyMax, m)
+		cc := bo.classifyAt(r, c, cell, bc, m)
 		cat := cc.cat
 		cur.Category, cur.Cover = cat, cc.cover
 		if cc.byMatch {
@@ -658,6 +745,9 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 		}
 		if cc.overturned {
 			cur.PieceBy = "match"
+		}
+		if cc.shifted {
+			cur.EmptyBy = "shift"
 		}
 		if cat == CellEmpty {
 			return
