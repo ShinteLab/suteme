@@ -93,6 +93,10 @@ type CellDebug struct {
 	// （空きは「駒が無い」という読みなので、手の根拠になってしまう）。
 	// 呼び出し側は Hidden のマスを盤面の根拠に使わないこと（判定は visible.go）。
 	Hidden bool `json:"hidden,omitempty"`
+	// Cover は分類器の一次マスクの被覆率（地色と異なる画素の割合）。
+	// `Debug.EmptyCover` 未満なら分類器は空と判定している。**-1 は測れなかった**
+	// （マスのほぼ全体が盤の地色と違う。直前の手の色付けなど）。
+	Cover float64 `json:"cover"`
 }
 
 // Debug は認識1回分の観測情報。
@@ -109,6 +113,8 @@ type Debug struct {
 	Confidence float64 `json:"confidence"`
 	// BoardColor は盤の地色（分類の基準にした輝度の中央値）。
 	BoardColor uint8 `json:"board_color"`
+	// EmptyCover はこの盤の空判定の境目（被覆率。`BoardEmptyCover`）。
+	EmptyCover float64 `json:"empty_cover"`
 	// Predictor は使った駒種推論器。
 	Predictor PredictorDebug `json:"predictor"`
 	// Cells は81マスの認識過程（行優先）。

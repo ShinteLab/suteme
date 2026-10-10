@@ -107,10 +107,27 @@ func ClassifyCellDetail(cell image.Image, boardColor uint8) (CellCategory, float
 // classifyCellDetail は空判定のしきい値を差し替えられる ClassifyCellDetail。
 // 盤全体を扱えるなら adaptiveEmptyCover で求めた値を渡す。
 func classifyCellDetail(cell image.Image, boardColor uint8, emptyMax float64) (CellCategory, float64) {
-	local := cellBoardColor(cell)
-	return classifyCellMask(cell, boardColor, local,
-		newCellMaskSign(cell, local, boardColor, signBoth), emptyMax)
+	cat, margin, _ := classifyCellCover(cell, boardColor, emptyMax)
+	return cat, margin
 }
+
+// classifyCellCover は classifyCellDetail に加えて一次マスクの被覆率を返す。
+// **マスクが作れなかったマスでは -1**（`coverUnmeasured`。マスのほぼ全体が
+// 地色と違って全列がグリッド線として落ちた、など）。被覆率は空判定の材料そのもので、
+// 分類器が空と言ったマスを推論器に回すかどうかと観測（`CellDebug.Cover`）に使う。
+func classifyCellCover(cell image.Image, boardColor uint8, emptyMax float64) (CellCategory, float64, float64) {
+	local := cellBoardColor(cell)
+	m := newCellMaskSign(cell, local, boardColor, signBoth)
+	cover := float64(coverUnmeasured)
+	if m != nil {
+		cover = m.cover
+	}
+	cat, margin := classifyCellMask(cell, boardColor, local, m, emptyMax)
+	return cat, margin, cover
+}
+
+// coverUnmeasured は被覆率を測れなかったマスの印（`classifyCellCover`）。
+const coverUnmeasured = -1
 
 // classifyCellMask は一次マスク（signBoth）を作り終えたところから先。
 // 盤ごとのしきい値を決めるために 81 マスの被覆率を先に取る呼び出し側

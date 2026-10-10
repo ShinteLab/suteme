@@ -185,7 +185,7 @@ func Recognize(img image.Image, opts ...Option) (*Result, error) {
 		return nil, fmt.Errorf("%w（信頼度 %.0f%%）", ErrBoardNotFound, conf*100)
 	}
 
-	board, cells, bc := recognizeBoardDetail(img, br, p)
+	board, cells, bc, emptyMax := recognizeBoardDetail(img, br, p)
 	info := sfen.Inspect(board, cfg.checks)
 	r := newResult(board, conf, info, cfg)
 	r.Debug = &Debug{
@@ -194,6 +194,7 @@ func Recognize(img image.Image, opts ...Option) (*Result, error) {
 		RegionSource: src,
 		Confidence:   conf,
 		BoardColor:   bc,
+		EmptyCover:   emptyMax,
 		Predictor:    predictorDebug(p),
 		Cells:        cells,
 	}

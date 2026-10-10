@@ -436,8 +436,12 @@ func NewBoardOrient(img image.Image, br *BoardRegion, boardColor uint8) *BoardOr
 // Classify はマスを 空/先手/後手 に分類する。
 // byMatch は向きを回転照合で決めたかどうか（観測用。`CellDebug.OrientBy`）。
 func (bo *BoardOrient) Classify(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
-	return classifyCellOrient(cell, boardColor, bo.emptyMax, m)
+	c := classifyCellInfo(cell, boardColor, bo.emptyMax, m)
+	return c.cat, c.byMatch
 }
+
+// EmptyMax はこの盤の空判定の境目（被覆率）を返す（観測用。`Debug.EmptyCover`）。
+func (bo *BoardOrient) EmptyMax() float64 { return bo.emptyMax }
 
 // ClassifyCellFor は推論器も使ってマスを 空/先手/後手 に分類する。
 //
@@ -449,7 +453,8 @@ func (bo *BoardOrient) Classify(cell image.Image, boardColor uint8, m Predictor)
 // 盤全体を扱えるなら `NewBoardOrient` のほうが精度が高い
 // （空判定の境目を盤ごとに引き直せる）。
 func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellCategory, byMatch bool) {
-	return classifyCellOrient(cell, boardColor, emptyCoverMax, m)
+	c := classifyCellInfo(cell, boardColor, emptyCoverMax, m)
+	return c.cat, c.byMatch
 }
 
 // classifyCellOrient は空/駒を分類器で決め、駒の向きは回転照合で決める。
@@ -493,10 +498,11 @@ func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellC
 // **代償は推論時間。** 全駒マスで最近傍探索を 2 回（そのまま / 180度）走らせるので、
 // 分位点で 25% だけ回していた頃より増える。実測は `TestKNNHoldout` で
 // 219s → 243s（+11%。141局面 × 81マス、駒種の推論も含めた全体）。
-func classifyCellOrient(cell image.Image, boardColor uint8, emptyMax float64, m Predictor) (CellCategory, bool) {
-	cat, _ := classifyCellDetail(cell, boardColor, emptyMax)
+func classifyCellInfo(cell image.Image, boardColor uint8, emptyMax float64, m Predictor) cellClass {
+	cat, _, cover := classifyCellCover(cell, boardColor, emptyMax)
+	res := cellClass{cat: cat, cover: cover}
 	if cat == CellEmpty {
-		return cat, false
+		return res
 	}
 	om, ok := m.(OrientationMatcher)
 	if !ok {
@@ -504,18 +510,28 @@ func classifyCellOrient(cell image.Image, boardColor uint8, emptyMax float64, m 
 		// （`orient_data_v1.bin`。NN を配る構成のための穴埋め。orient.go）。
 		// それも無ければ分類器の判定がそのまま残る
 		if om = defaultOrientMatcher(); om == nil {
-			return cat, false
+			return res
 		}
 	}
 	up := om.PieceDistance(cell)
 	down := om.PieceDistance(Rotate180(cell))
 	if math.IsInf(up, 1) && math.IsInf(down, 1) {
-		return cat, false
+		return res
 	}
+	res.byMatch = true
 	if up <= down {
-		return CellPieceUp, true
+		res.cat = CellPieceUp
+	} else {
+		res.cat = CellPieceDown
 	}
-	return CellPieceDown, true
+	return res
+}
+
+// cellClass は `classifyCellInfo` の結果。
+type cellClass struct {
+	cat     CellCategory
+	byMatch bool    // 向きを回転照合で決めた
+	cover   float64 // 一次マスクの被覆率（観測用。`CellDebug.Cover`）
 }
 
 // RecognizeBoard は盤面全体を認識してSFENを返す
@@ -527,7 +543,7 @@ func classifyCellOrient(cell image.Image, boardColor uint8, emptyMax float64, m 
 // 画素の並びは既知の空マスと一致するため、学習済みの空パターンのほうが確かなため。
 // 逆方向（分類が空・推論が駒）は向きが決まらないので覆さない。
 func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
-	board, _, _ := recognizeBoardDetail(img, br, m)
+	board, _, _, _ := recognizeBoardDetail(img, br, m)
 	return board
 }
 
@@ -539,7 +555,7 @@ func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 // k-NN は全件走査なので学習データが増えるほどここが伸びる。
 // **結果はマスごとに決まった場所へ書く**ので、並びも答えも逐次版と同じ
 // （並列にした痕跡が出力に出ないのが正しい）。
-func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string, []CellDebug, uint8) {
+func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string, []CellDebug, uint8, float64) {
 	// 各マスの SFEN 表記("" は空マス)を組み立て、盤面文字列化(空マスの
 	// ランレングス圧縮・段区切り)は core/sfen に委譲する。
 	var grid [9][9]string
@@ -558,9 +574,10 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 			return
 		}
 
-		cat, byMatch := bo.Classify(cell, bc, m)
-		cur.Category = cat
-		if byMatch {
+		cc := classifyCellInfo(cell, bc, bo.emptyMax, m)
+		cat := cc.cat
+		cur.Category, cur.Cover = cat, cc.cover
+		if cc.byMatch {
 			cur.OrientBy = "match"
 		}
 		if cat == CellEmpty {
@@ -598,7 +615,7 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 	})
 
 	board := sfen.FormatBoard(func(rank, file int) string { return grid[rank][file] })
-	return board, cells, bc
+	return board, cells, bc, bo.emptyMax
 }
 
 // recognizeCells は 81マスの処理 fn(0..80) を走らせる。
