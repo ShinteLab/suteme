@@ -1,5 +1,3 @@
-//go:build ignore
-
 // version は suteme のリリース（バージョンの更新・コミット・タグ打ち）を 1 コマンドにする。
 // _cmd/version（このファイルの隣）が唯一の正。
 //
@@ -18,9 +16,6 @@
 //
 // push はしない。proxy.golang.org は「無い」を覚えるので、取りに行くのは push を
 // 確かめてから（AGENTS.md）。最後に push のコマンドを表示する。
-//
-// `_cmd/main.go` と同じディレクトリにあるので、ビルドタグ ignore で通常のビルドから外してある
-// （ファイルを指定した go run はビルドタグに依らず通る）。
 package main
 
 import (
