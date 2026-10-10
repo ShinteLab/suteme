@@ -18,6 +18,29 @@ import パスは `github.com/ShinteLab/suteme`, `github.com/ShinteLab/suteme/tra
 **課題は `TODO.md` にまとめてある**（未解決のものはすべてそちら）。直したものの経緯と
 試して駄目だったものの記録は、このファイル末尾の「直した課題の記録」。
 
+### リリース（`_cmd/version.go`）
+
+**suteme の版は `_cmd/version` が唯一の正**（中身は `0.2.6` のような `X.Y.Z` だけ）。
+タグ打ちは手でやらずに次のコマンドで行う（どのディレクトリから実行してもよい）:
+
+```
+go run _cmd/version.go          # v+今の版のタグがあれば patch を上げる。無ければ今の版のまま
+go run _cmd/version.go -bump    # patch / minor / major を対話で選ぶ（Enter = patch）
+go run _cmd/version.go 1.2.3    # 版を指定する
+go run _cmd/version.go -print   # 今の版を表示するだけ
+```
+
+やることは順に「go.mod に `replace` が無いか確かめる → `go build ./...` →
+`_cmd/version` を書き換えてそれだけをコミット（`chore: suteme X.Y.Z`）→ HEAD に軽量タグ `vX.Y.Z`」。
+途中で失敗したらそこで止まり、何も書き換えない。
+
+- **push はしない。** 最後に `git push origin <ブランチ> vX.Y.Z` を表示するので、それを手で流す
+  （push の前に使う側から取りに行かないこと。親の AGENTS.md）
+- 直前のリリースのあと何もコミットしていなければ何もしない（同じ中身で patch だけ上がるのを防ぐ）
+- 上げた先のタグがすでにあれば止まる（`_cmd/version` とタグがずれている。手で直す）
+- 未コミットの変更があれば知らせる（**タグのコミットには入らない**ので、先にコミットしておく）
+- `_cmd/main.go` と同じディレクトリにあるので `//go:build ignore` で通常のビルドから外してある
+
 依存:
 
 - `github.com/goml/gobrain` — 駒種認識の NN
@@ -126,6 +149,7 @@ AGENTS.md の数字の出所なので、「速いが少し違う」は記録を�
 | `training/orient.go` | **向き照合データの間引き**: `BuildOrientData`（配布用に学習データから抜く）|
 | `training/unslip.go` | **盤の縁の帯の教師データ**: 履歴の盤面座標から機械的に作る（新たなラベル付けは不要）|
 | `_cmd/suteme-training/` | 学習用Webサーバの起動コマンド（`training.Serve` を呼ぶだけ）|
+| `_cmd/version.go` / `_cmd/version` | **リリース**: 版の更新・コミット・タグ打ち（`go run _cmd/version.go`）/ 版そのもの |
 | `komadai.go` | **駒台推定**: `ValidatePieces` / `CountFromSFEN`（盤面 + 駒台 = 全駒 検証）|
 | `imaging.go` | グレースケール変換・二値化・`BoxBlur`（分離＋窓和）・Sobel・`Rotate180` |
 | `draw.go` | Bresenham 線描画・PNG 保存 |
