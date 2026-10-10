@@ -185,6 +185,7 @@ body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; pa
 }
 .tab-btn.active { color: #4cc9f0; border-bottom-color: #4cc9f0; }
 .tab-btn:hover:not(.active) { color: #bbb; }
+.app-version { margin-left: auto; align-self: center; color: #666; font-size: 12px; font-family: monospace; }
 /* 入力画像と読み取った盤面。縦の長さが違う（横長の画像だと短い）ので、
    ラベルは上で揃えたまま、画像は列の中で縦中央に置く */
 .recog-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -230,6 +231,7 @@ body { font-family: "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; pa
   <button class="tab-btn" id="tab-btn-look" onclick="switchTab('look')">見た目</button>
   <button class="tab-btn" id="tab-btn-eval" onclick="switchTab('eval')">評価</button>
   <button class="tab-btn" id="tab-btn-api" onclick="switchTab('api')">API</button>
+  <span class="app-version" id="app-version"></span>
 </div>
 
 <div id="tab-eval" style="display:none;max-width:var(--page-width);margin:0 auto 20px">
@@ -2987,6 +2989,16 @@ async function runEvaluation() {
     btn.style.opacity = '1';
   }
 }
+
+// suteme の版（_cmd/version）。コミットはビルド情報があるときだけ（go run では付かないことがある）
+(async () => {
+  try {
+    const v = await (await fetch('/api/version')).json();
+    let text = 'suteme ' + v.version;
+    if (v.commit) text += ' (' + v.commit + (v.modified ? '+変更あり' : '') + ')';
+    document.getElementById('app-version').textContent = text;
+  } catch (_) {}
+})();
 
 </script>
 </body>

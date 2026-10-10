@@ -40,6 +40,13 @@ go run _cmd/version.go -print   # 今の版を表示するだけ
 - 上げた先のタグがすでにあれば止まる（`_cmd/version` とタグがずれている。手で直す）
 - 未コミットの変更があれば知らせる（**タグのコミットには入らない**ので、先にコミットしておく）
 
+**版はコードから `suteme.Version()` で読める**（ルートの `version.go` が `_cmd/version` を `go:embed` する）。
+学習サーバはタブの右端に `suteme 0.2.7 (e8ba346)` の形で出す（`/api/version`。ローカル限定）。
+- **`training` からは `_cmd/version` を直接埋め込めない**（`go:embed` はそのパッケージのディレクトリより下しか見ない）
+  ので、ルートのパッケージで埋め込んで公開している
+- リリースの間のコミットでも版は直前のリリースのままなので、**ビルド情報があればコミットを添える**
+  （`go build` / `go install` したもの。未コミットの変更があれば「+変更あり」）。`go run` では付かない
+
 依存:
 
 - `github.com/goml/gobrain` — 駒種認識の NN
@@ -139,6 +146,7 @@ AGENTS.md の数字の出所なので、「速いが少し違う」は記録を�
 | `knn.go` | **駒種認識(k-NN)**: 学習不要・最近傍 1 件で駒種を決める。現在の主認識器。`Predictor` IF・1 位と 2 位の駒種の距離（`nearestTwo` / `dist2`）と確信度（`pieceConf`）|
 | `training/training.go` | **学習パッケージ**: `Train` / `BalanceData` / `ClassDistribution` / `SaveModel` |
 | `training/server.go` | **学習用Webサーバ**: `Serve(port)`・APIハンドラ・履歴管理・UI embed |
+| `training/version.go` | **画面に出す版**: `/api/version`（版 + ビルド情報のコミット）|
 | `training/logger.go` | **ログの差し込み口**: `SetLogger`（受け口は `*slog.Logger` だけ。設定は持たない）|
 | `training/api.go` | **外部からの訓練データ登録**: アクセス制御・`/api/status`・`/api/settings`・`/api/register` |
 | `training/evaluate.go` | **認識率の記録**: 保存済み局面の正解と突き合わせ・盤面検出のずれ・実行ごとの記録（評価タブ）|
@@ -148,6 +156,7 @@ AGENTS.md の数字の出所なので、「速いが少し違う」は記録を�
 | `training/orient.go` | **向き照合データの間引き**: `BuildOrientData`（配布用に学習データから抜く）|
 | `training/unslip.go` | **盤の縁の帯の教師データ**: 履歴の盤面座標から機械的に作る（新たなラベル付けは不要）|
 | `_cmd/suteme-training/` | 学習用Webサーバの起動コマンド（`training.Serve` を呼ぶだけ）|
+| `version.go` | **版**: `Version()`（`_cmd/version` を埋め込む）|
 | `_cmd/version.go` / `_cmd/version` | **リリース**: 版の更新・コミット・タグ打ち（`go run _cmd/version.go`）/ 版そのもの |
 | `komadai.go` | **駒台推定**: `ValidatePieces` / `CountFromSFEN`（盤面 + 駒台 = 全駒 検証）|
 | `imaging.go` | グレースケール変換・二値化・`BoxBlur`（分離＋窓和）・Sobel・`Rotate180` |
@@ -1908,6 +1917,7 @@ go run ./_cmd/suteme-training/ -port 8888 [データディレクトリ]
 | `POST /api/savesession` | 現在のセッション（画像 + SFEN + 盤面座標）を保存。`history_id` があれば**上書き**。入力済みの盤面を上書きするなら `based_on`（画面が読み込んだ盤面）を名乗ること＝名乗らなければ **409**（`checkBasedOn`）|
 | `GET /api/status` | 登録を受け付けられる状態か（**`/api/health` ではない**）|
 | `GET,POST /api/settings` | 外部公開・トークンの設定（ローカル限定）|
+| `GET /api/version` | suteme の版（`suteme.Version()`）と、ビルド情報があればコミット。タブの右端に出す |
 | `POST /api/register` | **外部からの訓練データ登録**（画像 + SFEN + 盤面座標 + 任意の `bounds_by`）→ 未確認として履歴に入る |
 | `POST /api/handcheck` | 「盤面 + 手入力した持ち駒」を駒種ごとに突き合わせる（参考情報） |
 | `POST /api/export` | **配布用の書き出し**（`{ per_class }`。既定 `CompactPerClass`）→ `dist/` に間引いた学習データと帯 |

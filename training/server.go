@@ -175,6 +175,8 @@ var (
 // NN モデル（suteme.DefaultModelFile）を自動ロードする。
 // **ファイル名を直に書かないこと**（版が上がると嘘になる）
 func Serve(port string) error {
+	v := currentVersion()
+	logger().Info("suteme", "version", v.Version, "commit", v.Commit, "modified", v.Modified)
 	loadSettings()
 	// 学習データがあれば k-NN を構築（学習処理は不要）
 	data, dataPath := loadExistingTrainingData()
@@ -234,6 +236,7 @@ func Serve(port string) error {
 	mux.HandleFunc("/api/status", handleStatus)
 	mux.HandleFunc("/api/settings", handleSettings)
 	mux.HandleFunc("/api/register", handleRegister)
+	mux.HandleFunc("/api/version", handleVersion)
 
 	// リスナは常に全インターフェースで張り、外部公開のオン/オフは
 	// リクエストごとに判定する（トグルが再起動なしで即時に効く）
