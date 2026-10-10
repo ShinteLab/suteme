@@ -21,6 +21,20 @@ func ValidateBoard(img image.Image, br *BoardRegion) float64 {
 	if br == nil {
 		return 0
 	}
+	if p, ok := img.(*grayPlaned); ok {
+		if v, ok := p.confs.Load(*br); ok {
+			return v.(float64)
+		}
+		v := validateBoard(p, br)
+		p.confs.Store(*br, v)
+		return v
+	}
+	return validateBoard(img, br)
+}
+
+func validateBoard(img image.Image, br *BoardRegion) float64 {
+	// 均一性と整合度が読む範囲の輝度を 1 回だけ作る（grayplane.go）
+	img = withGrayPlane(img, uniformityArea(img, br))
 	u := cellUniformity(img, br)
 	if u == 0 {
 		return 0
@@ -31,7 +45,7 @@ func ValidateBoard(img image.Image, br *BoardRegion) float64 {
 // cellUniformity は81マスの背景色（中央値）のうち、
 // 盤の基準色に近いものの割合を返す。
 //
-// **マスの切り出しは `extractCellUnclipped`（盤の外枠より外も含める版）を使う。**
+// **マスの範囲は `unclippedCellRect`（盤の外枠より外も含める）を使う。**
 // ここは「この領域が本当に盤か」を測る場所で、領域が間違っている前提で呼ばれる。
 // 外枠で切ると外れた候補も自分の箱の中しか見なくなり、均一に見えてしまう。
 func cellUniformity(img image.Image, br *BoardRegion) float64 {
@@ -47,11 +61,13 @@ func cellUniformitySkip(img image.Image, br *BoardRegion, skip *[9][9]bool) floa
 			if skip != nil && skip[r][c] {
 				continue
 			}
-			cell := br.extractCellUnclipped(img, r, c)
-			if cell == nil {
+			// マスの余白込みの範囲の輝度の中央値。輝度は `rgbaGray`
+			// （`*image.RGBA` へ写して測るのと同じ値。`TestCellUniformityMatchesCopy`）
+			rect := unclippedCellRect(img, br, r, c)
+			if rect.Empty() {
 				return 0
 			}
-			medians = append(medians, medianBrightness(cell))
+			medians = append(medians, medianGrayRect(rgbaGray(img, rect), rect))
 		}
 	}
 
@@ -80,6 +96,31 @@ func cellUniformitySkip(img image.Image, br *BoardRegion, skip *[9][9]bool) floa
 		return 0
 	}
 	return float64(ok) / float64(len(medians))
+}
+
+// unclippedCellRect は均一性を測るマスの範囲（`ExtractCell` と同じ 15% の余白を付け、
+// 画像の範囲では切るが**盤の外枠では切らない**）。
+//
+// **`ExtractCell` へ寄せないこと。** ここは「この領域が本当に盤か」を測るもので、
+// **領域が間違っている前提**で呼ばれる。外枠で切ると外れた候補も自分の箱の中しか
+// 見なくなり、盤の外の畳や UI が写り込んでいても均一に見えてしまう。
+// 実測（`5795bf16`）: クリップした版で測ると、正しい候補（dx=0.00）ではなく
+// 1.01マスずれた候補が信頼度 1.00 で選ばれるようになる。
+func unclippedCellRect(img image.Image, br *BoardRegion, r, c int) image.Rectangle {
+	cell := br.Cells[r][c]
+	pad := int(float64(cell.Dx()) * cellPadding)
+	return image.Rect(cell.Min.X-pad, cell.Min.Y-pad, cell.Max.X+pad, cell.Max.Y+pad).Intersect(img.Bounds())
+}
+
+// uniformityArea は `ValidateBoard` が読む範囲（81マスの余白込みの切り出しと盤の外枠の和）。
+func uniformityArea(img image.Image, br *BoardRegion) image.Rectangle {
+	a := br.Bounds.Intersect(img.Bounds())
+	for r := 0; r < 9; r++ {
+		for c := 0; c < 9; c++ {
+			a = a.Union(unclippedCellRect(img, br, r, c))
+		}
+	}
+	return a
 }
 
 // gridAlignFull は gridAlignment の値をこれ以上なら整合度 1.0 とみなす基準。
@@ -132,13 +173,7 @@ func gridAlignment(img image.Image, br *BoardRegion) float64 {
 		return 0
 	}
 
-	sub := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			sub.Set(x-b.Min.X, y-b.Min.Y, img.At(x, y))
-		}
-	}
-	rowProj, colProj := lineProjections(BoxBlur(ConvertGray(sub), 2))
+	rowProj, colProj := lineProjections(BoxBlur(rgbaGray(img, b), 2))
 
 	// br.Bounds は画像からはみ出しうるので、投影の添字は b.Min からの相対にする
 	v, vOn := axisAlignmentOn(rowProj, float64(br.Bounds.Min.Y-b.Min.Y), float64(br.Bounds.Dy())/9)
@@ -223,23 +258,28 @@ func lineProjectionsAxes(blurred *image.Gray, wantRow, wantCol bool) (row, col [
 		return row, col
 	}
 
-	at := func(x, y int) int { return int(blurred.GrayAt(x+b.Min.X, y+b.Min.Y).Y) }
-	var gx, gy []int
+	// 画素は Pix から直接読む（GrayAt は 1 回ごとに範囲の確認と PixOffset を回す）
+	pix, stride, base := blurred.Pix, blurred.Stride, blurred.PixOffset(b.Min.X, b.Min.Y)
+	at := func(x, y int) int { return int(pix[base+y*stride+x]) }
+	// 勾配は中央値のヒストグラムに入れるときに 255 で頭打ちにするので、
+	// 先に頭打ちにして 1 バイトで持つ（中央値は同じ）
+	var gx, gy []uint8
 	if wantCol {
-		gx = make([]int, w*h)
+		gx = make([]uint8, w*h)
 	}
 	if wantRow {
-		gy = make([]int, w*h)
+		gy = make([]uint8, w*h)
 	}
+	clamp := func(v int) uint8 { return uint8(minInt(absInt(v), 255)) }
 	for y := 1; y < h-1; y++ {
 		for x := 1; x < w-1; x++ {
 			tl, tc, tr := at(x-1, y-1), at(x, y-1), at(x+1, y-1)
 			bl, bc, br := at(x-1, y+1), at(x, y+1), at(x+1, y+1)
 			if wantCol {
-				gx[y*w+x] = absInt(-tl - 2*at(x-1, y) - bl + tr + 2*at(x+1, y) + br)
+				gx[y*w+x] = clamp(-tl - 2*at(x-1, y) - bl + tr + 2*at(x+1, y) + br)
 			}
 			if wantRow {
-				gy[y*w+x] = absInt(-tl - 2*tc - tr + bl + 2*bc + br)
+				gy[y*w+x] = clamp(-tl - 2*tc - tr + bl + 2*bc + br)
 			}
 		}
 	}
@@ -258,8 +298,8 @@ func lineProjectionsAxes(blurred *image.Gray, wantRow, wantCol bool) (row, col [
 	if wantRow {
 		for y := 0; y < h; y++ {
 			hist = [256]int{}
-			for x := 0; x < w; x++ {
-				hist[minInt(gy[y*w+x], 255)]++
+			for _, v := range gy[y*w : (y+1)*w] {
+				hist[v]++
 			}
 			row[y] = median(w)
 		}
@@ -268,7 +308,7 @@ func lineProjectionsAxes(blurred *image.Gray, wantRow, wantCol bool) (row, col [
 		for x := 0; x < w; x++ {
 			hist = [256]int{}
 			for y := 0; y < h; y++ {
-				hist[minInt(gx[y*w+x], 255)]++
+				hist[gx[y*w+x]]++
 			}
 			col[x] = median(h)
 		}
@@ -349,6 +389,59 @@ func axisAlignmentOn(proj []float64, origin, span float64) (float64, float64) {
 	return (on - off) / (on + off), on
 }
 
+// peakTable は投影の各位置について「±gridPeakTol の中の最大（0 未満にはしない）」を
+// 先に引いた表。`axisAlignmentOn` の peak と同じ値を返すので、同じ投影の上で
+// 窓を何通りも測る呼び出し（`refineAxis`）はこちらを使う。足す順序も同じなので
+// 結果はビット単位で一致する（`TestPeakTableMatchesAxisAlignment`）。
+type peakTable struct {
+	max []float64 // max[p+gridPeakTol] = peak(p)
+}
+
+func newPeakTable(proj []float64) *peakTable {
+	t := &peakTable{max: make([]float64, len(proj)+2*gridPeakTol)}
+	for k := range t.max {
+		p := k - gridPeakTol
+		best := 0.0
+		for d := -gridPeakTol; d <= gridPeakTol; d++ {
+			if i := p + d; i >= 0 && i < len(proj) && proj[i] > best {
+				best = proj[i]
+			}
+		}
+		t.max[k] = best
+	}
+	return t
+}
+
+func (t *peakTable) peak(pos float64) float64 {
+	if k := int(pos) + gridPeakTol; k >= 0 && k < len(t.max) {
+		return t.max[k]
+	}
+	return 0
+}
+
+// alignment は axisAlignment と同じ値を返す。
+func (t *peakTable) alignment(origin, span float64) float64 {
+	even, odd, off := 0.0, 0.0, 0.0
+	for i := 0; i <= 9; i++ {
+		if i%2 == 0 {
+			even += t.peak(origin + span*float64(i))
+		} else {
+			odd += t.peak(origin + span*float64(i))
+		}
+	}
+	for i := 0; i < 9; i++ {
+		for _, fr := range offFractions {
+			off += t.peak(origin + span*(float64(i)+fr))
+		}
+	}
+	on := math.Min(even, odd) / 5
+	off /= float64(9 * len(offFractions))
+	if on+off == 0 {
+		return 0
+	}
+	return (on - off) / (on + off)
+}
+
 // weakestLineRatio は10本の境界線のうち**いちばん弱い線**と off レベルの比を
 // -1.0〜1.0 で返す。`axisAlignment` と同じ (on-off)/(on+off) だが、
 // on を「最小」で採る。
@@ -394,21 +487,4 @@ func weakestLineRatio(proj []float64, origin, span float64) float64 {
 		return 0
 	}
 	return (on - off) / (on + off)
-}
-
-func medianBrightness(img image.Image) uint8 {
-	bounds := img.Bounds()
-	pixels := make([]int, 0, bounds.Dx()*bounds.Dy())
-
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			pixels = append(pixels, int(grayValue(img.At(x, y))))
-		}
-	}
-
-	sort.Ints(pixels)
-	if len(pixels) == 0 {
-		return 0
-	}
-	return uint8(pixels[len(pixels)/2])
 }

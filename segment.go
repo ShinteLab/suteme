@@ -229,25 +229,35 @@ func horizontalLines(blurred *image.Gray) []lineSegment {
 		return nil
 	}
 
+	// 画素は Pix から直接読む。分位は全値を並べず度数で取る
+	// （|gy| は 0..4*255 に収まる。並べた列の k 番目と同じ値になる。`TestHorizontalLinesMatchesNaive`）
 	gy := make([]int, w*h)
-	vals := make([]int, 0, w*h)
+	var hist [4*255 + 1]int
+	n := 0
 	for y := 1; y < h-1; y++ {
+		up := blurred.Pix[blurred.PixOffset(b.Min.X, b.Min.Y+y-1):]
+		dn := blurred.Pix[blurred.PixOffset(b.Min.X, b.Min.Y+y+1):]
 		for x := 1; x < w-1; x++ {
-			X, Y := x+b.Min.X, y+b.Min.Y
-			v := -int(blurred.GrayAt(X-1, Y-1).Y) - 2*int(blurred.GrayAt(X, Y-1).Y) - int(blurred.GrayAt(X+1, Y-1).Y) +
-				int(blurred.GrayAt(X-1, Y+1).Y) + 2*int(blurred.GrayAt(X, Y+1).Y) + int(blurred.GrayAt(X+1, Y+1).Y)
+			v := -int(up[x-1]) - 2*int(up[x]) - int(up[x+1]) +
+				int(dn[x-1]) + 2*int(dn[x]) + int(dn[x+1])
 			if v < 0 {
 				v = -v
 			}
 			gy[y*w+x] = v
-			vals = append(vals, v)
+			hist[v]++
+			n++
 		}
 	}
-	if len(vals) == 0 {
+	if n == 0 {
 		return nil
 	}
-	sort.Ints(vals)
-	thresh := vals[int(float64(len(vals)-1)*segEdgePercentile)]
+	k := int(float64(n-1) * segEdgePercentile)
+	thresh := 0
+	for acc := 0; thresh < len(hist); thresh++ {
+		if acc += hist[thresh]; acc > k {
+			break
+		}
+	}
 	if thresh < 1 {
 		thresh = 1
 	}

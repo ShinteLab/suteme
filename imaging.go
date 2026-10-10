@@ -52,35 +52,46 @@ func BoxBlur(src *image.Gray, radius int) *image.Gray {
 	size := 2*radius + 1
 	div := size * size
 
-	// 横方向の窓和。割らずに int のまま持つ
-	rowSum := make([]int, w*h)
+	// 横方向の窓和。割らずに整数のまま持つ（最大 (2r+1)*255。int32 で足りる）
+	rowSum := make([]int32, w*h)
 	for y := 0; y < h; y++ {
 		base := src.PixOffset(bounds.Min.X, bounds.Min.Y+y)
 		pix := src.Pix[base : base+w]
 		out := rowSum[y*w : (y+1)*w]
-		sum := 0
+		sum := int32(0)
 		for dx := -radius; dx <= radius; dx++ {
-			sum += int(pix[clampIndex(dx, w)])
+			sum += int32(pix[clampIndex(dx, w)])
 		}
 		out[0] = sum
 		for x := 1; x < w; x++ {
-			sum -= int(pix[clampIndex(x-radius-1, w)])
-			sum += int(pix[clampIndex(x+radius, w)])
+			sum -= int32(pix[clampIndex(x-radius-1, w)])
+			sum += int32(pix[clampIndex(x+radius, w)])
 			out[x] = sum
 		}
 	}
 
-	// 縦方向の窓和。ここで初めて div で割る
-	for x := 0; x < w; x++ {
-		sum := 0
-		for dy := -radius; dy <= radius; dy++ {
-			sum += rowSum[clampIndex(dy, h)*w+x]
+	// 縦方向の窓和。ここで初めて div で割る。
+	// **行ごとに進める**（列ごとに縦へ舐めると rowSum を w 飛びに読むことになる）。
+	// 列ごとの窓和を 1 行ずつずらすだけなので、足す値も結果も列ごとに進めた場合と同じ
+	colSum := make([]int32, w)
+	for dy := -radius; dy <= radius; dy++ {
+		r := rowSum[clampIndex(dy, h)*w : clampIndex(dy, h)*w+w]
+		for x, v := range r {
+			colSum[x] += v
 		}
-		dst.Pix[dst.PixOffset(bounds.Min.X+x, bounds.Min.Y)] = uint8(sum / div)
-		for y := 1; y < h; y++ {
-			sum -= rowSum[clampIndex(y-radius-1, h)*w+x]
-			sum += rowSum[clampIndex(y+radius, h)*w+x]
-			dst.Pix[dst.PixOffset(bounds.Min.X+x, bounds.Min.Y+y)] = uint8(sum / div)
+	}
+	d := int32(div)
+	for y := 0; y < h; y++ {
+		if y > 0 {
+			sub := rowSum[clampIndex(y-radius-1, h)*w:][:w]
+			add := rowSum[clampIndex(y+radius, h)*w:][:w]
+			for x := range colSum {
+				colSum[x] += add[x] - sub[x]
+			}
+		}
+		out := dst.Pix[dst.PixOffset(bounds.Min.X, bounds.Min.Y+y):][:w]
+		for x, s := range colSum {
+			out[x] = uint8(s / d)
 		}
 	}
 	return dst
@@ -128,18 +139,24 @@ func Sobel(src *image.Gray) *image.Gray {
 	bounds := src.Bounds()
 	dst := image.NewGray(bounds)
 
+	// 画素は Pix から直接読み書きする（GrayAt / SetGray は 1 回ごとに範囲の確認と
+	// PixOffset を回す）。計算は同じ（`TestSobelMatchesNaive`）
 	for y := bounds.Min.Y + 1; y < bounds.Max.Y-1; y++ {
-		for x := bounds.Min.X + 1; x < bounds.Max.X-1; x++ {
-			gx := -int(src.GrayAt(x-1, y-1).Y) - 2*int(src.GrayAt(x-1, y).Y) - int(src.GrayAt(x-1, y+1).Y) +
-				int(src.GrayAt(x+1, y-1).Y) + 2*int(src.GrayAt(x+1, y).Y) + int(src.GrayAt(x+1, y+1).Y)
-			gy := -int(src.GrayAt(x-1, y-1).Y) - 2*int(src.GrayAt(x, y-1).Y) - int(src.GrayAt(x+1, y-1).Y) +
-				int(src.GrayAt(x-1, y+1).Y) + 2*int(src.GrayAt(x, y+1).Y) + int(src.GrayAt(x+1, y+1).Y)
+		up := src.Pix[src.PixOffset(bounds.Min.X, y-1):]
+		md := src.Pix[src.PixOffset(bounds.Min.X, y):]
+		dn := src.Pix[src.PixOffset(bounds.Min.X, y+1):]
+		out := dst.Pix[dst.PixOffset(bounds.Min.X, y):]
+		for i := 1; i < bounds.Dx()-1; i++ {
+			gx := -int(up[i-1]) - 2*int(md[i-1]) - int(dn[i-1]) +
+				int(up[i+1]) + 2*int(md[i+1]) + int(dn[i+1])
+			gy := -int(up[i-1]) - 2*int(up[i]) - int(up[i+1]) +
+				int(dn[i-1]) + 2*int(dn[i]) + int(dn[i+1])
 
 			mag := math.Sqrt(float64(gx*gx + gy*gy))
 			if mag > 255 {
 				mag = 255
 			}
-			dst.SetGray(x, y, color.Gray{Y: uint8(mag)})
+			out[i] = uint8(mag)
 		}
 	}
 	return dst

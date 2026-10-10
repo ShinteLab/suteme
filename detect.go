@@ -34,7 +34,17 @@ const segSkipConfidence = 0.9
 // **同点なら「別々の ROI から同じ窓が出た数」（票）が多いほう**を採り、
 // それも同じなら先に見つけたものを残す（`candidateSet`）。
 func DetectBoard(img image.Image) *BoardRegion {
-	gray := ConvertGray(img)
+	// 候補の検証・微調整が読む輝度を、画像全体ぶん先に作っておく（grayplane.go）
+	planed := withGrayPlane(img, img.Bounds())
+	var gray *image.Gray
+	if _, ok := img.(*image.RGBA); ok {
+		// *image.RGBA なら RGBA への写しは元のままなので、検証用の輝度がそのまま
+		// `ConvertGray(img)` と同じ値になる（`TestRGBAGrayMatchesCopy`）
+		gray = rgbaGray(planed, img.Bounds())
+	} else {
+		gray = ConvertGray(img)
+	}
+	img = planed
 	blurred := BoxBlur(gray, 2)
 	edges := Sobel(blurred)
 
@@ -46,12 +56,26 @@ func DetectBoard(img image.Image) *BoardRegion {
 
 	set := &candidateSet{}
 	set.add(whole, wholeConf)
-	for _, roi := range boardROIs(blurred) {
-		cand := detectBoardIn(edges, roi)
+	// ROI ごとの検出と微調整は互いに独立なので並列に走らせ、**結果は ROI の順に
+	// 並べてから**候補に足す（同点の扱いが「先に見つけたもの」に依るため。
+	// 逐次に足した場合と同じ候補集合になる）
+	rois := boardROIs(blurred)
+	type refined struct {
+		br   *BoardRegion
+		conf float64
+	}
+	res := make([]refined, len(rois))
+	parallelFor(len(rois), func(i int) {
+		cand := detectBoardIn(edges, rois[i])
 		if cand == nil || !plausibleAspect(cand) {
-			continue
+			return
 		}
-		set.add(refineRegion(img, cand))
+		res[i].br, res[i].conf = refineRegion(img, cand)
+	})
+	for _, r := range res {
+		if r.br != nil {
+			set.add(r.br, r.conf)
+		}
 	}
 	best := set.best()
 	if best == nil {
@@ -238,13 +262,7 @@ func snapToOuterFrame(img image.Image, br *BoardRegion) *BoardRegion {
 	if pad.Dx() < 9*3 || pad.Dy() < 9*3 {
 		return br
 	}
-	sub := image.NewRGBA(image.Rect(0, 0, pad.Dx(), pad.Dy()))
-	for y := pad.Min.Y; y < pad.Max.Y; y++ {
-		for x := pad.Min.X; x < pad.Max.X; x++ {
-			sub.Set(x-pad.Min.X, y-pad.Min.Y, img.At(x, y))
-		}
-	}
-	row, col := lineProjections(BoxBlur(ConvertGray(sub), 2))
+	row, col := lineProjections(BoxBlur(rgbaGray(img, pad), 2))
 
 	score := func(r image.Rectangle) float64 {
 		v := weakestLineRatio(row, float64(r.Min.Y-pad.Min.Y), float64(r.Dy())/9)
@@ -426,13 +444,7 @@ func refineRegion(img image.Image, br *BoardRegion) (*BoardRegion, float64) {
 		return br, base
 	}
 
-	sub := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			sub.Set(x-b.Min.X, y-b.Min.Y, img.At(x, y))
-		}
-	}
-	row, col := lineProjections(BoxBlur(ConvertGray(sub), 2))
+	row, col := lineProjections(BoxBlur(rgbaGray(img, b), 2))
 
 	oy, sy := refineAxis(row, float64(br.Bounds.Min.Y-b.Min.Y), float64(br.Bounds.Dy())/9)
 	ox, sx := refineAxis(col, float64(br.Bounds.Min.X-b.Min.X), float64(br.Bounds.Dx())/9)
@@ -452,15 +464,17 @@ func refineRegion(img image.Image, br *BoardRegion) (*BoardRegion, float64) {
 
 // refineAxis は 1 軸分の (原点, 間隔) を整合度が最大になるように動かす
 func refineAxis(proj []float64, origin, span float64) (float64, float64) {
+	// 同じ投影の上で何百通りも測るので、各位置の ±gridPeakTol の最大を先に引いておく
+	pt := newPeakTable(proj)
 	bestO, bestS := origin, span
-	best := axisAlignment(proj, origin, span)
+	best := pt.alignment(origin, span)
 	for do := -span / 2; do <= span/2; do++ {
 		for ds := -span * 0.1; ds <= span*0.1; ds += 0.25 {
 			s := span + ds
 			if s < 3 {
 				continue
 			}
-			if v := axisAlignment(proj, origin+do, s); v > best {
+			if v := pt.alignment(origin+do, s); v > best {
 				best, bestO, bestS = v, origin+do, s
 			}
 		}
@@ -506,8 +520,9 @@ func detectBoardIn(edges *image.Gray, bounds image.Rectangle) *BoardRegion {
 	// 偽の並びが選ばれていた）。
 	rowProj := make([]int, h)
 	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			rowProj[y] += int(edges.GrayAt(x+bounds.Min.X, y+bounds.Min.Y).Y)
+		i := edges.PixOffset(bounds.Min.X, bounds.Min.Y+y)
+		for _, v := range edges.Pix[i : i+w] {
+			rowProj[y] += int(v)
 		}
 	}
 	rowPeaks := findPeaks(rowProj, minDist)
@@ -527,9 +542,10 @@ func detectBoardIn(edges *image.Gray, bounds image.Rectangle) *BoardRegion {
 	yTop := hPos[0]
 	yBot := hPos[len(hPos)-1]
 	colProj := make([]int, w)
-	for x := 0; x < w; x++ {
-		for y := maxInt(yTop, 0); y <= minInt(yBot, h-1); y++ {
-			colProj[x] += int(edges.GrayAt(x+bounds.Min.X, y+bounds.Min.Y).Y)
+	for y := maxInt(yTop, 0); y <= minInt(yBot, h-1); y++ {
+		i := edges.PixOffset(bounds.Min.X, bounds.Min.Y+y)
+		for x, v := range edges.Pix[i : i+w] {
+			colProj[x] += int(v)
 		}
 	}
 
@@ -891,18 +907,6 @@ func (br *BoardRegion) ExtractCell(src image.Image, row, col int) image.Image {
 	return br.extractCell(src, row, col, true)
 }
 
-// extractCellUnclipped は盤の外枠より外も含めてマスを切り出す。
-//
-// **`ValidateBoard` の `cellUniformity` はこちらを使う。安易に `ExtractCell` へ
-// 寄せないこと。** そちらは「この領域が本当に盤か」を測るもので、**領域が
-// 間違っている前提**で呼ばれる。外枠で切ると外れた候補も自分の箱の中しか
-// 見なくなり、盤の外の畳や UI が写り込んでいても均一に見えてしまう。
-// 実測（`5795bf16`）: クリップした版で測ると、正しい候補（dx=0.00）ではなく
-// 1.01マスずれた候補が信頼度 1.00 で選ばれるようになる。
-func (br *BoardRegion) extractCellUnclipped(src image.Image, row, col int) image.Image {
-	return br.extractCell(src, row, col, false)
-}
-
 // ExtractCellShifted は窓を (dx, dy) px ずらしてマスを切り出す。
 // 余白・盤の外枠でのクリップは `ExtractCell` と同じ規則（クリップするのは
 // **ずらす前の**盤の外枠。ずらした窓が盤の外へ出たぶんは切り落とす）。
@@ -1103,15 +1107,9 @@ func axisProjection(img image.Image, r image.Rectangle, vertical bool) ([]float6
 	if r.Dx() < 9*3 || r.Dy() < 9*3 {
 		return nil, 0, false
 	}
-	sub := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
-	for y := r.Min.Y; y < r.Max.Y; y++ {
-		for x := r.Min.X; x < r.Max.X; x++ {
-			sub.Set(x-r.Min.X, y-r.Min.Y, img.At(x, y))
-		}
-	}
 	// **要る軸だけ計算する。** ここは縦線か横線のどちらか一方しか使わないのに
 	// 両方求めていた（`lineProjectionsAxes`）
-	row, col := lineProjectionsAxes(BoxBlur(ConvertGray(sub), 2), !vertical, vertical)
+	row, col := lineProjectionsAxes(BoxBlur(rgbaGray(img, r), 2), !vertical, vertical)
 	if vertical {
 		return col, r.Min.X, true
 	}

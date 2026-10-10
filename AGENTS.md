@@ -1021,7 +1021,7 @@ $env:SUTEME_REBUILD=1; go test -run TestRebuildStripData -timeout 10m -v ./train
 
 | 段 | 前 | **後** |
 |---|---|---|
-| `DetectBoard` + `ValidateBoard` | 876ms | 843ms（手つかず）|
+| `DetectBoard` + `ValidateBoard` | 876ms | 843ms（この表の時点。下の「盤面検出の速さ」で畳んだ）|
 | **`RecognizeBoard`（81マス）** | **1590ms** | **123ms** |
 | 合計 `Recognize` | 2492ms | **955ms** |
 
@@ -1079,19 +1079,71 @@ gobrain の `FeedForward.Update` は内部の配列を書き換えるので `*Mo
   **駒サンプルを 3 回走査**している。最近傍は上位 1 件なので、上下 2 通りの
   上位 k をまとめて取れば 1 回で足りる（試作で逐次 818ms → 690ms）。
   `Predictor` が向きを知らない形なので**インターフェースの追加が要る**
-- **検出側（843ms）は手つかず。** プロファイルでは `refineRegion` 55%・
-  `cellUniformity` 25%・`gridAlignment` 23%、そして
-  **`image.Image.At()` 経由の画素アクセスが 4 分の 1 以上**
-  （`image.(*RGBA).At` 27% + 返り値のインターフェース詰め 17%）。
-  `medianBrightness` の `sort.Ints` を `medianBrightnessRect` と同じ
-  ヒストグラムにするだけで 822ms → 718ms（中央値の定義は同じ）。
-  **呼び出し側でグレースケールに落として渡しても効かない**（実測 822 対 834ms。
-  `*image.Gray` の `At` も同じようにインターフェースへ詰めるため）
+- **検出の仕上げ（`finishRegion`）を畳む**。下の「盤面検出の速さ」のあとの
+  プロファイルでは、検出の残りの半分が `finishRegion`（`snapToOuterFrame` /
+  `SnapToGrid` の繰り返し）で、ここは窓が前の段の答えに依るので並列にできない。
+  中身は `lineProjections`（CPU の 37%）と `BoxBlur`（24%）。
+  **範囲ごとに `BoxBlur` をかけ直している**ので、画像全体を 1 回ぼかしたものの
+  内側を使い、範囲の縁 2px だけ範囲の端で折り返して計算し直せば省ける
+  （縁の画素は範囲の端で値を折り返すので、全体のぼかしとは値が違う。そこを外すと答えが変わる）
 - **呼び出し側で盤の矩形を渡す**（`WithRegion`）と検出を丸ごと飛ばせる。
   中継の盤はフレーム間で動かないので、ikkyoku のように連続して読む側では
   これがいちばん大きい（2466ms → 1637ms、SFEN は 8/8 一致）。
   **渡す矩形は `DetectBoard` が返したものに限ること**
   （`WithRegion` は `SnapToGrid` を通さない）
+
+#### 盤面検出の速さ（`DetectBoard` + `ValidateBoard`）
+
+実測（20 コア、1 枚あたりの中央値と範囲。**答えは 1 つも変わらない**＝後述）:
+
+| 画像 | 前 | **後** |
+|---|---|---|
+| `data/` の保存済み 239 局面（帯の判定器なし）| 516ms（60ms〜2.97s）| **47ms**（10〜190ms）|
+| ikkyoku の追従の録画 36 枚（帯の判定器あり）| 454ms（176〜868ms）| **41ms**（30〜51ms）|
+| 同 36 枚を ikkyoku に焼き込んだ配布モデルで（`rectbench`。検出だけ）| 491ms | **45ms** |
+| 同（盤を探して読む `Recognize`）| 521ms | **100ms** |
+| 同（矩形を渡して読む `Recognize`）| 85ms | **56ms** |
+
+録画は 20261005-143758 / 20261006-122723 / 20261007-085205 / 20261010-101502 /
+20261010-153156 / 20261010-171848 の各 6 枚（`%APPDATA%\ikkyoku\capturesollow\`）。
+
+やったこと（プロファイルの大きい順。どれも計算の中身は同じ）:
+
+- **輝度を 1 枚につき 1 回だけ作る**（`grayplane.go`）。検証と微調整（`ValidateBoard` /
+  `refineRegion` / `snapToOuterFrame` / `SnapToGrid`）は候補の窓ごとに同じあたりを読むので、
+  `DetectBoard` の入口で画像全体の輝度を作り、画像に添えて渡す（`grayPlaned`。
+  `image.Image` を埋め込むので、他の処理からは元の画像のまま見える）。
+  **輝度は「`*image.RGBA` へ写してから `grayValue` の式」と同じ 2 段で作る**（`rgbaLuma`）。
+  JPEG（YCbCr）や半透明の NRGBA は 8bit への丸めを省くと輝度が 1 違う画素が出る
+  （回帰テスト `TestRGBAGrayMatchesCopy` は丸めを省くと落ちることを確かめてある）
+- **マスの均一性は、マスを写さずに輝度の範囲から度数で中央値を取る**（`medianGrayRect`。
+  並べて真ん中を取るのと同じ定義）
+- **画素は `Pix` から直接読む**（`lineProjectionsAxes` / `Sobel` / `horizontalLines` /
+  `detectBoardIn`）。`GrayAt` は 1 回ごとに範囲の確認と `PixOffset` を回す
+- **`horizontalLines` の分位は全値を並べず度数で取る**（|gy| は 0..1020 に収まる）
+- **`BoxBlur` の縦の窓和を行ごとに進める**（列ごとに縦へ舐めると窓和の配列を飛び飛びに読む）。
+  窓和は int32
+- **`refineAxis` は各位置の ±`gridPeakTol` の最大を先に引いた表で測る**（`peakTable`）。
+  同じ投影の上で窓を数百通り測るため。足す順序は `axisAlignment` と同じでビット単位で一致する
+- **`ValidateBoard` の答えを検出の中で控える**（同じ窓を何度も測るため。キーは `BoardRegion` の値）
+- **ROI ごとの検出と微調整を並列に走らせる**（`parallelFor`）。**結果は ROI の順に並べてから
+  候補に足す**（同点は「先に見つけたもの」で割るので、順序を変えると答えが変わる）
+- `*image.RGBA` の画像は、検出用の `ConvertGray(img)` も同じ輝度を使う（値が同じ）
+
+**答えが変わらないことの確かめ方**（どれも前後で 1 文字も違わない）:
+
+- 保存済み 239 局面と録画 36 枚の `DetectBoard` の矩形と `ValidateBoard` の値
+  （`math.Float64bits` で比べる。帯の判定器なし / ありの両方）
+- `TestDetectBoardMatchesManual` / `TestDetectBoardCropInvariance` / `TestUnslipHoldout` の
+  局面ごとのログ（ファイル名と行番号・時間を除いて diff）
+- 総当たりの旧実装と突き合わせる回帰テスト（`detect_fast_test.go`。RGBA / 半透明 NRGBA /
+  YCbCr / Gray の 4 種の画像で）: `TestRGBAGrayMatchesCopy` / `TestCellUniformityMatchesCopy` /
+  `TestValidateBoardMatchesNaive` / `TestLineProjectionsMatchesNaive` / `TestSobelMatchesNaive` /
+  `TestHorizontalLinesMatchesNaive` / `TestPeakTableMatchesAxisAlignment` / `TestDetectBoardDeterministic`
+
+**試して駄目だったもの**: 呼び出し側でグレースケールに落として渡す（実測 822 対 834ms。
+`*image.Gray` の `At` も色をインタフェースへ詰めるので効かない。効かせるには関数の中で
+具体型の `Pix` を読むこと＝上の `grayplane.go`）。
 
 **「認識器を配る」の 1局面の時間（478ms / 1.18s など）はこの変更より前の値。**
 中身（一致率）は変わっていないので、速さの欄だけ古いものとして読むこと。
