@@ -11,25 +11,39 @@ type Predictor interface {
 	Predict(cell image.Image) (int, float64)
 }
 
-// KNN は k近傍法による駒種認識器
+// KNN は近傍法による駒種認識器
 // 学習処理が不要で、サンプルを追加した瞬間に反映される。
 // ゲーム画面のように同じ駒がほぼ同一ピクセルで描画される画像では
-// NN より安定して高精度になる
+// NN より安定して高精度になる。
+//
+// **駒種は最も近い 1 件で決める（k=1）。上位 5 件の多数決に戻さないこと。**
+// 多数決では、近い正解 1 件が「少し遠いが数の多い別の駒種」に負ける。
+// 学習データは歩が最も多いので、小さく薄い駒（墨の字しか拾えない実盤）が
+// 歩に寄っていた。実測（233 局面、手動座標）:
+//
+//	                       全マス   駒種    駒種違い
+//	局面 LOO   多数決(k=5)  97.4%   93.8%    449
+//	           最近傍(k=1)  97.8%   94.9%    365
+//	見た目 LOO 多数決(k=5)  91.4%   79.6%    519
+//	           最近傍(k=1)  92.3%   81.7%    459
+//
+// 日付順（その日より前だけで学習して読む）でも 4 条件すべてで最近傍が上回る。
+// k=3 / k=9 はどちらも k=5 と同じか悪い。票を件数で割る補正は歩への誤読を
+// 減らすが、別の駒種違いが同じだけ増える（AGENTS.md「駒種認識 k-NN」の節）。
 type KNN struct {
-	// **空サンプルは別に持つ。** 駒種の投票にも向きの照合にも使わず、
+	// **空サンプルは別に持つ。** 駒種の比較にも向きの照合にも使わず、
 	// 「既知の空パターンと一致するか」だけに使う別物なので、同じ配列に
 	// 混ぜておくと走査のたびにラベルを見て弾くことになる。
 	// しかも**学習データの 2/3 が空**（実測 65226 件中 44220 件）なので、
 	// 分けておかないと駒サンプルの走査が 3 倍の距離を歩く。
 	pieces  []TrainingSample // 駒サンプル（空を除く）
 	empties []TrainingSample // 空サンプル（ClassEmpty）
-	k       int
-	source  string // 読み込み元のファイルパス（LoadPredictor が設定。デバッグ表示用）
+	source  string           // 読み込み元のファイルパス（LoadPredictor が設定。デバッグ表示用）
 }
 
 // NewKNN はサンプルから k-NN 認識器を作る。サンプルが空なら nil
 func NewKNN(samples []TrainingSample) *KNN {
-	kn := &KNN{k: 5}
+	kn := &KNN{}
 	for _, s := range samples {
 		if len(s.Input) != inputSize || s.Label < 0 || s.Label >= numClasses {
 			continue
@@ -40,12 +54,8 @@ func NewKNN(samples []TrainingSample) *KNN {
 			kn.pieces = append(kn.pieces, s)
 		}
 	}
-	n := len(kn.pieces) + len(kn.empties)
-	if n == 0 {
+	if len(kn.pieces)+len(kn.empties) == 0 {
 		return nil
-	}
-	if n < kn.k {
-		kn.k = n
 	}
 	return kn
 }
@@ -96,7 +106,7 @@ func (kn *KNN) Debug() PredictorDebug {
 	return PredictorDebug{
 		Kind:   "knn",
 		Source: kn.source,
-		Detail: fmt.Sprintf("k=%d, samples=%d", kn.k, kn.Len()),
+		Detail: fmt.Sprintf("k=1, samples=%d", kn.Len()),
 	}
 }
 
@@ -155,79 +165,51 @@ func dist2(a, b []float64, limit float64) (float64, bool) {
 // knnDistCheck は打ち切りを確かめる間隔（次元数）。2 の冪にすること
 const knnDistCheck = 32
 
-// knnMaxK は topK が保てる件数の上限（k の既定値 5 に合わせてある）
-const knnMaxK = 5
-
-// topK は上位 k 件を距離の昇順で保つ。
+// nearestTwo は「最も近い駒種」と「それ以外で最も近い駒種」を保つ。
 //
-// **全件を並べてはいけない。** 以前は 6 万件ぶんの距離を配列に積んで
-// `sort.Slice` で並べ、先頭 5 件だけ使っていた。上位 k 件だけなら挿入で足りる。
-// **速くなる本体はソートを省くことではなく、k 番目の距離を `dist2` の
-// 打ち切りに渡せること**（負ける相手の距離を最後まで足さなくなる）。
-type topK struct {
-	dist  [knnMaxK]float64
-	label [knnMaxK]int
-	n     int
-	k     int
+// 2 位の距離は確信度にだけ使う（`pieceConf`）。**2 位の距離を打ち切りに渡せる**
+// ので、全件を最後まで足す必要は無い（1 位も 2 位も動かせない相手は、
+// 2 位の距離を超えた時点で捨ててよい）。
+type nearestTwo struct {
+	d1, d2 float64 // 1 位の距離・1 位と違う駒種で最も近い距離
+	l1     int
 }
 
-func (t *topK) init(k int) {
-	if k > knnMaxK {
-		k = knnMaxK
-	}
-	t.k, t.n = k, 0
+func newNearestTwo() nearestTwo {
+	return nearestTwo{d1: math.Inf(1), d2: math.Inf(1), l1: -1}
 }
 
-// limit は「これ以上なら採らない」距離。k 件たまるまでは上限なし
-func (t *topK) limit() float64 {
-	if t.k == 0 || t.n < t.k {
-		return math.Inf(1)
-	}
-	return t.dist[t.k-1]
-}
-
-func (t *topK) push(d float64, label int) {
-	i := t.n
-	if i > t.k-1 {
-		i = t.k - 1
-	}
-	for i > 0 && t.dist[i-1] > d {
-		t.dist[i], t.label[i] = t.dist[i-1], t.label[i-1]
-		i--
-	}
-	t.dist[i], t.label[i] = d, label
-	if t.n < t.k {
-		t.n++
-	}
-}
-
-// vote は距離の逆数で重み付けした多数決。信頼度は勝者の重み比率。
-//
-// クラスごとの重みは**クラス数ぶんの配列**に積む（15 個しかない）。
-// 以前の map は、同じ重みで並んだときに**どちらが勝つかが反復順まかせ**で、
-// 同じ入力に同じ答えを返す保証が無かった。
-func (t *topK) vote() (int, float64) {
-	if t.n == 0 {
-		return 0, 0
-	}
-	const eps = 1e-6
-	var votes [numClasses]float64
-	total := 0.0
-	for i := 0; i < t.n; i++ {
-		w := 1.0 / (t.dist[i] + eps)
-		votes[t.label[i]] += w
-		total += w
-	}
-	bestClass, bestWeight := 0, 0.0
-	for label, w := range votes {
-		if w > bestWeight {
-			bestWeight, bestClass = w, label
+func (t *nearestTwo) push(d float64, label int) {
+	switch {
+	case d < t.d1:
+		if label != t.l1 {
+			t.d2 = t.d1
 		}
+		t.d1, t.l1 = d, label
+	case d < t.d2 && label != t.l1:
+		t.d2 = d
 	}
-	if total == 0 {
-		return bestClass, 0
+}
+
+// pieceConfSpread は確信度の伸ばし方（`pieceConf`）。
+const pieceConfSpread = 0.12
+
+// pieceConf は 1 位と 2 位の駒種の距離から確信度を作る。拮抗していれば 0.5、
+// 差が開くほど 1 に近づく（`confFromDist` と同じ意味）。
+//
+// **ikkyoku はこの値をマスごとの費用にそのまま使う**（修復の予算・下限 0.15）ので、
+// 多数決の頃の重み比率と同じ尺度に寄せてある。`confFromDist` の素の値は
+// 0.5 付近に固まる（2 乗距離どうしの比なので差が出にくい）ため、
+// 0.5 からの差を `pieceConfSpread` で割って伸ばし、1 で頭打ちにする。
+// 実測（見た目 LOO の駒マス）で、正しいマスの平均 0.94・誤ったマス 0.68・
+// 0.6 未満 10.8%（多数決の頃は 0.93・0.68・11.7%）。
+// **誤りの見分けは多数決の頃より良い**（AUC 0.834 → 0.886。局面 LOO では 0.887 → 0.911）。
+func pieceConf(t nearestTwo) float64 {
+	c := 0.5 + (confFromDist(t.d2, t.d1)-0.5)/pieceConfSpread
+	if c > 1 {
+		return 1
 	}
-	return bestClass, bestWeight / total
+	return c
 }
 
 // nearestEmpty は空サンプルへの最近傍距離を返す（`emptyDistCap` で頭打ち）。
@@ -248,10 +230,10 @@ func (kn *KNN) nearestEmpty(full [2][]float64) float64 {
 
 // Predict はマス画像から駒種を推論する
 //
-// 空マス（ClassEmpty）は既知の空パターンとの一致で判定し、駒種の多数決には
+// 空マス（ClassEmpty）は既知の空パターンとの一致で判定し、駒種の比較には
 // 混ぜない（理由は emptyMatchMax のコメント）。
-// 駒種は空を除いたサンプルで、距離の逆数で重み付けした上位k件の投票で決める。
-// 信頼度は勝者クラスの重み比率。
+// 駒種は空を除いたサンプルの最近傍 1 件で決める（`KNN` のコメント）。
+// 信頼度は 1 位と 2 位の駒種の距離の差（`pieceConf`）。
 func (kn *KNN) Predict(cell image.Image) (int, float64) {
 	input := CellToInput(cell)
 	// 空サンプルはマス全体で作ってあるので、こちらも切り揃えない版で測る
@@ -259,26 +241,20 @@ func (kn *KNN) Predict(cell image.Image) (int, float64) {
 	full := [2][]float64{CellToInputFull(cell), CellToInputFull(Rotate180(cell))}
 	nearestEmpty := kn.nearestEmpty(full)
 
-	var top topK
-	k := kn.k
-	if k > len(kn.pieces) {
-		k = len(kn.pieces)
-	}
-	top.init(k)
+	top := newNearestTwo()
 	for _, s := range kn.pieces {
-		if d, ok := dist2(input, s.Input, top.limit()); ok {
+		if d, ok := dist2(input, s.Input, top.d2); ok {
 			top.push(d, s.Label)
 		}
 	}
 
-	nearestPiece := math.Inf(1)
-	if top.n > 0 {
-		nearestPiece = top.dist[0]
+	if nearestEmpty/emptyDistNorm < emptyMatchMax && nearestEmpty < top.d1 {
+		return ClassEmpty, confFromDist(top.d1, nearestEmpty)
 	}
-	if nearestEmpty/emptyDistNorm < emptyMatchMax && nearestEmpty < nearestPiece {
-		return ClassEmpty, confFromDist(nearestPiece, nearestEmpty)
+	if top.l1 < 0 {
+		return 0, 0
 	}
-	return top.vote()
+	return top.l1, pieceConf(top)
 }
 
 // confFromDist は勝った側の距離と負けた側の距離から信頼度を作る。

@@ -37,7 +37,7 @@ type PredictorDebug struct {
 	// Source は読み込み元のファイルパス（SetPredictor / WithPredictor で
 	// 直接渡された場合は空）。
 	Source string `json:"source,omitempty"`
-	// Detail は種別ごとの補足（k-NN なら "k=5, samples=4455"）。
+	// Detail は種別ごとの補足（k-NN なら "k=1, samples=4455"）。
 	Detail string `json:"detail,omitempty"`
 }
 
