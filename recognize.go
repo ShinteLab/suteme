@@ -420,7 +420,7 @@ type ConcurrentPredictor interface {
 // 照合できないときの控えでしかない。** 以前はここに「確信度が盤の下位
 // 25% のマスだけ回転照合に回す」という境目（`OrientMarginQuantile`）を
 // 持っていたが、局面が増えて回転照合が単独で分類器を大きく上回ったので
-// 不要になった（`classifyCellOrient` の実測表）。
+// 不要になった（`classifyCellInfo` の実測表）。
 type BoardOrient struct {
 	emptyMax float64
 }
@@ -457,7 +457,7 @@ func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellC
 	return c.cat, c.byMatch
 }
 
-// classifyCellOrient は空/駒を分類器で決め、駒の向きは回転照合で決める。
+// classifyCellInfo は空/駒を分類器で決め、駒の向きは回転照合で決める。
 //
 // **向きは回転照合が主で、分類器（上下半分の幅の差）は照合できないときの控え。**
 // 学習データは後手の駒を `Rotate180` して先手向きに揃えてあるので、
@@ -498,11 +498,13 @@ func ClassifyCellFor(cell image.Image, boardColor uint8, m Predictor) (cat CellC
 // **代償は推論時間。** 全駒マスで最近傍探索を 2 回（そのまま / 180度）走らせるので、
 // 分位点で 25% だけ回していた頃より増える。実測は `TestKNNHoldout` で
 // 219s → 243s（+11%。141局面 × 81マス、駒種の推論も含めた全体）。
+//
+// **分類器が空と言ったマスも、条件を満たせば照合で駒に戻す**（`overturnEmpty`）。
 func classifyCellInfo(cell image.Image, boardColor uint8, emptyMax float64, m Predictor) cellClass {
 	cat, _, cover := classifyCellCover(cell, boardColor, emptyMax)
 	res := cellClass{cat: cat, cover: cover}
 	if cat == CellEmpty {
-		return res
+		return overturnEmpty(cell, res, emptyMax, m)
 	}
 	om, ok := m.(OrientationMatcher)
 	if !ok {
@@ -529,19 +531,93 @@ func classifyCellInfo(cell image.Image, boardColor uint8, emptyMax float64, m Pr
 
 // cellClass は `classifyCellInfo` の結果。
 type cellClass struct {
-	cat     CellCategory
-	byMatch bool    // 向きを回転照合で決めた
-	cover   float64 // 一次マスクの被覆率（観測用。`CellDebug.Cover`）
+	cat        CellCategory
+	byMatch    bool    // 向きを回転照合で決めた
+	cover      float64 // 一次マスクの被覆率（観測用。`CellDebug.Cover`）
+	overturned bool    // 分類器の「空」を照合で駒に戻した（`CellDebug.PieceBy`）
+}
+
+const (
+	// overturnCoverFrac は「分類器が空と言ったマスを照合に回す」被覆率の下限
+	// （その盤の境目 `emptyMax` に対する割合）。被覆率を測れなかったマス
+	// （`coverUnmeasured`）も回す。
+	overturnCoverFrac = 0.7
+	// overturnPieceMax は空を駒に戻す駒サンプルへの最近傍距離の上限
+	// （`emptyDistNorm` で正規化。空の一致判定 `emptyMatchMax` と同じ尺度）。
+	overturnPieceMax = 0.15
+)
+
+// overturnEmpty は分類器が空と言ったマスを、k-NN の駒サンプルとの照合で駒に戻す。
+//
+// **以前は覆さなかった。理由は「向きが決まらない」だったが、向きはもう回転照合で
+// 決めている**（分類器が空と言ったマスでも、そのままと 180 度回した版のどちらが
+// 駒サンプルに近いかは測れる）。覆さないせいで、学習データを足しても直らない誤りが出ていた:
+//
+//   - 字画の細い「と」（中継。墨の字が細く、被覆率が境目のすぐ下に来る。0.091 / 境目 0.10）
+//   - ゲーム画面の直前の手のマスの赤い色付けの上の駒（マス全体が地色と違うので
+//     全列がグリッド線として落ち、被覆率を測れない＝マスクが作れない）
+//
+// **回すのは「被覆率が境目の 7 割以上」か「被覆率を測れなかった」マスだけ。**
+// 真っさらな空マスは照合しない（速さのためにも要る。分類器が空と言うマスの 99% が
+// ここで抜ける）。**戻すのは駒サンプルへの最近傍が `overturnPieceMax` 以内のときだけ**。
+// 実測（`TestEmptiedDump`。確認済み 238 局面の局面 LOO を、格子線へ寄せた座標と
+// 保存された座標そのものの 2 通り / 判定済み 83 局面・16 見た目の見た目 LOO。
+// 分類器が空と言ったマスは 11085 / 3928、うち真の駒は 8・7 / 5）。直る / 壊す マス数:
+//
+//	条件（割合 / 距離）  局面LOO(寄せた)  局面LOO(保存座標)  見た目LOO
+//	0.5 / 0.15             2 / 0            1 / 2            0 / 0
+//	0.6 / 0.15             2 / 0            1 / 1            0 / 0
+//	**0.7 / 0.15**        **2 / 0**        **1 / 0**        **0 / 0**
+//	0.85 / 0.15            2 / 0            1 / 0            0 / 0
+//	0.7 / 0.20             3 / 0            1 / 1            0 / 4
+//	0.5 / 0.20             3 / 2            1 / 11           0 / 10
+//	0.3 / 0.15             2 / 6            —                0 / 0
+//
+// **境目の半分では足りない。** 窓が数 px 動くと、空マスの余白に隣の駒の切れ端が入り
+// （被覆率 0.05〜0.065）、その切れ端の外接矩形が駒サンプルに近づく（最近傍 0.06〜0.14）。
+// 寄せた座標では出ず、保存された座標でだけ出た。直る駒は被覆率が境目のすぐ下
+// （0.087〜0.099 / 境目 0.10）か測れないマスなので、0.65〜0.85 のどこに置いても同じ。
+// **距離は 0.15 より緩めない**（0.2 で見た目LOO の空が崩れ始める）。
+//
+// **見た目LOO では 1 件も直らない**（初めて見る盤の駒は最近傍が 0.37〜0.55 と遠い）。
+// 効くのは同じ盤を学習済みのとき＝実運用の条件。被覆率を測れなかったマスは
+// 真の空に 1 件も無い（局面LOO 0 / 11077）。
+//
+// 推論器が `*KNN` でなければ覆さない（距離の尺度が決まっているのは k-NN だけ。
+// NN を配る構成の向き照合データ `orient_data_v1.bin` は駒種を決められないので使わない）。
+// 照合で駒に戻したマスも、駒種の推論が空サンプルと一致すれば空のまま（`KNN.Predict`）。
+func overturnEmpty(cell image.Image, res cellClass, emptyMax float64, m Predictor) cellClass {
+	kn, ok := m.(*KNN)
+	if !ok || kn == nil {
+		return res
+	}
+	if res.cover != coverUnmeasured && res.cover < emptyMax*overturnCoverFrac {
+		return res
+	}
+	up := kn.PieceDistance(cell)
+	down := kn.PieceDistance(Rotate180(cell))
+	if math.Min(up, down)/emptyDistNorm > overturnPieceMax {
+		return res
+	}
+	res.byMatch, res.overturned = true, true
+	if up <= down {
+		res.cat = CellPieceUp
+	} else {
+		res.cat = CellPieceDown
+	}
+	return res
 }
 
 // RecognizeBoard は盤面全体を認識してSFENを返す
 //
 // 空/駒は ClassifyCellWith が判定し、向きは Predictor との回転照合
-// （`classifyCellOrient`）で決める。駒種は Predictor（NN または k-NN）で
+// （`classifyCellInfo`）で決める。駒種は Predictor（NN または k-NN）で
 // 推論する。Predictor が空クラス（ClassEmpty）を返した場合は分類より優先して
 // 空とする。グリッド線や木目で被覆率が上がったマスは、被覆率では駒と分離できないが
 // 画素の並びは既知の空マスと一致するため、学習済みの空パターンのほうが確かなため。
-// 逆方向（分類が空・推論が駒）は向きが決まらないので覆さない。
+// 逆方向（分類が空・推論が駒）は、被覆率が境目に近いか測れなかったマスに限って
+// 駒サンプルとの照合が十分近ければ覆す（`overturnEmpty`）。以前は「向きが決まらない」
+// として覆さなかったが、向きは回転照合で決められる。
 func RecognizeBoard(img image.Image, br *BoardRegion, m Predictor) string {
 	board, _, _, _ := recognizeBoardDetail(img, br, m)
 	return board
@@ -579,6 +655,9 @@ func recognizeBoardDetail(img image.Image, br *BoardRegion, m Predictor) (string
 		cur.Category, cur.Cover = cat, cc.cover
 		if cc.byMatch {
 			cur.OrientBy = "match"
+		}
+		if cc.overturned {
+			cur.PieceBy = "match"
 		}
 		if cat == CellEmpty {
 			return

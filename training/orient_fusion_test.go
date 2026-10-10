@@ -18,7 +18,7 @@ import (
 // そのまま / 180度回した版）を全駒マスについて取り、CSV に落とす。
 // **決め方（しきい値・重み・組み合わせ方）を変えるたびに全局面を計算し直さず、
 // この CSV の上で数え直せるようにするためのもの。** 1 回 90 秒。
-// 向きを回転照合に一本化した判断もこの材料で出した（`suteme.classifyCellOrient`）。
+// 向きを回転照合に一本化した判断もこの材料で出した（`suteme.classifyCellInfo`）。
 //
 //	SUTEME_ORIENT=out.csv go test -run TestOrientDump -timeout 60m -v ./training
 //

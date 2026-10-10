@@ -98,7 +98,7 @@ func ClassifyCellWith(cell image.Image, boardColor uint8) CellCategory {
 // 1202 駒マス）で、値が 0.08 未満の 85 マスに反転 47 件のうち 23 件が入る。
 //
 // **かつてはこの値で「回転照合に回すマス」を選んでいたが、いまは使っていない。**
-// 向きは常に回転照合で決める（`classifyCellOrient`）。この確信度は
+// 向きは常に回転照合で決める（`classifyCellInfo`）。この確信度は
 // 観測用として残してある。
 func ClassifyCellDetail(cell image.Image, boardColor uint8) (CellCategory, float64) {
 	return classifyCellDetail(cell, boardColor, emptyCoverMax)

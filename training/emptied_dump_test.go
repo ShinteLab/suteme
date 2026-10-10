@@ -2,6 +2,7 @@ package training
 
 import (
 	"fmt"
+	"image"
 	"math"
 	"os"
 	"path/filepath"
@@ -31,6 +32,9 @@ import (
 // `SUTEME_EMPTIED_MODE=look` で**見た目ごと**学習から外す（`holdoutPredictors` を
 // 見た目の名前で束ねる。評価タブの「見た目LOO」と同じ）。既定は局面ごと。
 // 対象は確認済みの局面だけ。盤面座標は格子線へ寄せたもの（評価タブと同じ切り出し）。
+// `SUTEME_EMPTIED_RECT=raw` で保存された座標そのもの（`TestKNNHoldout` と同じ切り出し）。
+// **両方測ること。** 窓が数 px 動くだけで、空マスに隣の駒の切れ端が入って駒サンプルに
+// 近づくことがある（寄せた座標では出ず、寄せない座標でだけ出た誤りがある）。
 func TestEmptiedDump(t *testing.T) {
 	out := os.Getenv("SUTEME_EMPTIED")
 	if out == "" {
@@ -42,6 +46,7 @@ func TestEmptiedDump(t *testing.T) {
 		}
 	}
 	byLook := os.Getenv("SUTEME_EMPTIED_MODE") == "look"
+	rawRect := os.Getenv("SUTEME_EMPTIED_RECT") == "raw"
 	if !chdirToData(t) {
 		t.Fatal("data/history.json が見つかりません")
 	}
@@ -108,7 +113,7 @@ func TestEmptiedDump(t *testing.T) {
 					empties = append(empties, s)
 				}
 			}
-			rows[i] = dumpEmptiedBoard(mode, k, tg, kn, empties)
+			rows[i] = dumpEmptiedBoard(mode, k, tg, kn, empties, rawRect)
 		}(i, tg)
 	}
 	wg.Wait()
@@ -124,8 +129,12 @@ func TestEmptiedDump(t *testing.T) {
 	t.Logf("%d 局面を書き出し: %s", len(targets), out)
 }
 
-func dumpEmptiedBoard(mode, key string, tg *evalTarget, kn *suteme.KNN, empties []suteme.TrainingSample) string {
+func dumpEmptiedBoard(mode, key string, tg *evalTarget, kn *suteme.KNN, empties []suteme.TrainingSample, rawRect bool) string {
 	s := tg.snap
+	if rawRect {
+		b := tg.rect
+		s = image.Rect(b.X1, b.Y1, b.X2, b.Y2)
+	}
 	r, err := suteme.Recognize(tg.img, suteme.WithPredictor(kn), suteme.WithRect(s.Min.X, s.Min.Y, s.Max.X, s.Max.Y))
 	if r == nil {
 		return ""
@@ -140,10 +149,15 @@ func dumpEmptiedBoard(mode, key string, tg *evalTarget, kn *suteme.KNN, empties 
 		if cd.Piece != "" {
 			got = sfenToGridLabel(cd.Piece)
 		}
+		// cat は**分類器の**判定（照合で駒に戻したマスも分類器は空と言っている）
+		cat := cd.Category
+		if cd.PieceBy != "" {
+			cat = suteme.CellEmpty
+		}
 		fmt.Fprintf(&sb, "%s,%s,%s,%d,%d,%s,%s,%d,%.4f,%.4f", mode, csvSafe(key), tg.entry.ID, cd.Row, cd.Col,
-			want, got, int(cd.Category), cd.Cover, r.Debug.EmptyCover)
+			want, got, int(cat), cd.Cover, r.Debug.EmptyCover)
 		cell := br.ExtractCell(tg.img, cd.Row, cd.Col)
-		if cd.Category != suteme.CellEmpty || cell == nil {
+		if cat != suteme.CellEmpty || cell == nil {
 			sb.WriteString(",,,,,,\n")
 			continue
 		}

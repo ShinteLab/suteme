@@ -81,6 +81,10 @@ type CellDebug struct {
 	// 照合できず分類器の幅プロファイルに落ちたときは ""。
 	// 推論器が `OrientationMatcher` を実装していれば通常は "match" になる。
 	OrientBy string `json:"orient_by,omitempty"`
+	// PieceBy は駒があると決めた材料。分類器（被覆率）が空と言ったのを
+	// 駒サンプルとの照合で駒に戻したなら "match"（`overturnEmpty`）、
+	// 分類器が駒と言ったなら ""。
+	PieceBy string `json:"piece_by,omitempty"`
 	// Class は Predictor が返した駒種クラス（推論しなかったら -1、
 	// ClassEmpty なら分類を覆して空にしたということ）。
 	Class int `json:"class"`
