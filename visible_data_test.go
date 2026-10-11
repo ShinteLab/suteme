@@ -84,7 +84,7 @@ type occludedCase struct {
 
 // 手や頭が被った実例で、誤った手の元になったマスを「見えない」と言うこと。
 //
-// 画像は ikkyoku の追従の録画（`%APPDATA%\ikkyoku\captures\follow\`）から
+// 画像は ikkyoku の追従の録画から
 // `data/occluded/` に写したもの。中継の画像なので data/ と同じく gitignore で、
 // 無ければスキップする。盤面は自動検出（ikkyoku と同じく `Recognize` の経路）。
 func TestHiddenCellsOccluded(t *testing.T) {

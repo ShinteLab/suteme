@@ -388,7 +388,7 @@ func unslipRegion(img image.Image, br *BoardRegion) *BoardRegion {
 
 // occludedTol は `occludedConfidence` で戻した窓が負けてよい幅（2 マスぶん）。
 // 遮られたマスを外すと分母が窓ごとに変わるので、マス 1 つにも満たない差で
-// 順位が入れ替わる（実測 `143758/x014`: 正 0.959 対 滑り 0.963）。盤の外の 1 段を
+// 順位が入れ替わる（実測。中継で解説者の頭が盤の上辺を覆った 1 枚で、正 0.959 対 滑り 0.963）。盤の外の 1 段を
 // 含む窓なら 9 マスぶん落ちるので、この幅では通らない。
 const occludedTol = 2.0 / 81
 

@@ -28,7 +28,7 @@ type emptiedCase struct {
 
 // 分類器が空と言った駒を、推論器の照合で駒に戻せること（`overturnEmpty`）。
 //
-// 画像は ikkyoku の録画（`%APPDATA%\ikkyoku\captures\`）から `data/emptied/` に
+// 画像は ikkyoku で撮った画像と追従の録画から `data/emptied/` に
 // 写したもの。中継・ゲーム画面の画像なので data/ と同じく gitignore で、
 // 無ければスキップする。推論器は全件の学習データ（`training_data_v8.bin`。
 // 無ければスキップ）。

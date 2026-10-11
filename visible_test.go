@@ -99,7 +99,7 @@ func TestHiddenCellsSkinBlob(t *testing.T) {
 //
 // **塊の縁が外枠のすぐ下で切れていると、縁が外枠の罫線に見える**（外枠は盤の内側と
 // だけ比べるので、暗い髪と明るい盤の境目は「暗い線」と区別が付かない）。
-// 実例（`143758-001-P@3a`）がこの形で、太い暗い塊の篩（solidDark）が無いと 3一 を落とす。
+// 実例（中継で解説者の髪が盤の上辺の 3一 に被った 1 枚）がこの形で、太い暗い塊の篩（solidDark）が無いと 3一 を落とす。
 func TestHiddenCellsDarkBlobOnFrame(t *testing.T) {
 	img, br := syntheticBoard()
 	top := br.Bounds.Min.Y
