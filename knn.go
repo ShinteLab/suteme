@@ -212,12 +212,13 @@ func pieceConf(t nearestTwo) float64 {
 	return c
 }
 
-// nearestEmpty は空サンプルへの最近傍距離を返す（`emptyDistCap` で頭打ち）。
+// nearestEmpty は空サンプルへの最近傍距離を返す（`limit` で頭打ち。
+// 2 乗距離のまま。通常の一致判定なら `emptyDistCap`）。
 //
 // 空には向きが無いので、そのままと 180 度回した版の近いほうで測る
 // （空サンプルは回転させずに 1 通りしか持っていない）。
-func (kn *KNN) nearestEmpty(full [2][]float64) float64 {
-	best := emptyDistCap
+func (kn *KNN) nearestEmpty(full [2][]float64, limit float64) float64 {
+	best := limit
 	for _, s := range kn.empties {
 		for _, in := range full {
 			if d, ok := dist2(in, s.Input, best); ok {
@@ -239,7 +240,7 @@ func (kn *KNN) Predict(cell image.Image) (int, float64) {
 	// 空サンプルはマス全体で作ってあるので、こちらも切り揃えない版で測る
 	// （CellToInputFull 参照。外接矩形は駒にしか定義できない）
 	full := [2][]float64{CellToInputFull(cell), CellToInputFull(Rotate180(cell))}
-	nearestEmpty := kn.nearestEmpty(full)
+	nearestEmpty := kn.nearestEmpty(full, emptyDistCap)
 
 	top := newNearestTwo()
 	for _, s := range kn.pieces {

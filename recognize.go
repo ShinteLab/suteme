@@ -640,9 +640,19 @@ func overturnEmpty(cell image.Image, res cellClass, emptyMax float64, m Predicto
 // shiftCoverMax は窓をずらした空の照合に回す被覆率の上限（その盤の境目に対する倍率）。
 const shiftCoverMax = 2.0
 
-// shiftOffsets は空の照合で試す窓のずらし量（そのままの窓は `KNN.Predict` が測る）。
+const (
+	// shiftEmptyLooseMax / shiftEmptyLooseRatio は、空の一致判定（`emptyMatchMax`）に
+	// 届かないマスを空にする緩い条件。空サンプルへの最近傍が `shiftEmptyLooseMax` 未満
+	// （`emptyDistNorm` で正規化）で、かつ駒サンプルへの最近傍の `shiftEmptyLooseRatio` 倍
+	// より近ければ空にする（`emptyByShift`）。
+	shiftEmptyLooseMax   = 0.20
+	shiftEmptyLooseRatio = 0.3
+)
+
+// shiftWindows は空の照合で試す窓のずらし量。そのままの窓も入れる
+// （緩い条件はそのままの窓でも `KNN.Predict` の一致判定より広い）。
 // 縦横の 4 通りだけ。斜めを足しても直るマスは増えなかった（`emptyByShift`）。
-var shiftOffsets = []image.Point{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
+var shiftWindows = []image.Point{{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}}
 
 // emptyByShift は分類器が駒と言ったマスを、窓を ±1px ずらして空サンプルと照合し直す。
 //
@@ -654,9 +664,12 @@ var shiftOffsets = []image.Point{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
 // 占めるのでファイルが膨らみ、配布用の書き出しのクラスごとの上限で別の盤の空が押し出される）。
 //
 // 照合するのは **被覆率が境目の `shiftCoverMax` 倍未満**のマスだけ（駒の大半は被覆率が
-// 境目の 2 倍以上ある。速さのためにも要る）。どれかの窓で空サンプルへの最近傍が
-// `emptyMatchMax` 未満、かつ**駒サンプルへの最近傍より近ければ**空にする
-// （ずらさない窓の判定 `KNN.Predict` と同じ条件）。
+// 境目の 2 倍以上ある。速さのためにも要る）。どれかの窓で次のどちらかなら空にする:
+//
+//   - 空サンプルへの最近傍が `emptyMatchMax` 未満、かつ駒サンプルへの最近傍より近い
+//     （ずらさない窓の判定 `KNN.Predict` と同じ条件）
+//   - 空サンプルへの最近傍が `shiftEmptyLooseMax` 未満、かつ駒サンプルへの最近傍の
+//     `shiftEmptyLooseRatio` 倍より近い（緩い条件。下記）
 //
 // 実測（`TestShiftEmptyDump`。確認済み 238 局面の局面 LOO / 判定済み 83 局面・16 見た目の
 // 見た目 LOO、格子線へ寄せた座標と保存座標の 2 通り）。直る / 壊す マス数:
@@ -672,6 +685,24 @@ var shiftOffsets = []image.Point{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
 // 斜めを足した 8 通りでも全条件で同じ数（縦横で届かないマスは斜めでも届かない）。
 // **駒サンプルとの比較を外してはいけない**（被覆率の高い駒、`413c7504` の 4八 の玉などが
 // 空サンプルと 0.002 でほぼ一致する。比較があれば駒のほうが近いので残る）。
+//
+// **緩い条件は、木目の強い実盤の空きを拾うためのもの**（2026-10-14）。王座戦の中継
+// （履歴 `0123c106` / `b7d4376e`）は木目で空きの被覆率が 0.10〜0.21 まで上がり、
+// 空サンプルへの最近傍も 0.10〜0.19 で一致判定に届かず、1 局面に 6〜7 マス 空→駒 が出た。
+// **同じ盤を学習させても直らない**（同じマスが両方で空きでも、マスどうしの距離が
+// そのままの窓で 0.06〜0.29、±3px ずらしても 0.04〜0.17）。誤ったマスは駒サンプルからは
+// 0.39〜0.80 と遠いので、比で割れる。追加で直る / 新たに壊す マス数（この表の 2 列は
+// 格子線へ寄せた座標。「壊す」は正しく読めていた駒を空にしたもの）:
+//
+//	上限 / 比          局面LOO   見た目LOO
+//	0.15 / 0.4          7 / 1     5 / 0
+//	**0.20 / 0.3**     **6 / 0** **5 / 0**
+//	0.20 / 1.0          8 / 15    5 / 2
+//	0.25 / 0.5          8 / 8     5 / 8
+//
+// **比を外してはいけない。** 字画の細い「と」（`bc350aa6` の 3七、被覆率 0.111）は
+// 空サンプルまで 0.107 と空きと変わらない近さにある（駒サンプルまで 0.384 なので
+// 比 0.28。採用した条件でも空になるが、元から駒種を誤っているマスで誤りの数は増えない）。
 func (bo *BoardOrient) emptyByShift(c cellClass, row, col int, m Predictor) cellClass {
 	kn, ok := m.(*KNN)
 	if !ok || kn == nil || bo.img == nil || bo.br == nil {
@@ -681,13 +712,17 @@ func (bo *BoardOrient) emptyByShift(c cellClass, row, col int, m Predictor) cell
 		c.cover < 0 || c.cover >= bo.emptyMax*shiftCoverMax {
 		return c
 	}
-	for _, d := range shiftOffsets {
+	// 2 つの条件のどちらかを満たす距離の上限（2 乗距離）。打ち切りにもそのまま使う
+	limit := math.Max(
+		math.Min(emptyDistCap, c.pieceDist),
+		math.Min(shiftEmptyLooseMax*emptyDistNorm, shiftEmptyLooseRatio*c.pieceDist))
+	for _, d := range shiftWindows {
 		sc := bo.br.ExtractCellShifted(bo.img, row, col, d.X, d.Y)
 		if sc == nil {
 			continue
 		}
 		full := [2][]float64{CellToInputFull(sc), CellToInputFull(Rotate180(sc))}
-		if e := kn.nearestEmpty(full); e < emptyDistCap && e < c.pieceDist {
+		if e := kn.nearestEmpty(full, limit); e < limit {
 			c.cat, c.shifted = CellEmpty, true
 			return c
 		}
